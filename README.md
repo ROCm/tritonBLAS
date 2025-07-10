@@ -98,7 +98,7 @@ As we work on supporting other BLAS and ML primitives and data types, we will up
 
 ## Contributors
 
-The official list of developers and contributors is available here: [CONTRIBUTORS](CONTRIBUTORS.md). We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.md) for details on how to set up your development environment and contribute to the project.
+The official list of developers and contributors is available here: [CONTRIBUTORS](docs/CONTRIBUTORS.md). We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.md) for details on how to set up your development environment and contribute to the project.
 
 ## Support
 
