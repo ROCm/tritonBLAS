@@ -26,20 +26,20 @@ class CustomBuildExt(build_ext):
         print("Cloning hipBLASLt...")
         subprocess.check_call([
             "git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
-            "--branch", "develop", "https://github.com/ROCm/hipBLASLt.git", "_origami"
+            "--branch", "develop", "https://github.com/ROCm/rocm-libraries.git", "_origami"
         ])
 
         # Use custom chdir context manager to run sparse-checkout
         with chdir("_origami"):
             subprocess.check_call([
                 "git", "sparse-checkout", "set",
-                "tensilelite/Tensile/Source/lib/source/analytical",
-                "tensilelite/Tensile/Utilities/origami",
-                "tensilelite/Tensile/Source/lib/include/Tensile/analytical"
+                "projects/hipblaslt/tensilelite/Tensile/Source/lib/source/analytical",
+                "projects/hipblaslt/tensilelite/Tensile/Utilities/origami",
+                "projects/hipblaslt/tensilelite/Tensile/Source/lib/include/Tensile/analytical"
             ])
 
         # Build the nested origami setup.py
-        origami_setup_path = os.path.join("_origami", "tensilelite", "Tensile", "Utilities", "origami")
+        origami_setup_path = os.path.join("_origami", "projects", "hipblaslt", "tensilelite", "Tensile", "Utilities", "origami")
         print(f"Building origami setup.py in {origami_setup_path}...")
         subprocess.check_call([sys.executable, "setup.py", "install"], cwd=origami_setup_path)
 
