@@ -1,7 +1,7 @@
 import itertools
-
 import origami
 
+from math import ceil
 
 class MatmulHeuristicResult:
     def __init__(
@@ -14,6 +14,7 @@ class MatmulHeuristicResult:
         element_size_out=32,
         MI_dim=None,
         mx_block_size=0,  # Number of MX datatype elements that share a scale
+        streamk=True
     ):
 
         # Instantiate hardare information object
@@ -36,6 +37,10 @@ class MatmulHeuristicResult:
         self.mx_block_size = mx_block_size
 
         self.config = self._prepare_config()
+        if streamk:
+            self.grid = self.compute_sk_grid()
+        else:
+            self.grid=self.hardware.N_CU
 
     def _infer_matrix_instruction_dimensions(self, element_size_A, element_size_B):
         """
@@ -154,3 +159,83 @@ class MatmulHeuristicResult:
 
     def get_config(self):
         return self.config
+
+    def get_grid(self):
+        return self.grid
+
+    def partial_tile_size(self, sk_grid: int) -> int:
+        """
+        Python equivalent of ContractionSolution::partialTileSize.
+
+        workspaceSizePerElemC = (element_size_out bits) / 8 → bytes per output element
+
+        tileSize = BLK_M * BLK_N * workspaceSizePerElemC
+        return tileSize * sk_grid
+        """
+        # get the macro-tile dims you already compute
+        BLK_M, BLK_N, _,GSIZE = self.get_config()
+
+        # bytes per C element
+        bytes_per_elem = self.element_size_out // 8
+
+        # size of one partial tile per WG
+        tile_size = BLK_M * BLK_N * bytes_per_elem
+
+        # scale by the number of partial‑tiles per WG
+        return tile_size * sk_grid
+
+    def compute_sk_grid(self):
+        """
+        Implements the dynamic‐grid mode logic
+        """
+        config=self.config
+        cu_count = self.hardware.N_CU
+        BLK_M = config[0]
+        BLK_N = config[1]
+        BLK_K = config[2]
+        # Fallback if no better fractional split is found
+        tiles = ceil(self.m/BLK_M) * ceil(self.n/BLK_N)
+        sk_grid = tiles
+        iters_per_tile = max(1, ceil(self.k/BLK_K))
+
+        # More tiles than CUs: try fractional splits to distribute work
+        if tiles > cu_count:
+            virt_cu_count = cu_count
+            #if size_mapping.CUOccupancy > 1:
+                #virt_cu_count *= size_mapping.CUOccupancy
+
+            # Try these fractional denominators in order
+            tile_fractions = [0.0, 1.0/2.0, 1.0/8.0, 1.0/5.0, 1.0/4.0, 1.0/3.0]
+            min_even_tiles = tiles / virt_cu_count
+
+            for frac in tile_fractions:
+                # Compute candidate grid with rounding
+                frac_grid = int((tiles / (min_even_tiles + frac)) + 0.5)
+
+                # Skip if this split leaves a remainder AND workspace is too large
+                if (tiles % frac_grid != 0 and
+                    self.partial_tile_size(frac_grid) > 128 * 1024 * 1024):
+                    continue
+
+                # Accept the first grid no larger than the virtual CU count
+                if frac_grid <= virt_cu_count:
+                    sk_grid = frac_grid
+                    break
+
+        # Fewer tiles than CUs: split along k-dimension up to some factor
+        elif tiles < cu_count:
+            split_factors = [8, 6, 4, 3, 2, 1]
+            for factor in split_factors:
+                split_grid = tiles * factor
+                iters_per_cu = iters_per_tile // factor
+
+                if split_grid <= cu_count and iters_per_cu >= 8:
+                    sk_grid = split_grid
+                    break
+
+        # Final check: if the chosen grid leaves a remainder AND
+        # workspace exceeds what the problem allows, fall back to no split
+        if (tiles % sk_grid != 0):
+            sk_grid = tiles
+
+        return sk_grid

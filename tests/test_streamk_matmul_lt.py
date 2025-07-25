@@ -61,7 +61,8 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB):
     selector = tritonblas.MatmulHeuristicResult(m, n, k, 
                     torch.finfo(A.dtype).bits, # Element Size A in bits 
                     torch.finfo(B.dtype).bits, # Element Size B in bits
-                    torch.finfo(C.dtype).bits # Element Size C in bits
+                    torch.finfo(C.dtype).bits, # Element Size C in bits,
+                    streamk=True
                 )
     tritonblas.streamk_matmul_lt(A, B, C, selector)
 
