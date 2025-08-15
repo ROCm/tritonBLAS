@@ -69,6 +69,7 @@ def bench_matmul(
     shuffle_benchmark=True,
     output_csv=None,
     write_csv_freq=100,
+    enable_streamk=False,
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -133,7 +134,7 @@ def bench_matmul(
         # leave below two for debug purpose.
         # matmul = lambda: tritonblas.matmul_lt(A, B, C, selector, True) # Stream-K
         # matmul = lambda: tritonblas.matmul_lt(A, B, C, selector, False) # Persistent
-        matmul = lambda: tritonblas.matmul(A, B, C) # Persistent
+        matmul = lambda: tritonblas.matmul(A, B, C, enable_streamk)
         ms = triton.testing.do_bench(matmul, warmup=20, rep=20)
         perf = gflops(ms)
 
@@ -164,6 +165,7 @@ def bench_matmul(
             "us": ms / 1000,
             "alpha": 1,
             "beta": 0,
+            "enable_streamk": enable_streamk,
         }
         benchmark_results.append(metrics)
 
@@ -199,6 +201,7 @@ def write_csv(filename: str, results):
         "us",
         "alpha",
         "beta",
+        "enable_streamk",
     ]
     with open(filename, mode="w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -247,6 +250,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Print detailed information for each benchmark.",
     )
+    parser.add_argument(
+        "--enable-streamk",
+        action="store_true",
+        help="Enable Stream-K mode for matrix multiplication (default: False for persistent mode).",
+    )
     args = parser.parse_args()
 
     benchmark_results = bench_matmul(
@@ -256,6 +264,7 @@ if __name__ == "__main__":
         output_csv=args.output_csv,
         write_csv_freq=args.csv_write_freq,
         print_verbose=args.print_verbose,
+        enable_streamk=args.enable_streamk,
     )
 
     if args.output_csv:
