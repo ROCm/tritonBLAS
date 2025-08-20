@@ -33,9 +33,9 @@ class CustomBuildExt(build_ext):
         with chdir("_origami"):
             subprocess.check_call([
                 "git", "sparse-checkout", "set",
-                "projects/hipblaslt/tensilelite/Tensile/Source/lib/source/analytical",
+                "projects/hipblaslt/tensilelite/src/analytical",
                 "projects/hipblaslt/tensilelite/Tensile/Utilities/origami",
-                "projects/hipblaslt/tensilelite/Tensile/Source/lib/include/Tensile/analytical"
+                "projects/hipblaslt/tensilelite/include/Tensile/analytical"
             ])
 
         # Build the nested origami setup.py
