@@ -101,6 +101,23 @@ class MatmulHeuristicResult:
             # F4F6 -> Unsupported on MI300X
             if max(element_size_A, element_size_B) < 8:
                 raise ValueError("MI300X doesn't support F4/F6")
+
+        if self.hardware.N_CU == 228:
+            # FP32
+            if max(element_size_A, element_size_B) == 32:
+                MI_dim = [16, 16, 4]
+            # FP16/BF16
+            if max(element_size_A, element_size_B) == 16:
+                MI_dim = [16, 16, 16]
+            # F8
+            if max(element_size_A, element_size_B) == 8:
+                MI_dim = [16, 16, 32]
+                self.block_mn_range = self.block_mn_range + [512]
+                self.block_k_range = self.block_k_range + [128, 256]
+
+            # F4F6 -> Unsupported on MI300A
+            if max(element_size_A, element_size_B) < 8:
+                raise ValueError("MI300A doesn't support F4/F6")
         # Architecture Detected is not valid
         if MI_dim == None:
             raise ValueError(
