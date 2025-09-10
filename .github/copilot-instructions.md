@@ -18,7 +18,7 @@ pip3 install -e .
 export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
 ```
 
-**TIMING: Docker build takes 7-10 minutes. NEVER CANCEL. Set timeout to 15+ minutes.**
+**TIMING: Docker build typically takes 7-10 minutes. NEVER CANCEL. Set timeout to at least 15 minutes to allow for slower machines, network delays, or dependency fetching.**
 
 #### Local Development (Advanced Users Only)
 **WARNING: Local installation often fails due to triton/CUDA dependencies. Use Docker unless you have a specific need.**
