@@ -91,7 +91,7 @@ python3 example_matmul_lt.py
 
 2. **Test your changes in Docker environment:**
    ```bash
-   docker compose up --build -d  # 7-10 minutes, NEVER CANCEL
+   docker compose up --build -d  # Starts build in background (7-10 minutes). Command returns immediately due to -d (detached mode); wait for build to finish before proceeding. NEVER CANCEL.
    docker attach tritonBLAS-dev
    pip3 install -e .  # 2-5 minutes in container
    ```
