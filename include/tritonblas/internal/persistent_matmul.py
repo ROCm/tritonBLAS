@@ -2,6 +2,7 @@ import triton
 import triton.language as tl
 import torch
 
+from util import chiplet_transform
 
 @triton.jit()
 def persistent_matmul(
@@ -31,7 +32,7 @@ def persistent_matmul(
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+        pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
