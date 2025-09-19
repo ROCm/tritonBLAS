@@ -92,7 +92,7 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
     selector = tritonblas.MatmulHeuristicResult(m, n, k, A.dtype, B.dtype, C.dtype)
     tritonblas.matmul_lt(A, B, C, selector, enable_streamk)
 
-    # Check correctnes: Fix tolerance later
+    # Check correctness:
     torch_c = torch.matmul(A, B)
     torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1e-2, rtol=1e-3)
     size_str = f'SIZE M: {m}, N: {n}, K: {k}, trans: {transA}{transB}'
@@ -289,9 +289,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--checkcorrectness",
-        action='store_true',
+        action="store_true",
         default=False,
-        help="Whether check result correctness",
+        help="Check result correctness",
     )
     parser.add_argument(
         "--enable-streamk",
