@@ -61,6 +61,42 @@ def init_by_size_and_type(size, dtype, init_type):
     else:
         raise ValueError(f"Unsupported init_type: {init_type}")
 
+def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
+
+    # Adjust dimensions for transposition and apply tensor.T if needed
+    if transA == "T":
+        A_size = (m, k)  # A is MxK
+    else:
+        A_size = (k, m)  # A is KxM (we will later transpose it with .T)
+
+    if transB == "T":
+        B_size = (k, n)  # B is KxN
+    else:
+        B_size = (n, k)  # B is NxK (we will later transpose it with .T)
+
+    A = torch.randn(A_size, device="cuda", dtype=in_dtype)
+    B = torch.randn(B_size, device="cuda", dtype=in_dtype)
+
+    # Apply transpose on A or B if necessary (only needed for "N" case)
+    if transA == "N":
+        A = A.T  # Apply transpose to A if transA is "N"
+
+    if transB == "N":
+        B = B.T  # Apply transpose to B if transB is "N"
+
+    # Allocate Tensors
+    C = torch.zeros((m, n), device="cuda", dtype=out_dtype)
+    bias = torch.zeros((m,), device="cuda", dtype=out_dtype)
+
+    # Run TritonBLAS matmul
+    selector = tritonblas.MatmulHeuristicResult(m, n, k, A.dtype, B.dtype, C.dtype)
+    tritonblas.matmul_lt(A, B, C, selector, enable_streamk)
+
+    # Check correctnes: Fix tolerance later
+    torch_c = torch.matmul(A, B)
+    torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1e-2, rtol=1e-3)
+    size_str = f'SIZE M: {m}, N: {n}, K: {k}, trans: {transA}{transB}'
+    print(f'{size_str} Correct✅')
 
 def bench_matmul(
     input_yaml: str,
@@ -172,6 +208,10 @@ def bench_matmul(
                 write_csv(output_csv, benchmark_results)
         count = count + 1
 
+        if args.checkcorrectness:
+            print("correctness: ", end=" ", flush=True)
+            test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk)
+
     return benchmark_results
 
 
@@ -246,6 +286,12 @@ if __name__ == "__main__":
         "--print-verbose",
         action="store_true",
         help="Print detailed information for each benchmark.",
+    )
+    parser.add_argument(
+        "--checkcorrectness",
+        action='store_true',
+        default=False,
+        help="Whether check result correctness",
     )
     parser.add_argument(
         "--enable-streamk",
