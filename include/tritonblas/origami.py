@@ -40,7 +40,7 @@ class MatmulHeuristicResult:
         # Instantiate hardare information object
         self.hardware = origami.get_hardware_for_device(0)
         self.block_mn_range = [16, 32, 64, 128, 256]
-        self.block_k_range = [16, 32, 64]
+        self.block_k_range = [16, 32, 64, 128, 256, 512]
 
         self.element_size_A = torch.finfo(a_dtype).bits
         self.element_size_B = torch.finfo(b_dtype).bits
