@@ -29,6 +29,7 @@ def streamk_matmul(
     STREAMK_TILES: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
+    CACHE_MODIFIER: tl.constexpr,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -83,10 +84,10 @@ def streamk_matmul(
                 a = tl.load(tl.multiple_of(A_BASE, (16, 1)))
 
             if stride_bk == 1:
-                b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
+                b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER)
             else:
-                b = tl.load(tl.multiple_of(B_BASE, (1, 16)))
-            acc += tl.dot(a, b)
+                b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER)
+            acc += tl.dot(a, b, input_precision="ieee")
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
 
@@ -105,8 +106,8 @@ def streamk_matmul(
             else:
                 B_BASE = tl.multiple_of(B_BASE, (1, 16))
             a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
-            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
-            acc += tl.dot(a, b)
+            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER)
+            acc += tl.dot(a, b, input_precision="ieee")
 
         c = acc.to(C.type.element_ty)
         if BIAS:
@@ -177,13 +178,13 @@ def streamk_matmul(
         for current_iter in range(start_iter, end_iter):
             if EVEN_K:
                 a = tl.load(A_BASE)
-                b = tl.load(B_BASE)
+                b = tl.load(B_BASE, cache_modifier=CACHE_MODIFIER)
             else:
                 global_k_offset = (current_iter % iters_per_tile) * BLOCK_SIZE_K
                 k_mask = global_k_offset + rk < K
                 a = tl.load(A_BASE, mask=k_mask[None, :], other=0.0)
-                b = tl.load(B_BASE, mask=k_mask[:, None], other=0.0)
-            acc += tl.dot(a, b)
+                b = tl.load(B_BASE, mask=k_mask[:, None], other=0.0, cache_modifier=CACHE_MODIFIER)
+            acc += tl.dot(a, b, input_precision="ieee")
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
 
