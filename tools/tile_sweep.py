@@ -74,7 +74,7 @@ def run_tritonblas_matmul(
 
     # Benchmark
     matmul_fn = lambda: tritonblas.matmul_lt(A, B, C, selector, False)
-    elapsed_ms = triton.testing.do_bench(matmul_fn, warmup=10, rep=10)
+    elapsed_ms = triton.testing.do_bench(matmul_fn, warmup=20, rep=200)
     tflops = perf_ms(elapsed_ms, m, n, k)
     return tflops, elapsed_ms, config
 
@@ -82,7 +82,7 @@ def run_tritonblas_matmul(
 def sweep_macro_tiles_tritonblas(m, n, k, a_dtype, b_dtype, c_dtype, transA, transB):
     # Candidate tile sizes
     block_mn_range = [16, 32, 64, 128, 256]
-    block_k_range = [16, 32, 64]
+    block_k_range = [16, 32, 64, 128, 256, 512]
     valid_tiles = list(itertools.product(block_mn_range, block_mn_range, block_k_range))
 
     # Default heuristic (for comparison)
@@ -91,7 +91,8 @@ def sweep_macro_tiles_tritonblas(m, n, k, a_dtype, b_dtype, c_dtype, transA, tra
     )
     heur_config = default_selector.get_config()
     heur_tile = (heur_config[0], heur_config[1], heur_config[2])
-    print(f"Default heuristic selected tile: {heur_tile}\n")
+    gsize_m = heur_config[3]
+    print(f"Default heuristic selected tile and gsize_m: {heur_tile} {gsize_m}\n")
 
     results = []
     best_tflops = 0.0
