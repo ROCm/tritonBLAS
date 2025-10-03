@@ -27,6 +27,8 @@ def persistent_matmul(
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
+    CACHE_MODIFIER_A: tl.constexpr,
+    CACHE_MODIFIER_B: tl.constexpr,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
 ):
     pid = tl.program_id(0)
@@ -75,14 +77,14 @@ def persistent_matmul(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for k in range(0, loop_k):
             if stride_ak == 1:
-                a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
+                a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_A)
             else:
-                a = tl.load(tl.multiple_of(A_BASE, (16, 1)))
+                a = tl.load(tl.multiple_of(A_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_A)
 
             if stride_bk == 1:
-                b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
+                b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_B)
             else:
-                b = tl.load(tl.multiple_of(B_BASE, (1, 16)))
+                b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
 
             acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
             A_BASE += BLOCK_SIZE_K * stride_ak
@@ -102,8 +104,8 @@ def persistent_matmul(
                 B_BASE = tl.multiple_of(B_BASE, (16, 1))
             else:
                 B_BASE = tl.multiple_of(B_BASE, (1, 16))
-            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
-            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
+            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
+            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
             acc += tl.dot(a, b)
 
         c = acc.to(C.type.element_ty)

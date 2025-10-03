@@ -56,6 +56,9 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
+    CACHE_MODIFIER_A= None
+    CACHE_MODIFIER_B= None
 
     # Run in Data-parallel mode.
     grids = total_tiles
@@ -84,6 +87,8 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
         NUM_XCDS=8,
         BIAS=False,
         EVEN_K=even_k,
+        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -123,6 +128,9 @@ def streamk_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
+    CACHE_MODIFIER_A= None
+    CACHE_MODIFIER_B= None
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid
@@ -164,6 +172,8 @@ def streamk_matmul_lt(
         STREAMK_TILES=total_tiles_streamk,
         BIAS=False,
         EVEN_K=even_k,
+        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
