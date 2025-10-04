@@ -6,6 +6,7 @@ import triton
 import random
 import tritonblas
 import csv
+from typing import Optional, Tuple, Union
 from tqdm import tqdm
 
 
@@ -28,38 +29,96 @@ def str_to_dtype(dtype_str: str) -> torch.dtype:
             f"{', '.join([attr for attr in dir(torch) if isinstance(getattr(torch, attr), torch.dtype)])}"
         )
 
+def _ensure_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    if isinstance(dtype, str):
+        return getattr(torch, dtype.replace("torch.", ""))
+    raise TypeError(f"Unsupported dtype spec: {dtype}")
 
-def init_by_size_and_type(size, dtype, init_type):
+# supports torch.float8_* and, if present, torch.bfloat8
+def _is_float8_like(dtype: torch.dtype) -> bool:
+    s = str(dtype)
+    return ("float8" in s) or ("bfloat8" in s) 
+
+def _is_int8(dtype: torch.dtype) -> bool:
+    return dtype == torch.int8
+
+def init_by_size_and_type(
+    size: Tuple[int, int],
+    dtype: Union[torch.dtype, str],
+    init_type: str,
+    *,
+    quantize: Optional[str] = None,   # None | "auto" | "fp8" | "int8"
+    scale_axis: Optional[int] = None, # e.g., A(M,K) per-row over K -> 1; B(K,N) per-col over K -> 0
+    min_scale: float = 1e-8,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
-    Initialize a tensor of the given size and type using the specified initialization method.
+    Initialize a tensor and (optionally) quantize to FP8/BF8 or INT8 with per-axis scale.
 
-    Args:
-        size (tuple): The size of the tensor to be initialized.
-        dtype (torch.dtype): The data type of the tensor.
-        init_type (str): The initialization method ('hpl', 'trig_float', 'zeros', 'randn').
+    IMPORTANT:
+    - For FP16/BF16 (or any non-8-bit dtype), the default `quantize=None` (or `quantize="auto"`)
+      simply returns the initialized tensor cast to that dtype — identical to our original behavior.
+    - Only when dtype is float8-like or int8 (or you force `quantize="fp8"/"int8"`),  we return (q, scale).
 
     Returns:
-        torch.Tensor: The initialized tensor.
+      * If no quantization is performed: Tensor[dtype]
+      * If quantization is performed: (q, scale) where scale is float32 and keeps the reduced dim
+        (e.g., (M,1) if axis=1 or (1,N) if axis=0).
     """
+    dtype = _ensure_dtype(dtype)
+    device = "cuda"
+
+    # 1) Initialize in fp32 for stable scale computation
     if init_type == "hpl":
-        return torch.empty(size, device="cuda", dtype=dtype).uniform_(-0.5, 0.5)
+        base = torch.empty(size, device=device, dtype=torch.float32).uniform_(-0.5, 0.5)
     elif init_type == "trig_float":
         M, N = size
-        return (
-            torch.reshape(
-                torch.arange(0, M * N, device="cuda", dtype=torch.float32), (M, N)
-            )
-            .sin()
-            .to(dtype=dtype)
-        )
+        base = torch.reshape(
+            torch.arange(0, M * N, device=device, dtype=torch.float32), (M, N)
+        ).sin()
     elif init_type == "zeros":
-        return torch.zeros(size, dtype=dtype, device="cuda")
+        base = torch.zeros(size, dtype=torch.float32, device=device)
     elif init_type == "randn":
-        # Need to generate and then cast to support f8 (randn not supported for f8)
-        A = torch.randn(size, dtype=torch.float32, device="cuda")
-        return A.to(dtype)
+        base = torch.randn(size, dtype=torch.float32, device=device)
     else:
         raise ValueError(f"Unsupported init_type: {init_type}")
+
+    # 2) Decide quantization mode
+    mode = quantize
+    if mode is None:
+        # Original behavior: just cast and return
+        return base.to(dtype)
+    if mode == "auto":
+        if _is_float8_like(dtype):
+            mode = "fp8"
+        elif _is_int8(dtype):
+            mode = "int8"
+        else:
+            # Not an 8-bit target → behave like original
+            return base.to(dtype)
+
+    # From here, we are quantizing; need scale_axis
+    if scale_axis is None:
+        raise ValueError("quantize requires scale_axis (0 or 1).")
+
+    # 3) Per-axis amax → scale
+    amax = torch.amax(base.abs(), dim=scale_axis, keepdim=True).to(torch.float32)
+
+    if mode == "fp8":
+        max_val = float(torch.finfo(dtype).max)   # e.g., e4m3/e5m2
+        scale = torch.clamp(amax / max_val, min=min_scale)
+        q = (base / scale).to(dtype)
+        return q, scale
+
+    if mode == "int8":
+        qmax = 127.0  # symmetric int8 (zero_point = 0)
+        scale = torch.clamp(amax / qmax, min=min_scale)
+        q_fp = base / scale
+        q = torch.round(q_fp).clamp_(-127, 127).to(torch.int8)
+        return q, scale
+
+    raise ValueError(f"Unsupported quantize mode: {mode}")
 
 def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
 
