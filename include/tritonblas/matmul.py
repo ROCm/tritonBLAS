@@ -58,8 +58,8 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
     mfmaInstrSize = 16
     kpack = 1
     #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
-    CACHE_MODIFIER_A= None
-    CACHE_MODIFIER_B= None
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
 
     # Run in Data-parallel mode.
     grids = total_tiles
@@ -136,8 +136,8 @@ def streamk_matmul_lt(
     mfmaInstrSize = 16
     kpack = 1
     #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
-    CACHE_MODIFIER_A= None
-    CACHE_MODIFIER_B= None
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid
@@ -224,3 +224,73 @@ def matmul(
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
     else:
         return persistent_matmul_lt(a, b, c, selector)
+
+def persistent_matmul_a8w8_lt(a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector):
+    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = total_tiles
+    even_k = K % BLK_K == 0
+
+    # TODO: Separate these configs.
+    # basica configs for most of compute bound sizes
+    # TODO: set these values analytically?
+    num_stages = 2
+    num_warps = 8
+    waves_per_eu = 0
+    mfmaInstrSize = 16
+    kpack = 1
+
+    # Run in Data-parallel mode.
+    grids = total_tiles
+
+    # TODO: Support other matmul algs.
+    kk = persistent_matmul_a8w8[(grids,)](
+        a,
+        b,
+        c,
+        a_scale_ptr,
+        b_scale_ptr,
+        None,  # TODO: Enable bias.
+        M,
+        N,
+        K,
+        a.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        0,  # TODO: Enable bias stride.
+        stride_ak=a.stride(1),
+        stride_bk=b.stride(0),
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=total_programs,
+        NUM_XCDS=8,
+        BIAS=False,
+        EVEN_K=even_k,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu,
+        matrix_instr_nonkdim=mfmaInstrSize,
+        kpack=kpack,
+    )
+
+    return c
+
+def smatmul_lt(
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+):
+    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+
+    if enable_streamk:
+        return streamk_matmul_lt(a, b, c, selector)
+    else:
+        return persistent_matmul_a8w8_lt(a, b, c, a_scale, b_scale, selector)
