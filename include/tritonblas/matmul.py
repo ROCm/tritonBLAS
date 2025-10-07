@@ -128,6 +128,9 @@ def persistent_matmul_a8w8_lt(a: torch.Tensor, b: torch.Tensor, a_scale: torch.T
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
 
     # Run in Data-parallel mode.
     grids = total_tiles
@@ -158,6 +161,8 @@ def persistent_matmul_a8w8_lt(a: torch.Tensor, b: torch.Tensor, a_scale: torch.T
         NUM_XCDS=8,
         BIAS=False,
         EVEN_K=even_k,
+        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -257,7 +262,7 @@ def streamk_matmul_lt(
 
     return c
 
-def streamk_matmul_a8_w8_lt(
+def streamk_matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, sk_grid: Optional[int] = None
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
@@ -304,7 +309,7 @@ def streamk_matmul_a8_w8_lt(
         locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
         P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
 
-    kk = streamk_matmul[(grids,)](
+    kk = streamk_matmul_a8w8[(grids,)](
         a,
         b,
         c,
