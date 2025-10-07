@@ -3,7 +3,7 @@ import triton.language as tl
 
 
 @triton.jit()
-def streamk_matmul(
+def streamk_matmul_a8w8(
     A,
     B,
     C,
