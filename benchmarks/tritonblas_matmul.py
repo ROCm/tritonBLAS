@@ -42,6 +42,12 @@ def _is_float8_like(dtype: torch.dtype) -> bool:
 def _is_int8(dtype: torch.dtype) -> bool:
     return dtype == torch.int8
 
+def _is_quantized(init_result):
+    """Normalize return from init_by_size_and_type: either Tensor or (Tensor, scale)."""
+    if isinstance(init_result, tuple) and len(init_result) == 2:
+        return init_result[0], init_result[1]
+    return init_result, None
+
 def init_by_size_and_type(
     size: Tuple[int, int],
     dtype: Union[torch.dtype, str],
@@ -169,6 +175,8 @@ def bench_matmul(
     output_csv=None,
     write_csv_freq=100,
     enable_streamk=False,
+    quantize_mode: str = "none",       # "auto" (fp8/int8 quantize; fp16/bf16 no-quant), or "fp8"/"int8"/None
+    scale_mode: str = "none",
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -205,24 +213,62 @@ def bench_matmul(
         else:
             B_size = (n, k)  # B is NxK (we will later transpose it with .T)
 
+        # Build logical shapes directly: A:(M,K), B:(K,N)
+        quantize_mode = "auto"  # fp8/int8 -> (q,scale); others -> tensor
+
+        # A: per-row over K -> (M,1)
+        if scale_mode == "per_axis":
+            A_init = init_by_size_and_type(
+                A_size, in_dtype, init_type,
+                quantize=quantize_mode, scale_mode="per_axis", scale_axis=1
+            )
+        else:
+            A_init = init_by_size_and_type(
+                A_size, in_dtype, init_type,
+                quantize=quantize_mode, scale_mode="per_tensor"
+            )
+        A, scaleA = _is_quantized(A_init)
+
+        # B: per-column over K -> (1,N)
+        if scale_mode == "per_axis":
+            B_init = init_by_size_and_type(
+                B_size, in_dtype, init_type,
+                quantize=quantize_mode, scale_mode="per_axis", scale_axis=0
+            )
+        else:
+            B_init = init_by_size_and_type(
+                B_size, in_dtype, init_type,
+                quantize=quantize_mode, scale_mode="per_tensor"
+            )
+        B, scaleB = _is_quantized(B_init)
+
         # Initialize tensors with the appropriate dimensions
-        A = init_by_size_and_type(A_size, in_dtype, init_type)
-        B = init_by_size_and_type(B_size, in_dtype, init_type)
+#        A = init_by_size_and_type(A_size, in_dtype, init_type)
+#        B = init_by_size_and_type(B_size, in_dtype, init_type)
 
         # Apply transpose on A or B if necessary (only needed for "N" case)
         if transA == "N":
             A = A.T  # Apply transpose to A if transA is "N"
+            scaleA = None if scaleA is None else scaleA.T.contiguous()
 
         if transB == "N":
             B = B.T  # Apply transpose to B if transB is "N"
+            scaleB = None if scaleB is None else scaleB.T.contiguous()
 
         C = torch.zeros((m, n), device="cuda", dtype=out_dtype)
 
         # Compute performance metrics
         flops = lambda: 2 * m * n * k * 1e-12
         gflops = lambda ms: 2 * m * n * k * 1e-9 / (ms * 1e-3)
-        bytes_fn = lambda: (A.element_size() * ((m * k) + (n * k))) + (
-            (m * n) * C.element_size()
+#        bytes_fn = lambda: (A.element_size() * ((m * k) + (n * k))) + (
+#            (m * n) * C.element_size()
+#        )
+        bytes_fn = lambda: (
+            A.numel() * A.element_size()
+            + B.numel() * B.element_size()
+            + C.numel() * C.element_size()
+            + (0 if scaleA is None else scaleA.numel() * scaleA.element_size())
+            + (0 if scaleB is None else scaleB.numel() * scaleB.element_size())
         )
 
         # Build a tritonBLAS selector config and launch matmul_lt
@@ -230,7 +276,13 @@ def bench_matmul(
             m, n, k, A.dtype, B.dtype, C.dtype
         )
         config = selector.get_config()
-        matmul = lambda: tritonblas.matmul(A, B, C, enable_streamk=enable_streamk)
+        if _is_float8_like(A.dtype) or _is_int8(A.dtype):
+            # fp8/int8 path (expects scales from init_by_size_and_type)
+            matmul = lambda: tritonblas.matmul_a8w8(A, B, scaleA, scaleB, C, enable_streamk=enable_streamk)
+        else:
+            # fp16/bf16 path
+            matmul = lambda: tritonblas.matmul(A, B, C, enable_streamk=enable_streamk)
+
         ms = triton.testing.do_bench(matmul, warmup=20, rep=20)
         perf = gflops(ms)
 
@@ -361,6 +413,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable Stream-K mode for matrix multiplication (default: False for persistent mode).",
     )
+    parser.add_argument(
+        "--quantize_mode",
+        type=str,
+        default="none",
+        choices=["auto", "fp8", "int8", "none"]
+    )
+    parser.add_argument(
+       "--scale_mode",
+       type=str, default="none",
+       choices=["per_axis", "per_tensor", "none"]
+    )
+
     args = parser.parse_args()
 
     benchmark_results = bench_matmul(
@@ -371,6 +435,8 @@ if __name__ == "__main__":
         write_csv_freq=args.csv_write_freq,
         print_verbose=args.print_verbose,
         enable_streamk=args.enable_streamk,
+        quantize_mode=(None if args.quantize_mode == "none" else args.quantize_mode),
+        scale_mode=args.scale_mode,
     )
 
     if args.output_csv:
