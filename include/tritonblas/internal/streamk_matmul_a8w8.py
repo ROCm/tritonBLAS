@@ -117,7 +117,7 @@ def streamk_matmul_a8w8(
         rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
         A_scale = tl.load(A_scale_ptr + rm_A_scale)
         B_scale = tl.load(B_scale_ptr + rn_B_scale)
-        acc *= a_scale[:, None] * b_scale[None, :]
+        acc *= A_scale[:, None] * B_scale[None, :]
 
         c = acc.to(C.type.element_ty)
         if BIAS:
@@ -203,7 +203,7 @@ def streamk_matmul_a8w8(
         rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
         A_scale = tl.load(A_scale_ptr + rm_A_scale)
         B_scale = tl.load(B_scale_ptr + rn_B_scale)
-        acc *= a_scale[:, None] * b_scale[None, :]
+        acc *= A_scale[:, None] * B_scale[None, :]
 
         tile_iter = tile_id * iters_per_tile
 
