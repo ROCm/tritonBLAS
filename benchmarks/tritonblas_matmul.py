@@ -37,7 +37,7 @@ def _ensure_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
 
 def _is_float8_like(dtype: torch.dtype) -> bool:
     s = str(dtype)
-    return ("float8" in s) or ("bfloat8" in s)
+    return ("float8" in s)
 
 def _is_int8(dtype: torch.dtype) -> bool:
     return dtype == torch.int8
