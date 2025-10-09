@@ -10,6 +10,7 @@ import tritonblas
         (8192, 8192, 8192),
         (4864, 8192, 4160),
         (4096, 4096, 4096),
+        (512,2048,970132),
     ],
 )
 @pytest.mark.parametrize(
@@ -71,4 +72,5 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
 
     # Check correctnes: Fix tolerance later
     torch_c = torch.matmul(A, B)
+#    torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1e-2, rtol=1e-3)
     torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1, rtol=1)
