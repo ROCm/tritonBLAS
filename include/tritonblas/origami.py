@@ -42,9 +42,16 @@ class MatmulHeuristicResult:
         self.block_mn_range = [16, 32, 64, 128, 256]
         self.block_k_range = [16, 32, 64, 128, 256, 512]
 
-        self.element_size_A = torch.finfo(a_dtype).bits
-        self.element_size_B = torch.finfo(b_dtype).bits
-        self.element_size_out = torch.finfo(c_dtype).bits
+        # Helper function to get bits for both float and int dtypes
+        def get_dtype_bits(dtype):
+            try:
+                return torch.finfo(dtype).bits
+            except TypeError:
+                return torch.iinfo(dtype).bits
+        
+        self.element_size_A = get_dtype_bits(a_dtype)
+        self.element_size_B = get_dtype_bits(b_dtype)
+        self.element_size_out = get_dtype_bits(c_dtype)
         self.mi_dtype = dtype_to_str.get(c_dtype)
 
         # Infer Matrix Instruction Dimensions from datatypes
