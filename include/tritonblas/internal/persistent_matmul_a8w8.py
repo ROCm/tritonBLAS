@@ -89,7 +89,7 @@ def persistent_matmul_a8w8(
             else:
                 b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
 
-            acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+            acc += tl.dot(a, b, input_precision="ieee")
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
 
@@ -110,7 +110,7 @@ def persistent_matmul_a8w8(
                 B_BASE = tl.multiple_of(B_BASE, (1, 16))
             a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
             b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
-            acc += tl.dot(a, b)
+            acc += tl.dot(a, b, input_precision="ieee")
 
         # Create pointers for the scale tensors and load them
         rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
@@ -119,9 +119,13 @@ def persistent_matmul_a8w8(
         B_scale = tl.load(B_scale_ptr + rn_B_scale)
         acc *= A_scale[:, None] * B_scale[None, :]
 
-        c = acc.to(C.type.element_ty)
         if BIAS:
-            c += bias[:, None]
+            # Convert bias to float32 before adding to avoid type mismatch
+            bias_float = bias.to(tl.float32)
+            c = acc + bias_float[:, None]
+            c = c.to(C.type.element_ty)
+        else:
+            c = acc.to(C.type.element_ty)
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
