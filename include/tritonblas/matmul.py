@@ -42,6 +42,7 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
 
     BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
 
+
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     total_tiles = total_blocks_M * total_blocks_N
@@ -62,6 +63,11 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
 
     # Run in Data-parallel mode.
     grids = total_tiles
+
+    # Set chunk size to same area as L2 tiles.
+    num_xcds = 8
+    chunk_size = gsize_m * gsize_m
+    chunk_size = min(chunk_size, total_programs // num_xcds)
 
     # TODO: Support other matmul algs.
     kk = persistent_matmul[(grids,)](
@@ -84,7 +90,8 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
         BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=gsize_m,
         NUM_SMS=total_programs,
-        NUM_XCDS=8,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
         BIAS=False,
         EVEN_K=even_k,
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
@@ -146,6 +153,11 @@ def streamk_matmul_lt(
         locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
         P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
 
+    # Set chunk size to same area as L2 tiles.
+    num_xcds = 8
+    chunk_size = gsize_m * gsize_m
+    chunk_size = min(chunk_size, grids // num_xcds) 
+
     kk = streamk_matmul[(grids,)](
         a,
         b,
@@ -168,7 +180,8 @@ def streamk_matmul_lt(
         BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=gsize_m,
         NUM_SMS=grids,
-        NUM_XCDS=8,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
         STREAMK_TILES=total_tiles_streamk,
         BIAS=False,
         EVEN_K=even_k,
