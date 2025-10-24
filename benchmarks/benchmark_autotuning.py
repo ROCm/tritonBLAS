@@ -127,7 +127,7 @@ if __name__ == "__main__":
         0,
     )
     # Build configs for S0
-    full_list0 = tritonblas.MatmulHeuristicResult(S0, S0, S0)._get_valid_tiles()
+    full_list0 = tritonblas.MatmulHeuristicResult(S0, S0, S0, torch.float16, torch.float16, torch.float16)._get_valid_tiles()
     unique0 = {(m, n, k) for (m, n, k, *_) in full_list0}
     tiles0 = sorted(unique0)[::-1]
     configs0 = [
@@ -178,7 +178,7 @@ if __name__ == "__main__":
         )
 
         # get tiles & configs
-        fl = tritonblas.MatmulHeuristicResult(S, S, S)._get_valid_tiles()
+        fl = tritonblas.MatmulHeuristicResult(S, S, S, torch.float16, torch.float16, torch.float16)._get_valid_tiles()
         uniq = {(m, n, k) for (m, n, k, *_) in fl}
         tiles = sorted(uniq)[::-1]
         num_tiles = len(tiles)

@@ -73,6 +73,21 @@ class MatmulHeuristicResult:
             sizes are not compatible with the detected hardware.
         """
         MI_dim = None
+        # gfx1100
+        if self.hardware.N_CU == 96:  # TODO: fill actual CU count
+            # If gfx1100 matches gfx950 MFMA shapes:
+            if max(element_size_A, element_size_B) == 32:
+                MI_dim = [16, 16, 4]
+            if max(element_size_A, element_size_B) == 16:
+                MI_dim = [16, 16, 32]
+            if max(element_size_A, element_size_B) <= 8:
+                MI_dim = [16, 16, 128]
+            # If gfx1100 adds larger K for 8-bit (example):
+            # if max(element_size_A, element_size_B) <= 8:
+            #     MI_dim = [16, 16, 256]  # uncomment if new instruction exists
+            # Optional: expand search space if hardware benefits
+            # self.block_mn_range += [512]
+            # self.block_k_range += [128, 256]
         # gfx950
         if self.hardware.N_CU == 256:
             # FP32
@@ -104,7 +119,7 @@ class MatmulHeuristicResult:
         # Architecture Detected is not valid
         if MI_dim == None:
             raise ValueError(
-                f"No Valid Matrix Instruction integrated for {element_size_A}-bit or {element_size_B}-bit datatypes"
+                f"No Valid Matrix Instruction integrated for {element_size_A}-bit or {element_size_B}-bit datatypes with {self.hardware.N_CU} CUs."
             )
         return MI_dim
 

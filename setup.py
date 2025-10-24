@@ -26,7 +26,7 @@ class CustomBuildExt(build_ext):
         print("Cloning hipBLASLt...")
         subprocess.check_call([
             "git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
-            "--branch", "users/ibrahimw1/origami-standalone", "https://github.com/ROCm/rocm-libraries.git", "_origami"
+            "--branch", "users/tianwyan/navi_gemm", "https://github.com/ROCm/rocm-libraries.git", "_origami"
         ])
 
         # Use custom chdir context manager to run sparse-checkout
