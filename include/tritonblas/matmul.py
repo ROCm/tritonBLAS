@@ -5,6 +5,7 @@ import functools
 import time
 from .internal.persistent_matmul import persistent_matmul
 from .internal.streamk_matmul import streamk_matmul
+from .internal.fp4_matmul import fp4_matmul
 from .origami import MatmulHeuristicResult
 from typing import Dict, Tuple, Optional
 
@@ -224,3 +225,89 @@ def matmul(
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
     else:
         return persistent_matmul_lt(a, b, c, selector)
+
+
+def matmul_fp4(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    block_m: int = 128,
+    block_n: int = 256,
+    block_k: int = 512,
+    group_size_m: int = 8,
+):
+    """
+    FP4 matrix multiplication: C = A @ B
+    
+    Args:
+        a: Input matrix A in FP4 format (M, K//2), packed 2 elements per uint8
+        b: Input matrix B in FP4 format (N, K//2), packed 2 elements per uint8
+        c: Output matrix C (M, N) in bfloat16 or float16
+        a_scales: Scales for A in e8m0 format (M, K // 32)
+        b_scales: Scales for B in e8m0 format (N, K // 32)
+        block_m: Block size for M dimension
+        block_n: Block size for N dimension
+        block_k: Block size for K dimension (must be multiple of 64 for FP4)
+        group_size_m: Group size for M dimension tiling
+    
+    Returns:
+        Output matrix C
+    """
+    # Get actual dimensions (accounting for packing)
+    M = a.shape[0]
+    K = a.shape[1] * 2  # Unpacked K dimension
+    N = b.shape[0]  # B has shape (N, K//2)
+    
+    # Verify dimensions are compatible
+    assert b.shape[1] * 2 == K, f"Incompatible Dimensions: A has K={K}, B has K={b.shape[1] * 2}"
+    
+    # Transpose B to match kernel expectations (kernel expects B as K x N)
+    b = b.T
+    
+    # Ensure block_k is appropriate for FP4 (must be multiple of 64)
+    assert block_k % 64 == 0, "BLOCK_K must be multiple of 64 for FP4"
+    
+    total_blocks_M = triton.cdiv(M, block_m)
+    total_blocks_N = triton.cdiv(N, block_n)
+    total_tiles = total_blocks_M * total_blocks_N
+    
+    # Set chunk size to same area as L2 tiles
+    num_xcds = 8
+    chunk_size = group_size_m * group_size_m
+    chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
+    
+    grid = (total_tiles,)
+    
+    fp4_matmul[grid](
+        a,
+        b,
+        c,
+        a_scales,
+        b_scales,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        a_scales.stride(0),
+        a_scales.stride(1),
+        b_scales.stride(0),
+        b_scales.stride(1),
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+        GROUP_SIZE_M=group_size_m,
+        NUM_SMS=total_tiles,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        num_stages=2,
+        num_warps=8,
+    )
+    
+    return c
