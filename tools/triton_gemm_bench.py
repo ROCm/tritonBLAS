@@ -90,30 +90,56 @@ def get_tuning_space_with_selector(M, N, K, dtype_a, dtype_b, dtype_c, num_cus):
     This dramatically reduces tuning space from ~40,000 to ~500 configs!
     """
     from tritonblas.origami import MatmulHeuristicResult
-    
+
     # Get optimal tile configuration from selector
     selector = MatmulHeuristicResult(M, N, K, dtype_a, dtype_b, dtype_c, streamk=False)
     BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
-    
+
     # Only tune these parameters
     num_warps_range = [4, 8, 16]
     num_stage_range = [2, 3]
     waves_per_eu_range = [0, 1, 2, 4]
     matrix_instr_nonkdim_range = [16, 32]
     kpack_range = [1]
-    
+
     # CHUNK_SIZE options
     chunk_size_range = [16, 32, 64, min(gsize_m * gsize_m, 128)]
-    
+
+    # Get element sizes for shared memory calculation
+    dtype_to_bytes = {
+        torch.float16: 2,
+        torch.bfloat16: 2,
+        torch.float32: 4,
+        torch.float8_e4m3fn: 1 if hasattr(torch, 'float8_e4m3fn') else 2,
+    }
+    elemBytes_a = dtype_to_bytes.get(dtype_a, 2)
+    elemBytes_b = dtype_to_bytes.get(dtype_b, 2)
+
+    # Get hardware limit
+    driver = triton.runtime.driver.active
+    max_shared = driver.utils.get_device_properties(driver.get_current_device())["max_shared_mem"]
+
     configs = []
     space = itertools.product(
         num_warps_range, num_stage_range, waves_per_eu_range,
         matrix_instr_nonkdim_range, kpack_range, chunk_size_range
     )
-    
+
     for instance in space:
         num_warps, num_stages, waves_per_eu, matrix_instr_nonkdim, kpack, chunk_size = instance
-        
+
+        # Check shared memory constraint (same logic as prune_configs)
+        LDSA = BLK_K * BLK_M * elemBytes_a
+        LDSB = BLK_K * BLK_N * elemBytes_b
+        if num_stages <= 1:
+            LDS = max(LDSA, LDSB)
+        else:
+            LDS = (LDSA + LDSB) * (num_stages - 1)
+
+        # Skip configs that exceed shared memory limit
+        if LDS > max_shared:
+            continue
+
         configs.append({
             'BLOCK_SIZE_M': BLK_M,      # From selector
             'BLOCK_SIZE_N': BLK_N,      # From selector
@@ -127,9 +153,8 @@ def get_tuning_space_with_selector(M, N, K, dtype_a, dtype_b, dtype_c, num_cus):
             'kpack': kpack,             # TUNE
             'CHUNK_SIZE': chunk_size,   # TUNE
         })
-    
-    return configs
 
+    return configs
 
 def prune_configs(M, N, K, configs, elemBytes_a, elemBytes_b):
     pruned_configs = []
