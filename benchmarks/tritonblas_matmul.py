@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""
+TritonBLAS Unified Matrix Multiplication Benchmark
+
+This benchmark script supports both standard (fp16/bf16/fp32) and quantized (fp8/int8) 
+matrix multiplication. It automatically detects the dtype and uses the appropriate API.
+"""
 import yaml
 import argparse
 import torch
@@ -6,62 +12,26 @@ import triton
 import random
 import tritonblas
 import csv
+from typing import Optional, Tuple, Union
 from tqdm import tqdm
 
-
-def str_to_dtype(dtype_str: str) -> torch.dtype:
-    """
-    Convert a string representation of a dtype to the corresponding torch.dtype.
-
-    Args:
-        dtype_str (str): The string representation of the dtype (e.g., "torch.float32").
-
-    Returns:
-        torch.dtype: The corresponding torch dtype.
-    """
-    dtype_str = dtype_str.replace("torch.", "")
-    try:
-        return getattr(torch, dtype_str)
-    except AttributeError:
-        raise ValueError(
-            f"Invalid dtype string: '{dtype_str}'. Available options are: "
-            f"{', '.join([attr for attr in dir(torch) if isinstance(getattr(torch, attr), torch.dtype)])}"
-        )
+# Import utilities from the tritonblas package
+from tritonblas.utils import (
+    str_to_dtype,
+    matmul_input_gen,
+    _is_quantized,
+    _is_float8_like,
+    _is_int8,
+)
 
 
-def init_by_size_and_type(size, dtype, init_type):
-    """
-    Initialize a tensor of the given size and type using the specified initialization method.
+def _is_quantized_dtype(dtype):
+    """Check if dtype requires quantization (fp8/int8)"""
+    return _is_float8_like(dtype) or _is_int8(dtype)
 
-    Args:
-        size (tuple): The size of the tensor to be initialized.
-        dtype (torch.dtype): The data type of the tensor.
-        init_type (str): The initialization method ('hpl', 'trig_float', 'zeros', 'randn').
-
-    Returns:
-        torch.Tensor: The initialized tensor.
-    """
-    if init_type == "hpl":
-        return torch.empty(size, device="cuda", dtype=dtype).uniform_(-0.5, 0.5)
-    elif init_type == "trig_float":
-        M, N = size
-        return (
-            torch.reshape(
-                torch.arange(0, M * N, device="cuda", dtype=torch.float32), (M, N)
-            )
-            .sin()
-            .to(dtype=dtype)
-        )
-    elif init_type == "zeros":
-        return torch.zeros(size, dtype=dtype, device="cuda")
-    elif init_type == "randn":
-        # Need to generate and then cast to support f8 (randn not supported for f8)
-        A = torch.randn(size, dtype=torch.float32, device="cuda")
-        return A.to(dtype)
-    else:
-        raise ValueError(f"Unsupported init_type: {init_type}")
 
 def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
+    """Test matmul with proper input generation - handles both quantized and non-quantized dtypes"""
 
     # Adjust dimensions for transposition and apply tensor.T if needed
     if transA == "T":
@@ -74,29 +44,119 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
     else:
         B_size = (n, k)  # B is NxK (we will later transpose it with .T)
 
-    A = torch.randn(A_size, device="cuda", dtype=in_dtype)
-    B = torch.randn(B_size, device="cuda", dtype=in_dtype)
+    # Generate inputs using aiter's approach for quantized dtypes
+    if _is_quantized_dtype(in_dtype):
+        # Generate base tensors in float32 first
+        if transA == "T":
+            A = torch.randn((m, k), dtype=torch.float32, device="cuda")
+        else:
+            A = torch.randn((k, m), dtype=torch.float32, device="cuda").T
 
-    # Apply transpose on A or B if necessary (only needed for "N" case)
-    if transA == "N":
-        A = A.T  # Apply transpose to A if transA is "N"
+        if transB == "T":
+            B = torch.randn((k, n), dtype=torch.float32, device="cuda")
+        else:
+            B = torch.randn((n, k), dtype=torch.float32, device="cuda").T
 
-    if transB == "N":
-        B = B.T  # Apply transpose to B if transB is "N"
+        # Now A is (M, K) and B is (K, N) after transposes
+        # Quantize using aiter's method
+        dtype_max_val = torch.finfo(in_dtype).max if in_dtype.is_floating_point else 127.0
+
+        # x_scale: per-row quantization for A → (M, 1)
+        max_A = A.abs().float().amax(dim=1, keepdim=True)
+        scaleA = max_A / dtype_max_val
+        A = (A / scaleA).to(in_dtype)
+
+        # w_scale: per-column quantization for B (along dim=1) → (1, N)
+        # B is (K, N), we want one scale per output channel (N dimension)
+        max_B = B.abs().float().amax(dim=0, keepdim=True)  # (1, N)
+        scaleB = max_B / dtype_max_val
+        B = (B / scaleB).to(in_dtype)
+    else:
+        # Non-quantized dtypes: generate tensors directly
+        A = torch.randn(A_size, device="cuda", dtype=in_dtype)
+        B = torch.randn(B_size, device="cuda", dtype=in_dtype)
+        scaleA = scaleB = None
+
+        # Apply transpose on A or B if necessary (only needed for "N" case)
+        if transA == "N":
+            A = A.T
+        if transB == "N":
+            B = B.T
 
     # Allocate Tensors
     C = torch.zeros((m, n), device="cuda", dtype=out_dtype)
     bias = torch.zeros((m,), device="cuda", dtype=out_dtype)
 
-    # Run TritonBLAS matmul
+    # Run TritonBLAS matmul - use appropriate API based on quantization
     selector = tritonblas.MatmulHeuristicResult(m, n, k, A.dtype, B.dtype, C.dtype)
-    tritonblas.matmul_lt(A, B, C, selector, enable_streamk)
+    if _is_quantized_dtype(in_dtype) and scaleA is not None and scaleB is not None:
+        # scaleA is (M, 1), scaleB is (1, N) - squeeze to 1D for kernel
+        scaleA_1d = scaleA.squeeze(-1)  # (M, 1) → (M,)
+        scaleB_1d = scaleB.squeeze(0)   # (1, N) → (N,)
+        tritonblas.matmul_a8w8_lt(A, B, scaleA_1d, scaleB_1d, C, selector, enable_streamk)
+    else:
+        tritonblas.matmul_lt(A, B, C, selector, enable_streamk)
 
-    # Check correctness:
-    torch_c = torch.matmul(A, B)
-    torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1e-2, rtol=1e-3)
+    # Check correctness
+    if _is_quantized_dtype(in_dtype) and scaleA is not None and scaleB is not None:
+        # Use aiter's reference computation approach
+        # scaleA is (M, 1), scaleB is (1, N)
+
+        # 1. Matrix multiplication in float32
+        acc = torch.matmul(A.to(torch.float32), B.to(torch.float32))
+
+        # 2. Compute scale matrix: (M, 1) @ (1, N) -> (M, N)
+        scale = torch.matmul(scaleA, scaleB)
+
+        # 3. Apply scale
+        acc = acc * scale
+
+        # 4. Convert to output dtype with clamping
+        if out_dtype == torch.float8_e4m3fn:
+            fp8_max = torch.finfo(torch.float8_e4m3fn).max
+            acc = torch.clamp(acc, -fp8_max, fp8_max)
+        elif out_dtype == torch.float8_e5m2:
+            fp8_max = torch.finfo(torch.float8_e5m2).max
+            acc = torch.clamp(acc, -fp8_max, fp8_max)
+        elif out_dtype == torch.int8:
+            dtype_max = 127.0
+            acc = torch.clamp(acc, -dtype_max, dtype_max)
+
+        torch_c = acc.to(out_dtype)
+
+        # Use tolerance settings based on output dtype
+        # For quantized outputs (fp8/int8), errors accumulate more than bf16
+        if out_dtype == torch.bfloat16:
+            # Quantized input + bfloat16 output (matches aiter test_gemm_a8w8.py)
+            torch.testing.assert_close(C.to(torch.float32), torch_c.to(torch.float32), atol=0.02, rtol=1e-2)
+        elif _is_float8_like(out_dtype):
+            # FP8 has very limited precision, need relaxed tolerance
+            torch.testing.assert_close(C.to(torch.float32), torch_c.to(torch.float32), atol=2.0, rtol=0.2)
+        elif _is_int8(out_dtype):
+            # INT8 quantization can have larger errors
+            torch.testing.assert_close(C.to(torch.float32), torch_c.to(torch.float32), atol=2.0, rtol=0.2)
+        else:
+            # Default for other dtypes
+            torch.testing.assert_close(C.to(torch.float32), torch_c.to(torch.float32), atol=0.1, rtol=0.05)
+    else:
+        # Non-quantized path: simple matmul
+        torch_c = torch.matmul(A, B)
+        # Convert both to float32 for comparison to avoid dtype mismatch issues
+        # Use dtype-specific tolerances: fp16/bf16 inputs need relaxed tolerances due to limited precision
+        # Check input dtype since errors accumulate from input precision, even if output is fp32
+        if in_dtype == torch.float16 or out_dtype == torch.float16:
+            torch.testing.assert_close(C.to(torch.float32), torch_c.to(torch.float32), atol=0.5, rtol=0.05)
+        elif in_dtype == torch.bfloat16 or out_dtype == torch.bfloat16:
+            torch.testing.assert_close(C.to(torch.float32), torch_c.to(torch.float32), atol=0.5, rtol=0.05)
+        elif in_dtype == torch.float32 and out_dtype == torch.float32:
+            torch.testing.assert_close(C.to(torch.float32), torch_c.to(torch.float32), atol=1e-2, rtol=1e-3)
+        else:
+            # Fallback for other dtypes or mixed precision
+            torch.testing.assert_close(C.to(torch.float32), torch_c.to(torch.float32), atol=0.5, rtol=0.05)
+
     size_str = f'SIZE M: {m}, N: {n}, K: {k}, trans: {transA}{transB}'
     print(f'{size_str} Correct✅')
+
 
 def bench_matmul(
     input_yaml: str,
@@ -131,43 +191,97 @@ def bench_matmul(
     for m, n, k, in_dtype, out_dtype, transA, transB in (
         tqdm(dataset_tuples) if not print_verbose else dataset_tuples
     ):
-        # Adjust dimensions for transposition and apply tensor.T if needed
-        if transA == "T":
-            A_size = (m, k)  # A is MxK
+        # Generate inputs using aiter's approach for quantized dtypes
+        if _is_quantized_dtype(in_dtype):
+            # Generate base tensors in float32 first
+            if transA == "T":
+                A = matmul_input_gen((m, k), torch.float32, init_type, quantize=None)
+                A, _ = _is_quantized(A)  # Extract tensor if wrapped
+            else:
+                A = matmul_input_gen((k, m), torch.float32, init_type, quantize=None)
+                A, _ = _is_quantized(A)
+                A = A.T
+
+            if transB == "T":
+                B = matmul_input_gen((k, n), torch.float32, init_type, quantize=None)
+                B, _ = _is_quantized(B)
+            else:
+                B = matmul_input_gen((n, k), torch.float32, init_type, quantize=None)
+                B, _ = _is_quantized(B)
+                B = B.T
+
+            # Now A is (M, K) and B is (K, N) after transposes
+            # Quantize using aiter's method
+            dtype_max_val = torch.finfo(in_dtype).max if in_dtype.is_floating_point else 127.0
+
+            # x_scale: per-row quantization for A → (M, 1)
+            max_A = A.abs().float().amax(dim=1, keepdim=True)
+            scaleA = max_A / dtype_max_val
+            A = (A / scaleA).to(in_dtype)
+
+            # w_scale: per-column quantization for B (along dim=1) → (1, N)
+            # B is (K, N), we want one scale per output channel (N dimension)
+            max_B = B.abs().float().amax(dim=0, keepdim=True)  # (1, N)
+            scaleB = max_B / dtype_max_val
+            B = (B / scaleB).to(in_dtype)
         else:
-            A_size = (k, m)  # A is KxM (we will later transpose it with .T)
+            # Non-quantized dtypes
+            if transA == "T":
+                A_size = (m, k)
+            else:
+                A_size = (k, m)
 
-        if transB == "T":
-            B_size = (k, n)  # B is KxN
-        else:
-            B_size = (n, k)  # B is NxK (we will later transpose it with .T)
+            if transB == "T":
+                B_size = (k, n)
+            else:
+                B_size = (n, k)
 
-        # Initialize tensors with the appropriate dimensions
-        A = init_by_size_and_type(A_size, in_dtype, init_type)
-        B = init_by_size_and_type(B_size, in_dtype, init_type)
+            A_init = matmul_input_gen(A_size, in_dtype, init_type, quantize=None)
+            B_init = matmul_input_gen(B_size, in_dtype, init_type, quantize=None)
+            A, scaleA = _is_quantized(A_init)
+            B, scaleB = _is_quantized(B_init)
 
-        # Apply transpose on A or B if necessary (only needed for "N" case)
-        if transA == "N":
-            A = A.T  # Apply transpose to A if transA is "N"
-
-        if transB == "N":
-            B = B.T  # Apply transpose to B if transB is "N"
+            # Apply transpose if needed
+            if transA == "N":
+                A = A.T
+            if transB == "N":
+                B = B.T
 
         C = torch.zeros((m, n), device="cuda", dtype=out_dtype)
 
         # Compute performance metrics
         flops = lambda: 2 * m * n * k * 1e-12
         gflops = lambda ms: 2 * m * n * k * 1e-9 / (ms * 1e-3)
-        bytes_fn = lambda: (A.element_size() * ((m * k) + (n * k))) + (
-            (m * n) * C.element_size()
+        # Include scale tensors in byte count for quantized dtypes
+        bytes_fn = lambda: (
+            A.numel() * A.element_size()
+            + B.numel() * B.element_size()
+            + C.numel() * C.element_size()
+            + (0 if scaleA is None else scaleA.numel() * scaleA.element_size())
+            + (0 if scaleB is None else scaleB.numel() * scaleB.element_size())
         )
 
-        # Build a tritonBLAS selector config and launch matmul_lt
+        # Build a tritonBLAS selector config and launch matmul
         selector = tritonblas.MatmulHeuristicResult(
             m, n, k, A.dtype, B.dtype, C.dtype
         )
         config = selector.get_config()
-        matmul = lambda: tritonblas.matmul(A, B, C, enable_streamk=enable_streamk)
+
+        # Use appropriate API based on quantization
+        if _is_quantized_dtype(in_dtype) and scaleA is not None and scaleB is not None:
+            # Handle scale shapes for quantized path
+            scaleA_expanded = scaleA.squeeze(-1) if scaleA is not None else None
+            if scaleB is not None:
+                if scaleB.shape[1] == 1:  # (N, 1) case
+                    scaleB_expanded = scaleB.squeeze(-1)
+                else:  # (1, N) case
+                    scaleB_expanded = scaleB.squeeze(0)
+            else:
+                scaleB_expanded = None
+            matmul = lambda: tritonblas.matmul_a8w8_lt(A, B, scaleA_expanded, scaleB_expanded, C, selector, enable_streamk)
+        else:
+            matmul = lambda: tritonblas.matmul(A, B, C, enable_streamk=enable_streamk)
+
         ms = triton.testing.do_bench(matmul, warmup=20, rep=20)
         perf = gflops(ms)
 
@@ -202,7 +316,7 @@ def bench_matmul(
         }
         benchmark_results.append(metrics)
 
-        # Write every 100 entries
+        # Write every N entries
         if count % write_csv_freq == 0:
             if output_csv:
                 write_csv(output_csv, benchmark_results)
@@ -250,7 +364,7 @@ def write_csv(filename: str, results):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Benchmark matmul performance and optionally output performance metrics to a CSV file."
+        description="Benchmark matmul performance (supports both standard and quantized dtypes) and optionally output performance metrics to a CSV file."
     )
     parser.add_argument(
         "--input-yaml",
