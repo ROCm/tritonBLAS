@@ -277,7 +277,6 @@ def bench_matmul(
                 else:  # (1, N) case
                     scaleB_expanded = scaleB.squeeze(0)
             else:
-                scaleB_expanded = None
             matmul = lambda: tritonblas.matmul_a8w8_lt(A, B, scaleA_expanded, scaleB_expanded, C, selector, enable_streamk)
         else:
             matmul = lambda: tritonblas.matmul(A, B, C, enable_streamk=enable_streamk)
