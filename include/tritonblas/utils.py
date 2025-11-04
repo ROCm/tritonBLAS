@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-import yaml
+"""
+Utility functions for TritonBLAS
+
+This module provides helper functions for dtype handling, quantization, and input generation.
+"""
 import torch
-import random
-import csv
 from typing import Optional, Tuple, Union
+
 
 def str_to_dtype(dtype_str: str) -> torch.dtype:
     """
@@ -24,6 +27,7 @@ def str_to_dtype(dtype_str: str) -> torch.dtype:
             f"{', '.join([attr for attr in dir(torch) if isinstance(getattr(torch, attr), torch.dtype)])}"
         )
 
+
 def _ensure_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
     if isinstance(dtype, torch.dtype):
         return dtype
@@ -31,18 +35,22 @@ def _ensure_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
         return getattr(torch, dtype.replace("torch.", ""))
     raise TypeError(f"Unsupported dtype spec: {dtype}")
 
+
 def _is_float8_like(dtype: torch.dtype) -> bool:
     s = str(dtype)
     return ("float8" in s)
 
+
 def _is_int8(dtype: torch.dtype) -> bool:
     return dtype == torch.int8
 
+
 def _is_quantized(init_result):
-    """Normalize return from init_by_size_and_type: either Tensor or (Tensor, scale)."""
+    """Normalize return from matmul_input_gen: either Tensor or (Tensor, scale)."""
     if isinstance(init_result, tuple) and len(init_result) == 2:
         return init_result[0], init_result[1]
     return init_result, None
+
 
 def matmul_input_gen(
     size: Tuple[int, int],
@@ -110,3 +118,5 @@ def matmul_input_gen(
         raise ValueError(f"Unsupported quantize mode: {mode}")
 
     return q, scale.to(torch.float32)
+
+
