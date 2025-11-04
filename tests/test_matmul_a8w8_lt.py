@@ -4,10 +4,13 @@ import triton
 import triton.language as tl
 import tritonblas
 try:
-    from .utils import _is_quantized, matmul_input_gen
+    from tritonblas.utils import _is_quantized, matmul_input_gen
 except ImportError:
-    # Fallback for when running the test directly with pytest
-    from utils import _is_quantized, matmul_input_gen
+    # Fallback: try importing from tests/utils.py (for backward compatibility)
+    try:
+        from .utils import _is_quantized, matmul_input_gen
+    except ImportError:
+        from utils import _is_quantized, matmul_input_gen
 
 def run_torch(a, b, a_scale, b_scale, bias=None, dtype=torch.bfloat16):
     # Match kernel behavior exactly: keep everything in float32 until final conversion
@@ -47,7 +50,11 @@ def run_torch(a, b, a_scale, b_scale, bias=None, dtype=torch.bfloat16):
 
 
 def run_triton(a, b, a_scale, b_scale, bias=None, dtype=torch.bfloat16, c=None):
-    return matmul_a8w8(a, b, a_scale, b_scale, bias, dtype, c)
+    # Helper function that matches the actual API signature
+    # Note: matmul_a8w8 creates the selector internally
+    if c is None:
+        c = torch.zeros((a.shape[0], b.shape[1]), device="cuda", dtype=dtype)
+    return tritonblas.matmul_a8w8(a, b, a_scale, b_scale, c, enable_streamk=False)
 
 @pytest.mark.parametrize(
     "m, n, k",
