@@ -12,7 +12,6 @@ import triton
 import random
 import tritonblas
 import csv
-from typing import Optional, Tuple, Union
 from tqdm import tqdm
 
 # Import utilities from the tritonblas package
