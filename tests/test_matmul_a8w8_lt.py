@@ -1,6 +1,5 @@
 import pytest
 import torch
-import triton.language as tl
 import tritonblas
 try:
     from tritonblas.utils import _is_quantized, matmul_input_gen
