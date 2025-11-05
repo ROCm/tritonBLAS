@@ -9,6 +9,8 @@ def persistent_matmul(
     A,
     B,
     C,
+    A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
+    B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
     M,
     N,
@@ -31,6 +33,7 @@ def persistent_matmul(
     EVEN_K: tl.constexpr,
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
+    QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
 ):
     pid = tl.program_id(0)
@@ -88,7 +91,11 @@ def persistent_matmul(
             else:
                 b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
 
-            acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+            # Conditional dot product precision based on quantization mode
+            if QUANTIZED:
+                acc += tl.dot(a, b, input_precision="ieee")
+            else:
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
 
@@ -108,11 +115,34 @@ def persistent_matmul(
                 B_BASE = tl.multiple_of(B_BASE, (1, 16))
             a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
             b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
-            acc += tl.dot(a, b)
 
-        c = acc.to(C.type.element_ty)
+            if QUANTIZED:
+                acc += tl.dot(a, b, input_precision="ieee")
+            else:
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+
+        # Conditional scaling for quantized mode
+        if QUANTIZED:
+            # Create pointers for the scale tensors and load them
+            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
+            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
+            A_scale = tl.load(A_scale_ptr + rm_A_scale)
+            B_scale = tl.load(B_scale_ptr + rn_B_scale)
+            acc *= A_scale[:, None] * B_scale[None, :]
+
+        # Unified bias handling
         if BIAS:
-            c += bias[:, None]
+            if QUANTIZED:
+                # For quantized mode: convert bias to float32, add to acc, then convert to output dtype
+                bias_float = bias.to(tl.float32)
+                c = acc + bias_float[:, None]
+                c = c.to(C.type.element_ty)
+            else:
+                # For non-quantized mode: convert acc to output dtype, then add bias
+                c = acc.to(C.type.element_ty)
+                c += bias[:, None]
+        else:
+            c = acc.to(C.type.element_ty)
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N

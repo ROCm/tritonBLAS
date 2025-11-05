@@ -35,7 +35,15 @@ def _make_matmul_selector(
     return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype)
 
 
-def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector):
+def persistent_matmul_lt(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    a_scale: Optional[torch.Tensor] = None,
+    b_scale: Optional[torch.Tensor] = None,
+    quantized: bool = False,
+):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -58,8 +66,8 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
     mfmaInstrSize = 16
     kpack = 1
     #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
-    CACHE_MODIFIER_A= None
-    CACHE_MODIFIER_B= None
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
 
     # Run in Data-parallel mode.
     grids = total_tiles
@@ -74,6 +82,8 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
         a,
         b,
         c,
+        a_scale if quantized else None,  # A_scale_ptr
+        b_scale if quantized else None,  # B_scale_ptr
         None,  # TODO: Enable bias.
         M,
         N,
@@ -96,6 +106,7 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
         EVEN_K=even_k,
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+        QUANTIZED=quantized,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -105,9 +116,15 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
 
     return c
 
-
 def streamk_matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, sk_grid: Optional[int] = None
+    a: torch.Tensor, 
+    b: torch.Tensor, 
+    c: torch.Tensor, 
+    selector, 
+    sk_grid: Optional[int] = None,
+    a_scale: Optional[torch.Tensor] = None,
+    b_scale: Optional[torch.Tensor] = None,
+    quantized: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -136,8 +153,8 @@ def streamk_matmul_lt(
     mfmaInstrSize = 16
     kpack = 1
     #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
-    CACHE_MODIFIER_A= None
-    CACHE_MODIFIER_B= None
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid
@@ -162,6 +179,8 @@ def streamk_matmul_lt(
         a,
         b,
         c,
+        a_scale if quantized else None,  # A_scale_ptr
+        b_scale if quantized else None,  # B_scale_ptr
         None,  # TODO: Enable bias.
         P,
         locks,
@@ -187,6 +206,7 @@ def streamk_matmul_lt(
         EVEN_K=even_k,
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+        QUANTIZED=quantized,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -195,7 +215,6 @@ def streamk_matmul_lt(
     )
 
     return c
-
 
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
@@ -207,6 +226,15 @@ def matmul_lt(
     else:
         return persistent_matmul_lt(a, b, c, selector)
 
+def matmul_a8w8_lt(
+    a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+):
+    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+
+    if enable_streamk:
+        return streamk_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+    else:
+        return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
 
 def matmul(
     a: torch.Tensor,
@@ -224,3 +252,22 @@ def matmul(
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
     else:
         return persistent_matmul_lt(a, b, c, selector)
+
+def matmul_a8w8(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_scale: torch.Tensor,
+    c: torch.Tensor,
+    enable_streamk=False,
+    sk_grid=None,
+):
+    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype)
+    if enable_streamk:
+        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True)
+    else:
+        return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
