@@ -16,7 +16,7 @@ MAX_BLOCK_SIZE = 65536
 
 
 
-def grouped_gemm( 
+def grouped_gemm(
     group_a: list[torch.Tensor],
     group_b: list[torch.Tensor],
     group_c: list[torch.Tensor],
