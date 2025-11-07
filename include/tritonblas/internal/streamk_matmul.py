@@ -1,12 +1,16 @@
 import triton
 import triton.language as tl
+import torch
 
+from .pid_transforms import chiplet_transform_chunked
 
 @triton.jit()
 def streamk_matmul(
     A,
     B,
     C,
+    A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
+    B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
     P,
     locks,
@@ -26,14 +30,18 @@ def streamk_matmul(
     GROUP_SIZE_M: tl.constexpr,
     NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
     STREAMK_TILES: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
+    CACHE_MODIFIER_A: tl.constexpr,
+    CACHE_MODIFIER_B: tl.constexpr,
+    QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
+    ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + min(pid % NUM_XCDS, NUM_SMS % NUM_XCDS) + (pid // NUM_XCDS)
-
+        pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -48,6 +56,7 @@ def streamk_matmul(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
+    # Full tiles loop
     for tile_id in range(pid, total_full_tiles, NUM_SMS):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
@@ -78,15 +87,20 @@ def streamk_matmul(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for k in range(0, loop_k):
             if stride_ak == 1:
-                a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
+                a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_A)
             else:
-                a = tl.load(tl.multiple_of(A_BASE, (16, 1)))
+                a = tl.load(tl.multiple_of(A_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_A)
 
             if stride_bk == 1:
-                b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
+                b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_B)
             else:
-                b = tl.load(tl.multiple_of(B_BASE, (1, 16)))
-            acc += tl.dot(a, b)
+                b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
+
+            # Conditional dot product precision based on quantization mode
+            if QUANTIZED:
+                acc += tl.dot(a, b, input_precision="ieee")
+            else:
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
 
@@ -104,13 +118,36 @@ def streamk_matmul(
                 B_BASE = tl.multiple_of(B_BASE, (16, 1))
             else:
                 B_BASE = tl.multiple_of(B_BASE, (1, 16))
-            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
-            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
-            acc += tl.dot(a, b)
+            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
+            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
-        c = acc.to(C.type.element_ty)
+            if QUANTIZED:
+                acc += tl.dot(a, b, input_precision="ieee")
+            else:
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+
+        # Conditional scaling for quantized mode
+        if QUANTIZED:
+            # Create pointers for the scale tensors and load them
+            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
+            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
+            A_scale = tl.load(A_scale_ptr + rm_A_scale)
+            B_scale = tl.load(B_scale_ptr + rn_B_scale)
+            acc *= A_scale[:, None] * B_scale[None, :]
+
+        # Unified bias handling for full tiles
         if BIAS:
-            c += bias[:, None]
+            if QUANTIZED:
+                # For quantized mode: convert bias to float32, add to acc, then convert to output dtype
+                bias_float = bias.to(tl.float32)
+                c = acc + bias_float[:, None]
+                c = c.to(C.type.element_ty)
+            else:
+                # For non-quantized mode: convert acc to output dtype, then add bias
+                c = acc.to(C.type.element_ty)
+                c += bias[:, None]
+        else:
+            c = acc.to(C.type.element_ty)
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
@@ -123,6 +160,7 @@ def streamk_matmul(
     if STREAMK_TILES == 0:
         return
 
+    # Initialize shared memory buffers for Stream-K
     rm1 = tl.arange(0, BLOCK_SIZE_M)
     rn1 = tl.arange(0, BLOCK_SIZE_N)
     rm1 = tl.max_contiguous(tl.multiple_of(rm1, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -139,6 +177,8 @@ def streamk_matmul(
     start_iter = total_full_tiles * iters_per_tile + pid * streamk_iters_pcu + tl.minimum(pid, streamk_remainder_iters)
     last_iter = total_full_tiles * iters_per_tile + (pid + 1) * streamk_iters_pcu + tl.minimum(
         pid + 1, streamk_remainder_iters)
+
+    # Stream-K main loop
     while start_iter < last_iter:
         remainder = start_iter % iters_per_tile
         end_iter = tl.minimum(start_iter + (iters_per_tile - remainder), last_iter)
@@ -176,20 +216,35 @@ def streamk_matmul(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for current_iter in range(start_iter, end_iter):
             if EVEN_K:
-                a = tl.load(A_BASE)
-                b = tl.load(B_BASE)
+                a = tl.load(A_BASE, cache_modifier=CACHE_MODIFIER_A)
+                b = tl.load(B_BASE, cache_modifier=CACHE_MODIFIER_B)
             else:
                 global_k_offset = (current_iter % iters_per_tile) * BLOCK_SIZE_K
                 k_mask = global_k_offset + rk < K
-                a = tl.load(A_BASE, mask=k_mask[None, :], other=0.0)
-                b = tl.load(B_BASE, mask=k_mask[:, None], other=0.0)
-            acc += tl.dot(a, b)
+                a = tl.load(A_BASE, mask=k_mask[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_A)
+                b = tl.load(B_BASE, mask=k_mask[:, None], other=0.0, cache_modifier=CACHE_MODIFIER_B)
+
+            # Conditional dot product precision for Stream-K loop
+            if QUANTIZED:
+                acc += tl.dot(a, b, input_precision="ieee")
+            else:
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
+
+        # Conditional scaling for quantized mode in Stream-K section
+        if QUANTIZED:
+            # Create pointers for the scale tensors and load them
+            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
+            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
+            A_scale = tl.load(A_scale_ptr + rm_A_scale)
+            B_scale = tl.load(B_scale_ptr + rn_B_scale)
+            acc *= A_scale[:, None] * B_scale[None, :]
 
         tile_iter = tile_id * iters_per_tile
 
         if start_iter != tile_iter:
+            # Partial tile: store accumulator and signal completion
             rm1 = tl.arange(0, BLOCK_SIZE_M)
             rn1 = tl.arange(0, BLOCK_SIZE_N)
             rm1 = tl.max_contiguous(tl.multiple_of(rm1, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -198,16 +253,18 @@ def streamk_matmul(
             tl.store(P_, acc, cache_modifier=".wt")
             tl.debug_barrier()
             tl.store(locks + pid, 1, cache_modifier=".wt")
-        #  leave atomic_xchg/atomc_cas implementation here for gfx940
-        #  as it doesn't support cache_modifier.
-        #   tl.store(P_, acc)
-        #   tl.debug_barrier()
-        #   tl.atomic_xchg(locks + pid, 1)
+            #leave atomic_xchg/atomc_cas implementation here for gfx940
+            #as it doesn't support cache_modifier.
+            # tl.store(P_, acc)
+            # tl.debug_barrier()
+            # tl.atomic_xchg(locks + pid, 1)
         else:
+            # Complete tile: aggregate from other PEs and store result
             next_pid = pid + 1
             tile_iter_end = tile_iter + iters_per_tile
             end = end_iter
 
+            # Split accumulator into 4 quadrants for efficient aggregation
             # First split in M direction
             acc_m_reshaped = tl.reshape(acc, (2, BLOCK_SIZE_M // 2, BLOCK_SIZE_N))
             acc_m_permuted = tl.permute(acc_m_reshaped, (1, 2, 0))  # (M//2, N, 2)
@@ -232,8 +289,9 @@ def streamk_matmul(
             acc10 = tl.reshape(acc10, (BLOCK_SIZE_M // 2, BLOCK_SIZE_N // 2))
             acc11 = tl.reshape(acc11, (BLOCK_SIZE_M // 2, BLOCK_SIZE_N // 2))
 
+            # Aggregate from other processing elements
             while (end < tile_iter_end and next_pid < NUM_SMS):
-                #  while tl.atomic_cas(locks + next_pid, 1, 1) != 1:
+                #while tl.atomic_cas(locks + next_pid, 1, 1) != 1:
                 while tl.load(locks + next_pid, cache_modifier=".cv", volatile=True) != 1:
                     pass
                 rm1 = tl.arange(0, BLOCK_SIZE_M)
@@ -241,8 +299,7 @@ def streamk_matmul(
                 rm1 = tl.max_contiguous(tl.multiple_of(rm1, BLOCK_SIZE_M), BLOCK_SIZE_M)
                 rn1 = tl.max_contiguous(tl.multiple_of(rn1, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-                # Load P in two halves
-                # Then for loading P data, you'd need to load 4 quadrants:
+                # Load P in 4 quadrants
                 P_base = P + next_pid * BLOCK_SIZE_M * BLOCK_SIZE_N
 
                 # Quadrant 00 (top-left)
@@ -264,7 +321,7 @@ def streamk_matmul(
                 end += streamk_iters_pcu + (next_pid < streamk_remainder_iters)
                 next_pid += 1
 
-
+            # Unified bias handling for Stream-K section
             if BIAS:
                 # Split bias for top and bottom halves
                 bias_top = bias[:BLOCK_SIZE_M // 2]
@@ -273,11 +330,22 @@ def streamk_matmul(
                 bias_top_reshaped = tl.reshape(bias_top, (BLOCK_SIZE_M // 2, 1))
                 bias_bottom_reshaped = tl.reshape(bias_bottom, (BLOCK_SIZE_M // 2, 1))
 
-                acc00 += bias_top_reshaped
-                acc01 += bias_top_reshaped
-                acc10 += bias_bottom_reshaped
-                acc11 += bias_bottom_reshaped
+                if QUANTIZED:
+                    # For quantized mode: convert bias to float32 before adding
+                    bias_top_float = bias_top_reshaped.to(tl.float32)
+                    bias_bottom_float = bias_bottom_reshaped.to(tl.float32)
+                    acc00 += bias_top_float
+                    acc01 += bias_top_float
+                    acc10 += bias_bottom_float
+                    acc11 += bias_bottom_float
+                else:
+                    # For non-quantized mode: add bias directly
+                    acc00 += bias_top_reshaped
+                    acc01 += bias_top_reshaped
+                    acc10 += bias_bottom_reshaped
+                    acc11 += bias_bottom_reshaped
 
+            # Convert to output dtype
             c00 = acc00.to(C.type.element_ty)
             c01 = acc01.to(C.type.element_ty)
             c10 = acc10.to(C.type.element_ty)
