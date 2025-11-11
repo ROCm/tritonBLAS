@@ -42,10 +42,23 @@ class MatmulHeuristicResult:
         self.block_mn_range = [16, 32, 64, 128, 256]
         self.block_k_range = [16, 32, 64, 128, 256, 512]
 
-        self.element_size_A = torch.finfo(a_dtype).bits
-        self.element_size_B = torch.finfo(b_dtype).bits
+        mx_types = ["f4"]
+        
+        if(a_dtype not in mx_types):
+            self.element_size_A = torch.finfo(a_dtype).bits
+        else:
+            self.element_size_A = origami.datatype_to_bits(origami.string_to_datatype(a_dtype))
+            
+        if(b_dtype not in mx_types):
+            self.element_size_B = torch.finfo(b_dtype).bits
+        else:
+            self.element_size_B = origami.datatype_to_bits(origami.string_to_datatype(a_dtype))
+        
         self.element_size_out = torch.finfo(c_dtype).bits
-        self.mi_dtype = dtype_to_str.get(c_dtype)
+        if(a_dtype not in mx_types):
+            self.mi_dtype = dtype_to_str.get(c_dtype)
+        else:
+            self.mi_dtype = a_dtype
 
         # Infer Matrix Instruction Dimensions from datatypes
         self.MI_dim = self._infer_matrix_instruction_dimensions(
@@ -102,6 +115,8 @@ class MatmulHeuristicResult:
                 MI_dim = [16, 16, 32]
             # F4F6F8
             if max(element_size_A, element_size_B) <= 8:
+                self.block_k_range = [256,384,512]
+                self.block_mn_range = [32,64,128,256]
                 MI_dim = [16, 16, 128]
         # gfx942
         if self.hardware.N_CU == 304:

@@ -31,9 +31,10 @@ def _make_matmul_selector(
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
+    mx_block_size =0
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype)
+    return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype,mx_block_size=mx_block_size)
 
 
 def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector):
@@ -233,10 +234,10 @@ def matmul_fp4(
     c: torch.Tensor,
     a_scales: torch.Tensor,
     b_scales: torch.Tensor,
-    block_m: int = 256,
-    block_n: int = 256,
-    block_k: int = 256,
-    group_size_m: int = 8,
+    block_m: int = None, #Overrides Origami value
+    block_n: int = None, #Overrides Origami value
+    block_k: int = None, #Overrides Origami value
+    group_size_m: int = 8, #Overrides Origami value
 ):
     """
     FP4 matrix multiplication: C = A @ B
@@ -255,6 +256,15 @@ def matmul_fp4(
     Returns:
         Output matrix C
     """
+
+
+    M, K = a.shape
+    _, N = b.shape
+    
+    if(block_m == None):
+        selector = _make_matmul_selector(M, N, K, "f4", "f4", c.dtype,mx_block_size=32)
+        block_m, block_n, block_k, gsize_m = selector.get_config()
+        print(f"Selected {block_m}x{block_n}x{block_k}")
     # Get actual dimensions (accounting for packing)
     M = a.shape[0]
     K = a.shape[1] * 2  # Unpacked K dimension
