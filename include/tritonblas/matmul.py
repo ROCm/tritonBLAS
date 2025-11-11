@@ -233,9 +233,9 @@ def matmul_fp4(
     c: torch.Tensor,
     a_scales: torch.Tensor,
     b_scales: torch.Tensor,
-    block_m: int = 128,
+    block_m: int = 256,
     block_n: int = 256,
-    block_k: int = 512,
+    block_k: int = 256,
     group_size_m: int = 8,
 ):
     """
