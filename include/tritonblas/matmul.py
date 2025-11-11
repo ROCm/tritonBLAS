@@ -238,6 +238,8 @@ def matmul_fp4(
     block_n: int = None, #Overrides Origami value
     block_k: int = None, #Overrides Origami value
     group_size_m: int = 8, #Overrides Origami value
+    num_warps: int = 8,
+    num_stages: int = 2,
 ):
     """
     FP4 matrix multiplication: C = A @ B
@@ -252,6 +254,8 @@ def matmul_fp4(
         block_n: Block size for N dimension
         block_k: Block size for K dimension (must be multiple of 64 for FP4)
         group_size_m: Group size for M dimension tiling
+        num_warps: Number of warps per thread block (default: 8)
+        num_stages: Number of pipeline stages (default: 2)
     
     Returns:
         Output matrix C
@@ -264,7 +268,7 @@ def matmul_fp4(
     if(block_m == None):
         selector = _make_matmul_selector(M, N, K, "f4", "f4", c.dtype,mx_block_size=32)
         block_m, block_n, block_k, gsize_m = selector.get_config()
-        print(f"Selected {block_m}x{block_n}x{block_k}")
+        #print(f"Selected {block_m}x{block_n}x{block_k}")
     # Get actual dimensions (accounting for packing)
     M = a.shape[0]
     K = a.shape[1] * 2  # Unpacked K dimension
@@ -316,8 +320,8 @@ def matmul_fp4(
         NUM_SMS=total_tiles,
         NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk_size,
-        num_stages=2,
-        num_warps=8,
+        num_stages=num_stages,
+        num_warps=num_warps,
     )
     
     return c

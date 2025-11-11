@@ -115,7 +115,7 @@ class MatmulHeuristicResult:
                 MI_dim = [16, 16, 32]
             # F4F6F8
             if max(element_size_A, element_size_B) <= 8:
-                self.block_k_range = [256,384,512]
+                self.block_k_range = [128,256]
                 self.block_mn_range = [32,64,128,256]
                 MI_dim = [16, 16, 128]
         # gfx942
@@ -236,6 +236,8 @@ class MatmulHeuristicResult:
             if best_result[1] == 256 and best_result[2] == 256:
                 if results[0][0] * 1.00 > results[1][0]:
                     best_result = results[1]
+
+
 
         return (best_result[1], best_result[2], best_result[3])
 

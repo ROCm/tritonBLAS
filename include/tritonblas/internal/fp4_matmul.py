@@ -2,7 +2,7 @@ import triton
 import triton.language as tl
 import torch
 
-from .pid_transforms import chiplet_transform_chunked
+from .pid_transforms import chiplet_transform_chunked, chiplet_transform
 
 
 @triton.heuristics(
@@ -49,7 +49,7 @@ def fp4_matmul(
     
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
+        pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
     
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -79,7 +79,12 @@ def fp4_matmul(
         
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
-
+        tl.assume(stride_am > 0)
+        tl.assume(stride_ak > 0)
+        tl.assume(stride_bn > 0)
+        tl.assume(stride_bk > 0)
+        tl.assume(stride_cm > 0)
+        tl.assume(stride_cn > 0)
         # Create pointers for first block of A and B input matrices
         # The BLOCK sizes are of the elements and in fp4 we pack 2 per uint8 container.
         offs_k = tl.arange(0, BLOCK_SIZE_K // 2)
