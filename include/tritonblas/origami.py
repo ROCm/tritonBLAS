@@ -42,23 +42,28 @@ class MatmulHeuristicResult:
         self.block_mn_range = [16, 32, 64, 128, 256]
         self.block_k_range = [16, 32, 64, 128, 256, 512]
 
+        # Helper function to get bits for both float, int, and MX dtypes
         mx_types = ["f4"]
         
-        if(a_dtype not in mx_types):
-            self.element_size_A = torch.finfo(a_dtype).bits
-        else:
-            self.element_size_A = origami.datatype_to_bits(origami.string_to_datatype(a_dtype))
-            
-        if(b_dtype not in mx_types):
-            self.element_size_B = torch.finfo(b_dtype).bits
-        else:
-            self.element_size_B = origami.datatype_to_bits(origami.string_to_datatype(a_dtype))
+        def get_dtype_bits(dtype):
+            # Handle MX types (string-based)
+            if dtype in mx_types:
+                return origami.datatype_to_bits(origami.string_to_datatype(dtype))
+            # Handle torch dtypes
+            try:
+                return torch.finfo(dtype).bits
+            except TypeError:
+                return torch.iinfo(dtype).bits
         
-        self.element_size_out = torch.finfo(c_dtype).bits
-        if(a_dtype not in mx_types):
-            self.mi_dtype = dtype_to_str.get(c_dtype)
-        else:
+        self.element_size_A = get_dtype_bits(a_dtype)
+        self.element_size_B = get_dtype_bits(b_dtype)
+        self.element_size_out = get_dtype_bits(c_dtype)
+        
+        # Set MI dtype - use string for MX types, otherwise lookup from dict
+        if a_dtype in mx_types:
             self.mi_dtype = a_dtype
+        else:
+            self.mi_dtype = dtype_to_str.get(c_dtype)
 
         # Infer Matrix Instruction Dimensions from datatypes
         self.MI_dim = self._infer_matrix_instruction_dimensions(
