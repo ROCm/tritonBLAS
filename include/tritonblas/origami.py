@@ -42,8 +42,14 @@ class MatmulHeuristicResult:
         self.block_mn_range = [16, 32, 64, 128, 256]
         self.block_k_range = [16, 32, 64, 128, 256, 512]
 
-        # Helper function to get bits for both float and int dtypes
+        # Helper function to get bits for both float, int, and MX dtypes
+        mx_types = ["f4"]
+        
         def get_dtype_bits(dtype):
+            # Handle MX types (string-based)
+            if dtype in mx_types:
+                return origami.datatype_to_bits(origami.string_to_datatype(dtype))
+            # Handle torch dtypes
             try:
                 return torch.finfo(dtype).bits
             except TypeError:
@@ -52,7 +58,12 @@ class MatmulHeuristicResult:
         self.element_size_A = get_dtype_bits(a_dtype)
         self.element_size_B = get_dtype_bits(b_dtype)
         self.element_size_out = get_dtype_bits(c_dtype)
-        self.mi_dtype = dtype_to_str.get(c_dtype)
+        
+        # Set MI dtype - use string for MX types, otherwise lookup from dict
+        if a_dtype in mx_types:
+            self.mi_dtype = a_dtype
+        else:
+            self.mi_dtype = dtype_to_str.get(c_dtype)
 
         # Infer Matrix Instruction Dimensions from datatypes
         self.MI_dim = self._infer_matrix_instruction_dimensions(
@@ -109,6 +120,8 @@ class MatmulHeuristicResult:
                 MI_dim = [16, 16, 32]
             # F4F6F8
             if max(element_size_A, element_size_B) <= 8:
+                self.block_k_range = [128,256]
+                self.block_mn_range = [32,64,128,256]
                 MI_dim = [16, 16, 128]
         # gfx942
         if self.hardware.N_CU == 304:
@@ -228,6 +241,8 @@ class MatmulHeuristicResult:
             if best_result[1] == 256 and best_result[2] == 256:
                 if results[0][0] * 1.00 > results[1][0]:
                     best_result = results[1]
+
+
 
         return (best_result[1], best_result[2], best_result[3])
 
