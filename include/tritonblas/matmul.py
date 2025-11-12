@@ -31,7 +31,7 @@ def _make_matmul_selector(
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
-    mx_block_size =0
+    mx_block_size = 0
 ):
     # Run Heuristic Results (Only if key has not been seen before)
     return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype,mx_block_size=mx_block_size)
