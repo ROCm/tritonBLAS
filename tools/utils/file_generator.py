@@ -93,6 +93,9 @@ def gen_kernel_and_configStr_from_config(config, EVEN_K, dtype_a, dtype_b, dtype
     configStr = gen_configStr(config)
 
     use_bias = bias_size > 0
+    bias_ptr_expr = "bias" if use_bias else "None"
+    torch_dtype_scale = tl_to_torch_types[name_to_tl_types['fp32']]
+    torch_dtype_lock = "torch.uint8"
 
     #xcd is fixed to 8. tuning for MI308, change it to 4
     num_xcds = 8
@@ -102,7 +105,7 @@ def gen_kernel_and_configStr_from_config(config, EVEN_K, dtype_a, dtype_b, dtype
         torch_dtype_b = 'fp16'
         torch_dtype_c = 'fp16'
         torch_dtype_p = 'fp32'
-        torch_dtype_lock = 'int32'
+        torch_dtype_lock = "torch.uint8"
         if dtype_a:
             torch_dtype_a = tl_to_torch_types[name_to_tl_types[dtype_a]]
         if dtype_b:
@@ -111,15 +114,13 @@ def gen_kernel_and_configStr_from_config(config, EVEN_K, dtype_a, dtype_b, dtype
             torch_dtype_c = tl_to_torch_types[name_to_tl_types[dtype_c]]
         if dtype_p:
             torch_dtype_p = tl_to_torch_types[name_to_tl_types[dtype_p]]
-        if dtype_lock:
-            torch_dtype_lock = tl_to_torch_types[name_to_tl_types[dtype_lock]]
 
+    if warmup:
         if kernel_type == 'persistent':
-            # Persistent kernel - no P, locks, STREAMK_TILES
             matmul_def_str = f"""
 def matmul_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
     {kernel_name}_{configStr}.warmup(
-        {torch_dtype_a}, {torch_dtype_b}, {torch_dtype_c}, {torch_dtype_c},
+        {torch_dtype_a}, {torch_dtype_b}, {torch_dtype_c}, {torch_dtype_scale}, {torch_dtype_scale}, {torch_dtype_c},
         M, N, K,
         am, bn, cm, cn, biasn,
         stride_ak=ak, stride_bk=bk,
@@ -134,6 +135,7 @@ def matmul_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
         EVEN_K = {EVEN_K},
         CACHE_MODIFIER_A = ".cg",
         CACHE_MODIFIER_B = ".cg",
+        QUANTIZED = False,
         num_warps = {num_warps},
         num_stages = {num_stages},
         waves_per_eu = {waves_per_eu},
@@ -153,16 +155,16 @@ def try_compile_config_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
         return False
 """
         else:
-            # StreamK kernel - includes P, locks, STREAMK_TILES
             matmul_def_str = f"""
 def matmul_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
     m_tiles = triton.cdiv(M, {block_m})
     n_tiles = triton.cdiv(N, {block_n})
     streamk_tiles= m_tiles*n_tiles % {num_sms}
     {kernel_name}_{configStr}.warmup(
-        {torch_dtype_a}, {torch_dtype_b}, {torch_dtype_c}, {torch_dtype_c}, {torch_dtype_p}, {torch_dtype_lock},
+        {torch_dtype_a}, {torch_dtype_b}, {torch_dtype_c}, {torch_dtype_scale}, {torch_dtype_scale}, {torch_dtype_c}, {torch_dtype_p}, {torch_dtype_lock},
         M, N, K,
-        am, ak, bk, bn, cm, cn, biasn,
+        am, bn, cm, cn, biasn,
+        stride_ak=ak, stride_bk=bk,
         BLOCK_SIZE_M = {block_m},
         BLOCK_SIZE_N = {block_n},
         BLOCK_SIZE_K = {block_k},
@@ -171,15 +173,16 @@ def matmul_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
         STREAMK_TILES= streamk_tiles,
         NUM_XCDS = {num_xcds},
         CHUNK_SIZE = {chunk_size},
+        BIAS= {use_bias},
+        EVEN_K= {EVEN_K},
+        CACHE_MODIFIER_A=".cg",
+        CACHE_MODIFIER_B=".cg",
+        QUANTIZED = False,
         num_warps = {num_warps},
         num_stages = {num_stages},
         waves_per_eu = {waves_per_eu},
         matrix_instr_nonkdim = {mfmaInstrSize},
         kpack = {kpack},
-        BIAS= {use_bias},
-        EVEN_K= {EVEN_K},
-        CACHE_MODIFIER_A=".cg",
-        CACHE_MODIFIER_B=".cg",
         grid= (1,),
     )
     return None
@@ -195,12 +198,11 @@ def try_compile_config_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
 """
     else:
         if kernel_type == 'persistent':
-            # Persistent kernel - no P, locks, STREAMK_TILES
             matmul_def_str = f"""
 def matmul_{configStr}(a, b, c, bias, M, N, K, am, ak, bk, bn, cm, cn, biasn):
     grid = {num_sms}
     {kernel_name}_{configStr}[(grid,)](
-        a, b, c, bias,
+        a, b, c, None, None, {bias_ptr_expr},
         M, N, K,
         am, bn, cm, cn, biasn,
         stride_ak=ak, stride_bk=bk,
@@ -211,20 +213,20 @@ def matmul_{configStr}(a, b, c, bias, M, N, K, am, ak, bk, bn, cm, cn, biasn):
         NUM_SMS = {num_sms},
         NUM_XCDS = {num_xcds},
         CHUNK_SIZE = {chunk_size},
+        BIAS = {use_bias},
+        EVEN_K = {EVEN_K},
+        CACHE_MODIFIER_A = ".cg",
+        CACHE_MODIFIER_B = ".cg",
+        QUANTIZED = False,
         num_warps = {num_warps},
         num_stages = {num_stages},
         waves_per_eu = {waves_per_eu},
         matrix_instr_nonkdim = {mfmaInstrSize},
         kpack = {kpack},
-        BIAS = {use_bias},
-        EVEN_K = {EVEN_K},
-        CACHE_MODIFIER_A = ".cg",
-        CACHE_MODIFIER_B = ".cg",
     )
     return c
 """
         else:
-            # StreamK kernel - includes P, locks, STREAMK_TILES
             matmul_def_str = f"""
 def matmul_{configStr}(a, b, c, bias, P, locks, M, N, K, am, ak, bk, bn, cm, cn, biasn):
     grid = {num_sms}
@@ -232,7 +234,7 @@ def matmul_{configStr}(a, b, c, bias, P, locks, M, N, K, am, ak, bk, bn, cm, cn,
     n_tiles = triton.cdiv(N, {block_n})
     streamk_tiles= m_tiles*n_tiles % {num_sms}
     {kernel_name}_{configStr}[(grid,)](
-        a, b, c, bias, P, locks,
+        a, b, c, None, None, {bias_ptr_expr}, P, locks,
         M, N, K,
         am, bn, cm, cn, biasn,
         stride_ak=ak, stride_bk=bk,
@@ -244,15 +246,16 @@ def matmul_{configStr}(a, b, c, bias, P, locks, M, N, K, am, ak, bk, bn, cm, cn,
         STREAMK_TILES= streamk_tiles,
         NUM_XCDS = {num_xcds},
         CHUNK_SIZE = {chunk_size},
+        BIAS = {use_bias},
+        EVEN_K = {EVEN_K},
+        CACHE_MODIFIER_A = ".cg",
+        CACHE_MODIFIER_B = ".cg",
+        QUANTIZED = False,
         num_warps = {num_warps},
         num_stages = {num_stages},
         waves_per_eu = {waves_per_eu},
         matrix_instr_nonkdim = {mfmaInstrSize},
         kpack = {kpack},
-        BIAS = {use_bias},
-        EVEN_K = {EVEN_K},
-        CACHE_MODIFIER_A = ".cg",
-        CACHE_MODIFIER_B = ".cg",
     )
     return c
 """
@@ -454,7 +457,7 @@ from icache_flush import icache_flush
     stride_bias = tensors['bias'][0].stride(0) if bias_size > 0 else 0
 
     # Allocate shared buffers for all configs
-    locks = torch.zeros(({runs}, {max_num_sms}), device = "cuda", dtype = torch.int32)
+    locks = torch.zeros(({runs}, {max_num_sms}), device = "cuda", dtype = torch.uint8)
     P = torch.zeros(({runs}, {max_num_sms},  {max_block_m}*{max_block_n}), device="cuda", dtype=torch.float32)
 
     try:
