@@ -5,10 +5,10 @@ This package contains internal implementation details including:
 - Persistent matmul kernels
 - StreamK matmul kernels
 - PID transformation utilities
-- Composable kernel shards
+- Composable kernel components (indexing, algorithms, memory)
 """
 
-# Import shards submodule to make it accessible
-from . import shards
+# Import submodules to make them accessible
+from . import indexing, algorithms, memory
 
-__all__ = ['shards']
+__all__ = ['indexing', 'algorithms', 'memory']

@@ -55,9 +55,9 @@ def dot_acc(acc, a, b, QUANTIZED: tl.constexpr, ALLOW_TF32: tl.constexpr):
 
 
 @triton.jit
-def load_block(A_BASE, B_BASE,
-               stride_ak: tl.constexpr, stride_bk: tl.constexpr,
-               CACHE_MODIFIER_A: tl.constexpr, CACHE_MODIFIER_B: tl.constexpr):
+def load(A_BASE, B_BASE,
+         stride_ak: tl.constexpr, stride_bk: tl.constexpr,
+         CACHE_MODIFIER_A: tl.constexpr, CACHE_MODIFIER_B: tl.constexpr):
     """
     Load a block of A and B matrices with appropriate alignment hints.
     

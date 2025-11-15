@@ -3,11 +3,13 @@ from .matmul import matmul, matmul_a8w8
 from .matmul import matmul_lt, matmul_a8w8_lt
 from .origami import MatmulHeuristicResult
 
-# Import shards as a submodule to make it accessible as tritonblas.shards
-from .internal import shards
+# Import indexing, algorithms, and memory as submodules
+from .internal import indexing, algorithms, memory
 
-# Register shards in sys.modules so it can be imported as tritonblas.shards
-sys.modules['tritonblas.shards'] = shards
+# Register in sys.modules so they can be imported as tritonblas.{module}
+sys.modules['tritonblas.indexing'] = indexing
+sys.modules['tritonblas.algorithms'] = algorithms
+sys.modules['tritonblas.memory'] = memory
 
 __all__ = [
     'matmul',
@@ -15,5 +17,7 @@ __all__ = [
     'matmul_lt',
     'matmul_a8w8_lt',
     'MatmulHeuristicResult',
-    'shards',
+    'indexing',
+    'algorithms',
+    'memory',
 ]
