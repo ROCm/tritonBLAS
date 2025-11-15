@@ -455,8 +455,28 @@ def gen_rotating_tensors(M, N, K, dtype_a, need_Trans_a, dtype_b, need_Trans_b, 
     return in_outs
 
 
-def matmul(kernel_func, a, b, c, bias, P, locks, num_sms, block_m, block_n, block_k, group_m, num_warps, num_stages,
-           waves_per_eu, mfmaInstrSize, kpack, use_bias, chunk_size=32, kernel_type='streamk'):
+def matmul(
+    kernel_func,
+    a,
+    b,
+    c,
+    bias,
+    P,
+    locks,
+    num_sms,
+    block_m,
+    block_n,
+    block_k,
+    group_m,
+    num_warps,
+    num_stages,
+    waves_per_eu,
+    mfmaInstrSize,
+    kpack,
+    use_bias,
+    chunk_size=32,
+    kernel_type="streamk",
+):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     #assert a.is_contiguous(), "Matrix A must be contiguous"
@@ -470,21 +490,47 @@ def matmul(kernel_func, a, b, c, bias, P, locks, num_sms, block_m, block_n, bloc
     stride_bias = bias.stride(0) if use_bias else 0
     EVEN_K = K % block_k == 0
     num_xcds = 8
+    bias_ptr = bias if use_bias else None
+    a_scale_ptr = None
+    b_scale_ptr = None
+    quantized = False
     
     if kernel_type == 'persistent':
         # Persistent kernel - no P, locks, STREAMK_TILES
         kernel_func[grid](
-            a, b, c, bias,
-            M, N, K,
-            a.stride(0), b.stride(1), c.stride(0), c.stride(1), stride_bias,
-            stride_ak=a.stride(1), stride_bk=b.stride(0),
-            BLOCK_SIZE_M=block_m, BLOCK_SIZE_N=block_n, BLOCK_SIZE_K=block_k,
-            GROUP_SIZE_M=group_m, NUM_SMS=num_sms, NUM_XCDS=num_xcds,
-            CHUNK_SIZE=chunk_size, BIAS=use_bias, EVEN_K=EVEN_K,
-            CACHE_MODIFIER_A=".cg", CACHE_MODIFIER_B=".cg",
-            num_warps=num_warps, num_stages=num_stages,
-            waves_per_eu=waves_per_eu, matrix_instr_nonkdim=mfmaInstrSize,
-            kpack=kpack
+            a,
+            b,
+            c,
+            a_scale_ptr,
+            b_scale_ptr,
+            bias_ptr,
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            stride_bias,
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=block_m,
+            BLOCK_SIZE_N=block_n,
+            BLOCK_SIZE_K=block_k,
+            GROUP_SIZE_M=group_m,
+            NUM_SMS=num_sms,
+            NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size,
+            BIAS=use_bias,
+            EVEN_K=EVEN_K,
+            CACHE_MODIFIER_A=".cg",
+            CACHE_MODIFIER_B=".cg",
+            QUANTIZED=quantized,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
         )
     else:
         # StreamK kernel - includes P, locks, STREAMK_TILES
@@ -492,19 +538,42 @@ def matmul(kernel_func, a, b, c, bias, P, locks, num_sms, block_m, block_n, bloc
         n_tiles = triton.cdiv(N, block_n)
         streamk_tiles = m_tiles * n_tiles % num_sms
         kernel_func[grid](
-            a, b, c, bias, P, locks,
-            M, N, K,
-            a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1),
-            stride_bias=stride_bias,
-            stride_ak=a.stride(1), stride_bk=b.stride(0),
-            BLOCK_SIZE_M=block_m, BLOCK_SIZE_N=block_n, BLOCK_SIZE_K=block_k,
-            GROUP_SIZE_M=group_m, NUM_SMS=num_sms, STREAMK_TILES=streamk_tiles,
-            NUM_XCDS=num_xcds, CHUNK_SIZE=chunk_size,
-            BIAS=use_bias, EVEN_K=EVEN_K,
-            CACHE_MODIFIER_A=".cg", CACHE_MODIFIER_B=".cg",
-            num_warps=num_warps, num_stages=num_stages,
-            waves_per_eu=waves_per_eu, matrix_instr_nonkdim=mfmaInstrSize,
-            kpack=kpack
+            a,
+            b,
+            c,
+            a_scale_ptr,
+            b_scale_ptr,
+            bias_ptr,
+            P,
+            locks,
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            stride_bias,
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=block_m,
+            BLOCK_SIZE_N=block_n,
+            BLOCK_SIZE_K=block_k,
+            GROUP_SIZE_M=group_m,
+            NUM_SMS=num_sms,
+            STREAMK_TILES=streamk_tiles,
+            NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size,
+            BIAS=use_bias,
+            EVEN_K=EVEN_K,
+            CACHE_MODIFIER_A=".cg",
+            CACHE_MODIFIER_B=".cg",
+            QUANTIZED=quantized,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
         )
     
     return c
@@ -527,7 +596,7 @@ def test_correctness(kernel_func, M, N, K, col_a, col_b, dtype_a, dtype_b, dtype
         bias_fp16 = bias.squeeze()
     # Allocates output.
     c = torch.zeros((M, N), device=a.device, dtype=tl_to_torch_types[name_to_tl_types[dtype_c]])
-    locks = torch.zeros((num_sms, ), device="cuda", dtype=torch.int32)
+    locks = torch.zeros((num_sms, ), device="cuda", dtype=torch.uint8)
     P = torch.zeros((num_sms, block_m * block_n), device="cuda", dtype=torch.float32)
     triton_output = matmul(kernel_func, a, b, c, bias, P, locks, num_sms, block_m, block_n, block_k, group_m, num_warps,
                            num_stages, waves_per_eu, mfmaInstrSize, kpack, use_bias, chunk_size, kernel_type)
