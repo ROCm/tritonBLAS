@@ -2,7 +2,11 @@ import triton
 import triton.language as tl
 import torch
 
-from .pid_transforms import chiplet_transform_chunked
+from .indexing import grid_index, preamble, compute_scale_indices
+from .memory import load, store
+from .algorithms import multiply_accumulate
+from .algorithms.binary import apply_scales, add_vector
+from .algorithms.unary import convert_dtype
 
 @triton.jit()
 def persistent_matmul(
@@ -35,14 +39,40 @@ def persistent_matmul(
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    load_func: tl.constexpr = load,  # Custom load function (default: tritonblas load)
+    store_func: tl.constexpr = store,  # Custom store function (default: tritonblas store)
 ):
-    pid = tl.program_id(0)
-    if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
-
+    """
+    Persistent matmul kernel using 5-phase composable shards.
+    
+    This kernel demonstrates the 5-phase model:
+    1. Preamble: Indexing only
+    2. Load: Address math + global → CU movement
+    3. Compute: Math only
+    4. Postprocess: Scales, bias, activation, type conversion
+    5. Store: Register → global movement
+    
+    This separation allows users to customize data movement (phases 2 & 5)
+    while reusing compute logic (phase 3).
+    
+    Customization:
+    Users can override the default load, postprocess, and store functions by
+    passing custom @triton.jit functions via the load_func, postprocess_func,
+    and store_func parameters (all marked as tl.constexpr).
+    
+    Example with custom postprocess:
+        @triton.jit
+        def my_custom_postprocess(acc, A_scale_ptr, B_scale_ptr, bias_ptr,
+                                   pid_m, pid_n, rm, M, N, stride_bias,
+                                   BLOCK_SIZE_M, BLOCK_SIZE_N, QUANTIZED, output_dtype):
+            # Custom postprocess logic (e.g., different activation)
+            result = acc * 2.0  # Example: scale by 2
+            return result.to(output_dtype)
+        
+        # Use default load/store, custom postprocess
+        persistent_matmul[grid](..., postprocess_func=my_custom_postprocess, ...)
+    """
+    # Stride guards
     tl.assume(stride_am > 0)
     tl.assume(stride_ak > 0)
     tl.assume(stride_bn > 0)
@@ -50,104 +80,84 @@ def persistent_matmul(
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
 
-    acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
+    # Determine output dtype for accumulator
+    OUTPUT_IS_INT8 = C.type.element_ty == tl.int8
+    
+    # Use chiplet-aware PID mapping if NUM_XCDS > 1
+    USE_CHIPLET_PID = NUM_XCDS != 1
 
+    # Get 2D grid info
+    pid, num_pid_m, num_pid_n, total_tiles = grid_index(
+        M, N, K,
+        BLOCK_SIZE_M, BLOCK_SIZE_N,
+        NUM_SMS, NUM_XCDS, CHUNK_SIZE,
+        USE_CHIPLET_PID
+    )
+
+    # Persistent loop: process multiple tiles per thread block
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
-
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rk = tl.arange(0, BLOCK_SIZE_K)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-        B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-
-        if BIAS:
-            bias_ = bias_ptr + rm * stride_bias
-            bias = tl.load(bias_, mask=rm < M, other=0.0)
-
-        loop_k = tl.cdiv(K, BLOCK_SIZE_K)
+        # ============================================================
+        # Phase 1: Preamble - Get specific tile index and offsets
+        # ============================================================
+        pid_m, pid_n, row_indices, col_indices, loop_k, acc = preamble(
+            tile_id, num_pid_m, num_pid_n,
+            M, N, K,
+            BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
+            GROUP_SIZE_M,
+            OUTPUT_IS_INT8,
+            EVEN_K,
+        )
+        
+        # ============================================================
+        # Phases 2 & 3: Load + Compute pipeline iteratively over K dimension
+        # ============================================================
+        for k_iter in range(loop_k):
+            k0 = k_iter * BLOCK_SIZE_K
+            
+            # Phase 2: Load - Address math + global → CU load
+            a = load_func(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=False, is_row_major=True)
+            b = load_func(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=False, is_row_major=False)
+            
+            # Phase 3: Compute - Math only
+            acc = multiply_accumulate(acc, a, b, QUANTIZED, ALLOW_TF32)
+        
+        # Handle K tail if needed
         if not EVEN_K:
-            loop_k -= 1
-        tl.assume(loop_k > 1)
-
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        for k in range(0, loop_k):
-            if stride_ak == 1:
-                a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_A)
-            else:
-                a = tl.load(tl.multiple_of(A_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_A)
-
-            if stride_bk == 1:
-                b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_B)
-            else:
-                b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
-
-            # Conditional dot product precision based on quantization mode
-            if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
-            else:
-                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
-            A_BASE += BLOCK_SIZE_K * stride_ak
-            B_BASE += BLOCK_SIZE_K * stride_bk
-
-        if not EVEN_K:
-            k = loop_k
-            rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-            if stride_ak == 1:
-                A_BASE = tl.multiple_of(A_BASE, (1, 16))
-            else:
-                A_BASE = tl.multiple_of(A_BASE, (16, 1))
-
-            if stride_bk == 1:
-                B_BASE = tl.multiple_of(B_BASE, (16, 1))
-            else:
-                B_BASE = tl.multiple_of(B_BASE, (1, 16))
-            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
-            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
-
-            if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
-            else:
-                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
-
-        # Conditional scaling for quantized mode
-        if QUANTIZED:
-            # Create pointers for the scale tensors and load them
-            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
-            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
-            A_scale = tl.load(A_scale_ptr + rm_A_scale)
-            B_scale = tl.load(B_scale_ptr + rn_B_scale)
-            acc *= A_scale[:, None] * B_scale[None, :]
-
-        # Unified bias handling
+            k0 = loop_k * BLOCK_SIZE_K
+            
+            # Phase 2: Load with masking
+            a = load_func(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=True, is_row_major=True)
+            b = load_func(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=True, is_row_major=False)
+            
+            # Phase 3: Compute
+            acc = multiply_accumulate(acc, a, b, QUANTIZED, ALLOW_TF32)
+        
+        # ============================================================
+        # Phase 4: Postprocess - Scales, bias, activation
+        # ============================================================
+        # Apply quantization scales if provided
+        if A_scale_ptr is not None:
+            row_scale_indices, col_scale_indices = compute_scale_indices(pid_m, pid_n, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N)
+            a_scales = tl.load(A_scale_ptr + row_scale_indices)
+            b_scales = tl.load(B_scale_ptr + col_scale_indices)
+            acc = apply_scales(acc, a_scales, b_scales)
+        
+        # Add bias if provided
         if BIAS:
-            if QUANTIZED:
-                # For quantized mode: convert bias to float32, add to acc, then convert to output dtype
-                bias_float = bias.to(tl.float32)
-                c = acc + bias_float[:, None]
-                c = c.to(C.type.element_ty)
-            else:
-                # For non-quantized mode: convert acc to output dtype, then add bias
-                c = acc.to(C.type.element_ty)
-                c += bias[:, None]
-        else:
-            c = acc.to(C.type.element_ty)
-
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(C_, c, c_mask)
+            bias_vector = tl.load(bias_ptr + row_indices * stride_bias, mask=row_indices < M, other=0.0)
+            # Check if we're using quantized mode based on whether scales were applied
+            acc = add_vector(acc, bias_vector, QUANTIZED=(A_scale_ptr is not None))
+        
+        # Convert to output dtype
+        result = convert_dtype(acc, C.type.element_ty)
+        
+        # ============================================================
+        # Phase 5: Store - CU → global movement
+        # ============================================================
+        store_func(
+            C, result,
+            row_indices, col_indices,
+            M, N,
+            stride_cm, stride_cn,
+            BLOCK_SIZE_M, BLOCK_SIZE_N,
+        )
