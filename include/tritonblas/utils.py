@@ -89,6 +89,27 @@ def matmul_input_gen(
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Initialize a tensor and (optionally) quantize to FP8 or INT8 using per-channel scaling.
+
+    Args:
+        size: Shape of the tensor to create (M, N)
+        dtype: Target dtype 
+        init_type: Initialization method ("hpl", "trig_float", "zeros", "randn")
+        quantize: Quantization mode - None (no quant), "auto" (based on dtype), "fp8", or "int8"
+        min_scale: Minimum scale value to prevent division by very small numbers
+
+    Returns:
+        - If no quantization: Tensor[dtype]
+        - If quantized: Tuple of (quantized_tensor, scale) where scale has shape (M, 1)
+          and represents per-row scaling along dimension 1
+
+    Quantization method:
+        - For "fp8": The tensor is scaled per row so that the maximum absolute value in each row
+          maps to the maximum representable value of the FP8 dtype. The scale tensor contains one
+          value per row (shape (M, 1)), and quantization is performed as q = (base / scale).to(dtype).
+        - For "int8": The tensor is scaled per row so that the maximum absolute value in each row
+          maps to 127. The scale tensor contains one value per row (shape (M, 1)), and quantization
+          is performed as q = round(base / scale).clamp(-127, 127).to(torch.int8).
+        - The scale tensor is always float32.
     """
     dtype = _ensure_dtype(dtype)
     device = "cuda"
