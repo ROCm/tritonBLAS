@@ -97,6 +97,7 @@ def bench_matmul(
     output_csv=None,
     write_csv_freq=100,
     enable_streamk=False,
+    check_correctness=False,
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -202,7 +203,7 @@ def bench_matmul(
                 write_csv(output_csv, benchmark_results)
         count = count + 1
 
-        if args.checkcorrectness:
+        if check_correctness:
             print("correctness: ", end=" ", flush=True)
             test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk, init_type)
 
@@ -302,6 +303,7 @@ if __name__ == "__main__":
         write_csv_freq=args.csv_write_freq,
         print_verbose=args.print_verbose,
         enable_streamk=args.enable_streamk,
+        check_correctness=args.checkcorrectness,
     )
 
     if args.output_csv:
