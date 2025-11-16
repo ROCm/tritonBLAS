@@ -184,6 +184,35 @@ def generate_matmul_inputs(
 ) -> MatmulInputs:
     """
     Produce tensors (and optional scale metadata) for matmul benchmarks/tests.
+
+    Generates A (m×k), B (k×n), C (m×n), and bias (m,) tensors. For quantized dtypes
+    (fp8/int8), also produces per-channel scale vectors for A and B.
+
+    Args:
+        m (int): Number of rows of output matrix C (and A if not transposed).
+        n (int): Number of columns of output matrix C (and B if not transposed).
+        k (int): Shared dimension for A and B.
+        in_dtype (torch.dtype or str): Data type for input matrices A and B.
+        out_dtype (torch.dtype or str): Data type for output matrix C and bias.
+        transA (str): "T" if A is stored as m×k, "N" if stored as k×m and needs transpose.
+        transB (str): "T" if B is stored as k×n, "N" if stored as n×k and needs transpose.
+        init_type (str): Initialization method for A and B ("randn", "hpl", "trig_float", "zeros").
+        device (str, optional): Device to allocate tensors on. Default: "cuda".
+        quantize_mode (str, optional): "auto" (quantize if dtype is fp8/int8), "fp8", "int8", or None.
+
+    Returns:
+        MatmulInputs: Dataclass with fields:
+            - A (Tensor): Input matrix A, shape (m, k) after any transpose.
+            - B (Tensor): Input matrix B, shape (k, n) after any transpose.
+            - C (Tensor): Output matrix, shape (m, n).
+            - bias (Tensor): Bias vector, shape (m,).
+            - scaleA (Tensor or None): Per-channel scale for A (if quantized), shape (k,) or None.
+            - scaleB (Tensor or None): Per-channel scale for B (if quantized), shape (k,) or None.
+
+    Notes:
+        - If quantization is enabled (via quantize_mode or dtype), A and B are quantized and scaleA/scaleB are populated.
+        - The shapes of A and B depend on transA/transB: if "T", shape is (m, k)/(k, n); if "N", input is transposed.
+        - Output C and bias are always allocated as (m, n) and (m,) respectively.
     """
     in_dtype = _ensure_dtype(in_dtype)
     out_dtype = _ensure_dtype(out_dtype)
