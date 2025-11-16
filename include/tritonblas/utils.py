@@ -141,13 +141,13 @@ def matmul_input_gen(
 
     if mode == "fp8":
         dtypeMax = torch.finfo(dtype).max
-        max_base = base.abs().float().amax(dim=1, keepdim=True)
-        scale = torch.clamp(max_base / dtypeMax, min=min_scale)
+        max_base = torch.clamp(base.abs().amax(dim=1, keepdim=True), min=min_scale)
+        scale = max_base / dtypeMax
         q = (base / scale).to(dtype)
     elif mode == "int8":
         dtypeMax = 127.0
-        max_base = base.abs().float().amax(dim=1, keepdim=True)
-        scale = torch.clamp(max_base / dtypeMax, min=min_scale)
+        max_base = torch.clamp(base.abs().amax(dim=1, keepdim=True), min=min_scale)
+        scale = max_base / dtypeMax
         q = torch.round(base / scale).clamp_(-dtypeMax, dtypeMax).to(torch.int8)
     else:
         raise ValueError(f"Unsupported quantize mode: {mode}")
