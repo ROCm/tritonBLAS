@@ -228,6 +228,10 @@ def generate_matmul_inputs(
     """
     in_dtype = _ensure_dtype(in_dtype)
     out_dtype = _ensure_dtype(out_dtype)
+    if transA not in {"T", "N"}:
+        raise ValueError(f"transA must be 'T' or 'N', got: {transA}")
+    if transB not in {"T", "N"}:
+        raise ValueError(f"transB must be 'T' or 'N', got: {transB}")
     needs_quant = False
     if quantize_mode == "auto":
         needs_quant = _is_float8_like(in_dtype) or _is_int8(in_dtype)
