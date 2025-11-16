@@ -196,9 +196,8 @@ def quantize_tensor_per_channel(
 
 
 def _init_matrix(shape: Tuple[int, int], init_type: str, device: str = "cuda") -> torch.Tensor:
+    """Initialize a float32 matrix with the specified shape and initialization type."""
     tensor = matmul_input_gen(shape, torch.float32, init_type, quantize=None)
-    if isinstance(tensor, tuple):
-        tensor = tensor[0]
     return tensor.to(device)
 
 
