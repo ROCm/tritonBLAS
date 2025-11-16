@@ -1,7 +1,8 @@
 import pytest
-import torch
-import triton
-import tritonblas
+import torch  # type: ignore
+import triton  # type: ignore
+import tritonblas  # type: ignore
+from tritonblas.utils import generate_matmul_inputs  # type: ignore
 
 
 @pytest.mark.parametrize(
@@ -10,7 +11,7 @@ import tritonblas
         (8192, 8192, 8192),
         (4864, 8192, 4160),
         (4096, 4096, 4096),
-        (512,2048,970132),
+        (512, 2048, 970132),
     ],
 )
 @pytest.mark.parametrize(
@@ -40,37 +41,19 @@ import tritonblas
     ],
 )
 def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
+    """Test non-quantized matmul with all transpose combinations using shared input generation utilities."""
+    init_type = "randn"
 
-    # Adjust dimensions for transposition and apply tensor.T if needed
-    if transA == "T":
-        A_size = (m, k)  # A is MxK
-    else:
-        A_size = (k, m)  # A is KxM (we will later transpose it with .T)
-
-    if transB == "T":
-        B_size = (k, n)  # B is KxN
-    else:
-        B_size = (n, k)  # B is NxK (we will later transpose it with .T)
-
-    A = torch.randn(A_size, device="cuda", dtype=in_dtype)
-    B = torch.randn(B_size, device="cuda", dtype=in_dtype)
-
-    # Apply transpose on A or B if necessary (only needed for "N" case)
-    if transA == "N":
-        A = A.T  # Apply transpose to A if transA is "N"
-
-    if transB == "N":
-        B = B.T  # Apply transpose to B if transB is "N"
-
-    # Allocate Tensors
-    C = torch.zeros((m, n), device="cuda", dtype=out_dtype)
-    bias = torch.zeros((m,), device="cuda", dtype=out_dtype)
+    # Generate all inputs using shared utility (handles transposes automatically)
+    inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
 
     # Run TritonBLAS matmul
-    selector = tritonblas.MatmulHeuristicResult(m, n, k, A.dtype, B.dtype, C.dtype)
-    tritonblas.matmul_lt(A, B, C, selector, enable_streamk)
+    selector = tritonblas.MatmulHeuristicResult(
+        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype
+    )
+    tritonblas.matmul_lt(inputs.A, inputs.B, inputs.C, selector, enable_streamk)
 
-    # Check correctnes: Fix tolerance later
-    torch_c = torch.matmul(A, B)
-#    torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1e-2, rtol=1e-3)
-    torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1, rtol=1)
+    # Check correctness
+    torch_c = torch.matmul(inputs.A, inputs.B)
+    #    torch.testing.assert_close(inputs.C.to(out_dtype), torch_c, atol=1e-2, rtol=1e-3)
+    torch.testing.assert_close(inputs.C.to(out_dtype), torch_c, atol=1, rtol=1)
