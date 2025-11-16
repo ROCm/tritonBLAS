@@ -15,7 +15,7 @@ import tritonblas  # type: ignore
 import yaml  # type: ignore
 from tqdm import tqdm  # type: ignore
 
-from tritonblas.utils import MatmulInputs, generate_matmul_inputs, str_to_dtype  # type: ignore
+from tritonblas.utils import MatmulInputs, generate_matmul_inputs, str_to_dtype, _is_float8_like  # type: ignore
 
 
 def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk, init_type="randn"):
@@ -54,7 +54,7 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk, in
             torch.testing.assert_close(
                 inputs.C.to(torch.float32), torch_c.to(torch.float32), atol=0.02, rtol=1e-2
             )
-        elif str(out_dtype).startswith("torch.float8"):
+        elif _is_float8_like(out_dtype):
             torch.testing.assert_close(
                 inputs.C.to(torch.float32), torch_c.to(torch.float32), atol=2.0, rtol=0.2
             )
