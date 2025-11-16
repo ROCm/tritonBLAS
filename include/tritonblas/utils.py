@@ -55,12 +55,22 @@ def _is_quantized(init_result):
 
 @dataclass
 class MatmulInputs:
-    """Container for matmul tensors plus optional scale metadata."""
+    """
+    Container for matmul tensors plus optional scale metadata.
+
+    Fields:
+        A (torch.Tensor): The left-hand matrix.
+        B (torch.Tensor): The right-hand matrix.
+        C (torch.Tensor): The output matrix.
+        bias (torch.Tensor): Optional bias tensor, reserved for future support of bias-enabled matmul operations.
+        scaleA (Optional[torch.Tensor]): Optional scale for quantized A.
+        scaleB (Optional[torch.Tensor]): Optional scale for quantized B.
+    """
 
     A: torch.Tensor
     B: torch.Tensor
     C: torch.Tensor
-    bias: torch.Tensor
+    bias: torch.Tensor  # Reserved for future support of bias-enabled matmul operations.
     scaleA: Optional[torch.Tensor] = None
     scaleB: Optional[torch.Tensor] = None
 
