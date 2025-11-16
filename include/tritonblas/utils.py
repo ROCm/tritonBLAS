@@ -143,7 +143,19 @@ def quantize_tensor_per_channel(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize `tensor` along `axis` using per-channel scaling suitable for FP8/INT8 kernels.
-    Returns the quantized tensor and a 1D scale vector.
+
+    Args:
+        tensor: Input tensor to quantize.
+        target_dtype: Target quantized dtype (FP8 or INT8).
+        axis: Dimension along which to compute per-channel scales.
+        min_scale: Minimum scale value to prevent division by zero.
+
+    Returns:
+        Tuple of (quantized_tensor, scale_vector) where scale_vector is 1D
+        (after squeezing along `axis`). The quantization formula is
+        `q = base * (1 / scale)` or equivalently `q = base / scale`.
+        The original tensor can be approximately reconstructed as
+        `original ≈ quantized_tensor * scale_vector` (broadcasted along `axis`).
     """
     dtype = _ensure_dtype(target_dtype)
     if not (_is_float8_like(dtype) or _is_int8(dtype)):
