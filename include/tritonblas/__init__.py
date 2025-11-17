@@ -3,13 +3,20 @@ from .matmul import matmul, matmul_a8w8
 from .matmul import matmul_lt, matmul_a8w8_lt
 from .origami import MatmulHeuristicResult
 
-# Import indexing, algorithms, and memory as submodules
-from .internal import indexing, algorithms, memory
+# Import kernels
+from . import kernels
 
-# Register in sys.modules so they can be imported as tritonblas.{module}
-sys.modules['tritonblas.indexing'] = indexing
-sys.modules['tritonblas.algorithms'] = algorithms
-sys.modules['tritonblas.memory'] = memory
+# Import stages from kernels and register as '_' for clean import syntax
+from .kernels import stages
+
+# Register stages as '_' in sys.modules
+sys.modules['tritonblas._'] = stages
+sys.modules['tritonblas._.algorithms'] = stages.algorithms
+sys.modules['tritonblas._.indexing'] = stages.indexing
+sys.modules['tritonblas._.memory'] = stages.memory
+
+# Also register kernels
+sys.modules['tritonblas.kernels'] = kernels
 
 __all__ = [
     'matmul',
@@ -17,7 +24,5 @@ __all__ = [
     'matmul_lt',
     'matmul_a8w8_lt',
     'MatmulHeuristicResult',
-    'indexing',
-    'algorithms',
-    'memory',
+    'kernels',
 ]

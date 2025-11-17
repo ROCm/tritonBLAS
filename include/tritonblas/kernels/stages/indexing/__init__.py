@@ -12,6 +12,7 @@ from .utils import (
 )
 from .prologue import grid_setup
 from .preamble import idx2coord, tile_coords, compute_scale_indices
+from .pid_transforms import chiplet_transform_chunked
 
 __all__ = [
     'pid_identity',
@@ -21,4 +22,5 @@ __all__ = [
     'idx2coord',
     'tile_coords',
     'compute_scale_indices',
+    'chiplet_transform_chunked',
 ]

@@ -2,10 +2,11 @@ import triton
 import triton.language as tl
 import torch
 
-from .indexing import grid_setup, idx2coord, compute_scale_indices
-from .algorithms import multiply_accumulate, gemm_loop
-from .algorithms.binary import apply_scales, add_vector
-from .algorithms.unary import convert_dtype
+from .stages.indexing import grid_setup, idx2coord, compute_scale_indices
+from .stages.algorithms import multiply_accumulate, gemm_loop
+from .stages.algorithms.binary import apply_scales, add_vector
+from .stages.algorithms.unary import convert_dtype
+from .stages.memory import load, store
 
 @triton.jit()
 def persistent_matmul(
