@@ -26,7 +26,7 @@ from utils.file_generator import (
     generate_profile_tasks,
     read_config,
 )
-from utils.utils import (
+from tritonblas.utils import (
     get_default_tuning_result_filename,
     get_filename_compile_driver,
     get_filename_myKernels,
@@ -374,83 +374,219 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dtype_p, 
     return minTime, bestConfig, compile_time, profile_time, post_time
 
 
-def gen_input(M, N, ty_name, needTrans, seed, init_type, device='cuda'):
+def gen_input(M, N, ty_name, needTrans, seed, init_type, device='cuda', is_matrix_b=False):
+    """
+    Generate input tensor for kernel execution.
+
+    Args:
+        M, N: Dimensions of the tensor (final shape after transpose if needed)
+        ty_name: Type name ('fp16', 'bf16', 'fp32', 'fp8', 'bf8', 'int8')
+        needTrans: Whether to transpose the tensor
+        seed: Random seed
+        init_type: Initialization type ('randn', 'hpl', 'trig_float', 'zeros')
+        device: Device to create tensor on
+        is_matrix_b: If True, this is matrix B (needs per-column scaling). If False, it's matrix A (needs per-row scaling).
+
+    Returns:
+        (input_tensor, reference_tensor, scale_tensor)
+        - input_tensor: The actual tensor to pass to kernel
+        - reference_tensor: FP16 tensor for correctness checking
+        - scale_tensor: Scale tensor for quantization (None if not quantized)
+          For A: scale shape is (M,) for per-row scaling
+          For B: scale shape is (N,) for per-column scaling
+    """
     d_type = name_to_tl_types[ty_name]
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    @triton.jit
-    def copy_kernel(input_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-        offsets = tl.program_id(axis=0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offsets < n_elements
-        input = tl.load(input_ptr + offsets, mask=mask)
-        output = input
-        tl.store(output_ptr + offsets, output, mask=mask)
+    # Check if quantization is needed
+    is_quantized = ty_name in ['fp8', 'bf8', 'int8']
 
-    def init_by_size_and_type(size, dtype, init_type):
-        if init_type == 'hpl':
-            return torch.empty(size, device='cuda', dtype=dtype).uniform_(-0.5, 0.5)
-        # This init type has element[i] in row[j] equal to sin(i+j*N)
-        elif init_type == 'trig_float':
-            M, N = size
-            return torch.reshape(torch.arange(0, M * N), (M, N)).sin().to(dtype=dtype, device='cuda')
-        elif init_type == 'zeros':
-            return torch.zeros(size, dtype=dtype, device='cuda')
-        elif init_type == "randn":
-            temp = torch.randn(size, dtype=dtype, device='cuda')
-            return temp
+    if is_quantized:
+        # Reuse the same quantization logic as generate_matmul_inputs()
+        from tritonblas.utils import _init_matrix, quantize_tensor_per_channel
+
+        # Create base tensor in final shape (after transpose if needed)
+        # _init_matrix creates (M, N) shape
+        base_tensor = _init_matrix((M, N), init_type, device=device)
+
+        # Determine quantization axis based on whether this is A or B
+        # For A (is_matrix_b=False): quantize along axis=1 (columns) → per-row scale (M,)
+        # For B (is_matrix_b=True): quantize along axis=0 (rows) → per-column scale (N,)
+        quantize_axis = 0 if is_matrix_b else 1
+
+        # Quantize using the same function as generate_matmul_inputs()
+        quantized_tensor, scale_1d = quantize_tensor_per_channel(
+            base_tensor, ty_name, axis=quantize_axis
+        )
+
+        # Handle transpose: if needTrans, transpose the quantized tensor
+        # Scale stays the same (it's already 1D with correct shape)
+        if needTrans:
+            quantized_tensor = quantized_tensor.T
+            # Note: For B with transpose, we might need to adjust, but for now
+            # the scale shape (N,) should still be correct for per-column scaling
+
+        # Generate reference tensor for correctness checking
+        # Dequantize: original ≈ quantized * scale (broadcast)
+        if ty_name == 'int8':
+            # For int8: dequantize = quantized * scale (broadcast)
+            if scale_1d is not None:
+                # scale_1d is (M,) for A or (N,) for B
+                # Broadcast correctly: for (M, N) tensor, (M,) broadcasts along rows, (N,) along columns
+                if is_matrix_b:
+                    # For B: scale is (N,), need to broadcast along columns
+                    input_f16 = (quantized_tensor.float() * scale_1d[None, :]).to(torch.float16)
+                else:
+                    # For A: scale is (M,), need to broadcast along rows
+                    input_f16 = (quantized_tensor.float() * scale_1d[:, None]).to(torch.float16)
+            else:
+                input_f16 = quantized_tensor.to(torch.float16)
         else:
-            raise ValueError("Bad matrix initialization type.")
+            # For fp8/bf8: use existing conversion logic
+            if (d_type == tl.float8e4b8 and TORCH_HAS_FP8E4B8) or \
+               (d_type == tl.float8e5b16 and TORCH_HAS_FP8E5B16):
+                input_f16 = quantized_tensor.to(torch.float16)
+            else:
+                # Fallback: convert via int8 reinterpret
+                @triton.jit
+                def copy_kernel(input_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+                    offsets = tl.program_id(axis=0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    mask = offsets < n_elements
+                    input = tl.load(input_ptr + offsets, mask=mask)
+                    output = input
+                    tl.store(output_ptr + offsets, output, mask=mask)
 
-    raw_data = init_by_size_and_type((N, M) if needTrans else (M, N), torch.float32, init_type)
-    if needTrans:
-        raw_data = raw_data.T
-    if (d_type == tl.float8e4b8 and TORCH_HAS_FP8E4B8) or \
-        (d_type == tl.float8e5b16 and TORCH_HAS_FP8E5B16) or not d_type.is_fp8():
-        input = raw_data.to(tl_to_torch_types[d_type])
-        input_f16 = input.to(torch.float16)
+                f8_tensor = quantized_tensor.to(torch.int8)
+                input = triton.reinterpret(f8_tensor, d_type)
+                input_f16 = torch.empty_like(f8_tensor, dtype=torch.float16)
+                grid = lambda meta: (triton.cdiv(quantized_tensor.numel(), meta['BLOCK_SIZE']), )
+                copy_kernel[grid](input, input_f16, quantized_tensor.numel(), BLOCK_SIZE=1024)
+
+        return quantized_tensor, input_f16, scale_1d
     else:
-        f8_tensor = raw_data.to(torch.int8)
-        # keep only two bits of exponent to avoid overflow
-        f8_tensor = f8_tensor & 0b00111111
-        input = triton.reinterpret(f8_tensor, d_type)
-        input_f16 = torch.empty_like(f8_tensor, dtype=torch.float16)
-        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-        n_elements = raw_data.numel()
-        copy_kernel[grid](input, input_f16, n_elements, BLOCK_SIZE=1024)
+        # Non-quantized path (existing code - unchanged for backward compatibility)
+        @triton.jit
+        def copy_kernel(input_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+            offsets = tl.program_id(axis=0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < n_elements
+            input = tl.load(input_ptr + offsets, mask=mask)
+            output = input
+            tl.store(output_ptr + offsets, output, mask=mask)
 
-    return input, input_f16
+        def init_by_size_and_type(size, dtype, init_type):
+            if init_type == 'hpl':
+                return torch.empty(size, device='cuda', dtype=dtype).uniform_(-0.5, 0.5)
+            # This init type has element[i] in row[j] equal to sin(i+j*N)
+            elif init_type == 'trig_float':
+                M, N = size
+                return torch.reshape(torch.arange(0, M * N), (M, N)).sin().to(dtype=dtype, device='cuda')
+            elif init_type == 'zeros':
+                return torch.zeros(size, dtype=dtype, device='cuda')
+            elif init_type == "randn":
+                temp = torch.randn(size, dtype=dtype, device='cuda')
+                return temp
+            else:
+                raise ValueError("Bad matrix initialization type.")
+
+        raw_data = init_by_size_and_type((N, M) if needTrans else (M, N), torch.float32, init_type)
+        if needTrans:
+            raw_data = raw_data.T
+        if (d_type == tl.float8e4b8 and TORCH_HAS_FP8E4B8) or \
+            (d_type == tl.float8e5b16 and TORCH_HAS_FP8E5B16) or not d_type.is_fp8():
+            input = raw_data.to(tl_to_torch_types[d_type])
+            input_f16 = input.to(torch.float16)
+        else:
+            f8_tensor = raw_data.to(torch.int8)
+            # keep only two bits of exponent to avoid overflow
+            f8_tensor = f8_tensor & 0b00111111
+            input = triton.reinterpret(f8_tensor, d_type)
+            input_f16 = torch.empty_like(f8_tensor, dtype=torch.float16)
+            grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+            n_elements = raw_data.numel()
+            copy_kernel[grid](input, input_f16, n_elements, BLOCK_SIZE=1024)
+
+        return input, input_f16, None  # No scale for non-quantized types
 
 
 # generate inputs/outputs according to rotating tensor size
 def gen_rotating_tensors(M, N, K, dtype_a, need_Trans_a, dtype_b, need_Trans_b, dtype_c, seed, init_type,
                          rotating_buffer_size, bias_size, device='cuda'):
+    """
+    Generate rotating tensors for profiling. 
+
+    Uses generate_matmul_inputs() which now supports separate dtype_a and dtype_b.
+
+    Note: need_Trans_a/need_Trans_b are boolean flags:
+    - need_Trans_a=True means A is transposed (stored as k×m, needs transpose to m×k)
+    - need_Trans_a=False means A is not transposed (stored as m×k)
+    This maps to generate_matmul_inputs() transA/transB:
+    - transA="T" means stored as m×k (not transposed)
+    - transA="N" means stored as k×m (needs transpose)
+    So: need_Trans_a=True → transA="N", need_Trans_a=False → transA="T"
+    """
+    from tritonblas.utils import generate_matmul_inputs
+
     a_size = M * K * type_name_to_bytes(dtype_a)
     b_size = K * N * type_name_to_bytes(dtype_b)
     c_size = M * N * type_name_to_bytes(dtype_c)
-    bias_size = bias_size * type_name_to_bytes(dtype_c)
+    bias_size_bytes = bias_size * type_name_to_bytes(dtype_c)
 
-    total_size = a_size + b_size + c_size + bias_size
-    block_count = rotating_buffer_size * 1024 * 1024 // total_size
-    block_count = max(1, block_count)
+    total_size = a_size + b_size + c_size + bias_size_bytes
+    if total_size == 0:
+        # Handle edge case when M, N, K are all 0
+        block_count = 1
+    else:
+        block_count = rotating_buffer_size * 1024 * 1024 // total_size
+        block_count = max(1, block_count)
+
+    # Convert boolean flags to "T"/"N" format for generate_matmul_inputs
+    transA = "N" if need_Trans_a else "T"  # need_Trans_a=True means needs transpose → "N"
+    transB = "N" if need_Trans_b else "T"  # need_Trans_b=True means needs transpose → "N"
 
     # generate input and outputs
     a = []
+    a_scales = []
     b = []
+    b_scales = []
     c = []
     bias = []
-    for i in range(block_count):
-        in_a, in_a_fp16 = gen_input(M, K, dtype_a, need_Trans_a, 1, init_type, device='cuda')
-        a.append(in_a)
-        in_b, in_b_fp16 = gen_input(K, N, dtype_b, need_Trans_b, 2, init_type, device='cuda')
-        b.append(in_b)
-        out_c = torch.zeros((M, N), dtype=tl_to_torch_types[name_to_tl_types[dtype_c]], device='cuda')
-        c.append(out_c)
-        if bias_size > 0:
-            bs, bs_fp16 = gen_input(M, 1, dtype_b, need_Trans_b, 2, init_type, device='cuda')
-            bias.append(bs.squeeze())
 
-    in_outs = {"rotating_num": block_count, "input_a": a, "input_b": b, "output_c": c, "bias": bias}
+    for i in range(block_count):
+        # Use generate_matmul_inputs() with separate dtype_a and dtype_b - it handles quantization correctly!
+        inputs = generate_matmul_inputs(
+            m=M, n=N, k=K,
+            dtype_a=dtype_a,  # Separate dtype for A
+            dtype_b=dtype_b,  # Separate dtype for B
+            out_dtype=dtype_c,
+            transA=transA,
+            transB=transB,
+            init_type=init_type,
+            device=device,
+            quantize_mode="auto",  # Automatically quantizes if dtype is fp8/int8
+            seed=seed + i  # Different seed for each iteration
+        )
+
+        # Extract all tensors and scales
+        a.append(inputs.A)
+        a_scales.append(inputs.scaleA)  # Shape: (M,) for per-row scaling
+        b.append(inputs.B)
+        b_scales.append(inputs.scaleB)  # Shape: (N,) for per-column scaling
+        c.append(inputs.C)
+        if bias_size > 0:
+            bias.append(inputs.bias)  # Shape (M,)
+        else:
+            bias.append(None)
+
+    in_outs = {
+        "rotating_num": block_count,
+        "input_a": a,
+        "input_b": b,
+        "output_c": c,
+        "bias": bias if bias_size > 0 else [None] * block_count,
+        "a_scales": a_scales,  # List of scales (None for non-quantized, (M,) for quantized)
+        "b_scales": b_scales,  # List of scales (None for non-quantized, (N,) for quantized)
+    }
 
     return in_outs
 
@@ -494,7 +630,7 @@ def matmul(
     a_scale_ptr = None
     b_scale_ptr = None
     quantized = False
-    
+
     if kernel_type == 'persistent':
         # Persistent kernel - no P, locks, STREAMK_TILES
         kernel_func[grid](
@@ -575,7 +711,7 @@ def matmul(
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
         )
-    
+
     return c
 
 
@@ -584,16 +720,51 @@ def test_correctness(kernel_func, M, N, K, col_a, col_b, dtype_a, dtype_b, dtype
     block_m, block_n, block_k, group_m, num_sms, num_warps, num_stages, waves_per_eu, mfmaInstrSize, kpack, chunk_size = read_config(
         config)
     use_bias = bias_vector
-    torch.manual_seed(0)
-    #a = torch.randn((M, K), device='cuda', dtype=datatype)
-    #b = torch.randn((K, N), device='cuda', dtype=datatype)
-    a, a_fp16 = gen_input(M, K, dtype_a, col_a, 1, init_type, device='cuda')
-    b, b_fp16 = gen_input(K, N, dtype_b, col_b, 2, init_type, device='cuda')
-    bias = None
-    if use_bias:
-        bias, bias_fp16 = gen_input(M, 1, dtype_b, col_b, 2, init_type, device='cuda')
-        bias = bias.squeeze()
-        bias_fp16 = bias.squeeze()
+
+    # Convert boolean flags to "T"/"N" format
+    transA = "N" if col_a else "T"  # col_a=True means column-major (needs transpose) → "N"
+    transB = "N" if col_b else "T"  # col_b=True means column-major (needs transpose) → "N"
+
+    # Use generate_matmul_inputs() - it handles quantization correctly with separate dtype_a and dtype_b!
+    from tritonblas.utils import generate_matmul_inputs
+
+    inputs = generate_matmul_inputs(
+        m=M, n=N, k=K,
+        dtype_a=dtype_a,
+        dtype_b=dtype_b,
+        out_dtype=dtype_c,
+        transA=transA,
+        transB=transB,
+        init_type=init_type,
+        device='cuda',
+        quantize_mode="auto",
+        seed=0
+    )
+
+    a = inputs.A
+    b = inputs.B
+    a_scale = inputs.scaleA  # Shape: (M,)
+    b_scale = inputs.scaleB  # Shape: (N,)
+
+    # Generate reference tensors for correctness checking (dequantize if needed)
+    if a_scale is not None:
+        if dtype_a == 'int8':
+            a_fp16 = (a.float() * a_scale[:, None]).to(torch.float16)
+        else:
+            a_fp16 = a.to(torch.float16)
+    else:
+        a_fp16 = a.to(torch.float16)
+
+    if b_scale is not None:
+        if dtype_b == 'int8':
+            b_fp16 = (b.float() * b_scale[None, :]).to(torch.float16)
+        else:
+            b_fp16 = b.to(torch.float16)
+    else:
+        b_fp16 = b.to(torch.float16)
+
+    bias = inputs.bias if use_bias else None
+    bias_fp16 = bias.to(torch.float16) if use_bias and bias is not None else None
     # Allocates output.
     c = torch.zeros((M, N), device=a.device, dtype=tl_to_torch_types[name_to_tl_types[dtype_c]])
     locks = torch.zeros((num_sms, ), device="cuda", dtype=torch.uint8)
@@ -728,7 +899,7 @@ def main():
     module_name, kernel_name = args.kernel.split(',')
     module_name = module_name.strip()
     kernel_name = kernel_name.strip()
-    
+
     # Auto-detect kernel type from module name
     if args.kernel_type == 'auto':
         if 'persistent' in module_name.lower():
@@ -740,11 +911,11 @@ def main():
             kernel_type = 'streamk'
     else:
         kernel_type = args.kernel_type
-    
+
     print(f"Tuning kernel: {module_name}.{kernel_name} (type: {kernel_type})")
     if args.use_selector:
         print("Using origami selector for tile sizes (reduced tuning space)")
-    
+
     module = importlib.import_module(module_name)
     kernel_func = getattr(module, kernel_name)
     num_cus = get_num_sms()
@@ -880,7 +1051,7 @@ def main():
             torch_dtype_a = dtype_map.get(dtype_a, torch.float16)
             torch_dtype_b = dtype_map.get(dtype_b, torch.float16)
             torch_dtype_c = dtype_map.get(dtype_c, torch.float16)
-            
+
             pruned_configs = get_tuning_space_with_selector(
                 M, N, K, torch_dtype_a, torch_dtype_b, torch_dtype_c, num_cus
             )
