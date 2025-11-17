@@ -10,15 +10,15 @@ from .utils import (
     pid_chiplet_chunked,
     dot_acc,
 )
-from .prologue import grid_index
-from .preamble import preamble, tile_coords, compute_scale_indices
+from .prologue import grid_setup
+from .preamble import idx2coord, tile_coords, compute_scale_indices
 
 __all__ = [
     'pid_identity',
     'pid_chiplet_chunked',
     'dot_acc',
-    'grid_index',
-    'preamble',
+    'grid_setup',
+    'idx2coord',
     'tile_coords',
     'compute_scale_indices',
 ]

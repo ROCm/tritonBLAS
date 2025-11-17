@@ -12,10 +12,9 @@ def store(
     row_indices, col_indices,
     M, N,
     stride_cm, stride_cn,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
 ):
     """
-    Phase 5: Store - Write tile from registers to global memory.
+    Store tile from registers to global memory.
     
     This phase handles all write-back logic - address computation and stores.
     All write-back logic lives here, separate from math.
@@ -27,7 +26,6 @@ def store(
         col_indices: Column indices [BLOCK_SIZE_N] (already formatted with max_contiguous/multiple_of)
         M, N: Matrix dimensions
         stride_cm, stride_cn: Strides for C in M and N dimensions
-        BLOCK_SIZE_M, BLOCK_SIZE_N: Tile sizes
     """
     # Compute output addresses
     C_ptrs = C + row_indices[:, None] * stride_cm + col_indices[None, :] * stride_cn

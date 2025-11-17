@@ -9,14 +9,14 @@ from .utils import pid_identity, pid_chiplet_chunked
 
 
 @triton.jit
-def grid_index(
+def grid_setup(
     M, N, K,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
     NUM_SMS: tl.constexpr, NUM_XCDS: tl.constexpr, CHUNK_SIZE: tl.constexpr,
     USE_CHIPLET_PID: tl.constexpr,
 ):
     """
-    Compute grid indexing: program ID and tile grid dimensions.
+    Set up grid dimensions and get program ID.
     
     Args:
         M, N, K: Matrix dimensions

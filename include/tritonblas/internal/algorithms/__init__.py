@@ -35,6 +35,7 @@ from .unary import (
     apply_activation,
 )
 from .postprocess import postprocess
+from .gemm_loop import gemm_loop
 
 __all__ = [
     # Binary operations
@@ -46,4 +47,5 @@ __all__ = [
     'apply_activation',
     # Composition
     'postprocess',
+    'gemm_loop',
 ]
