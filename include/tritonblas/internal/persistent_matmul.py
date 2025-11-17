@@ -34,7 +34,7 @@ def persistent_matmul(
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
-    ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    ALLOW_TF32: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -71,8 +71,10 @@ def persistent_matmul(
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
         if BIAS:
-            bias_ = bias_ptr + rm * stride_bias
-            bias = tl.load(bias_, mask=rm < M, other=0.0)
+            #bias_ = bias_ptr + rm * stride_bias
+            #bias = tl.load(bias_, mask=rm < M, other=0.0)
+            bias_ = bias_ptr + rn * stride_bias
+            bias = tl.load(bias_, mask=rn < N, other=0.0)
 
         loop_k = tl.cdiv(K, BLOCK_SIZE_K)
         if not EVEN_K:
@@ -132,15 +134,11 @@ def persistent_matmul(
 
         # Unified bias handling
         if BIAS:
-            if QUANTIZED:
-                # For quantized mode: convert bias to float32, add to acc, then convert to output dtype
-                bias_float = bias.to(tl.float32)
-                c = acc + bias_float[:, None]
-                c = c.to(C.type.element_ty)
-            else:
-                # For non-quantized mode: convert acc to output dtype, then add bias
-                c = acc.to(C.type.element_ty)
-                c += bias[:, None]
+            # Convert bias to accumulator precision, add in high precision, then convert to output dtype
+            # This matches standard addmm() behavior for better numerical accuracy
+            #bias_acc = bias.to(acc_dtype)
+            #c = (acc + bias_acc[None, :]).to(C.type.element_ty)
+            c = (acc + bias[None, :]).to(C.type.element_ty)
         else:
             c = acc.to(C.type.element_ty)
 
