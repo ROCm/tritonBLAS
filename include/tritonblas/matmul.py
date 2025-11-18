@@ -9,15 +9,35 @@ from .origami import MatmulHeuristicResult
 from typing import Dict, Tuple, Optional
 
 _tensor_cache = {}
-current_device_index = torch.cuda.current_device()
-current_device = torch.cuda.get_device_properties(current_device_index)
-MAX_SMS = current_device.multi_processor_count
-# TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
+
+# Lazy initialization of device properties and global buffers
+_device_props = None
+_global_locks = None
+_global_P = None
 MAX_BLOCK_SIZE = 65536
 
-# Global pre-allocated buffers
-_global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
-_global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+def _get_device_props():
+    """Lazy initialization of CUDA device properties."""
+    global _device_props
+    if _device_props is None:
+        current_device_index = torch.cuda.current_device()
+        _device_props = torch.cuda.get_device_properties(current_device_index)
+    return _device_props
+
+def _get_global_buffers():
+    """
+    Lazy initialization of global pre-allocated buffers.
+    
+    Buffers are allocated only once on first call and reused thereafter.
+    This avoids allocation during module import while maintaining performance.
+    """
+    global _global_locks, _global_P
+    if _global_locks is None or _global_P is None:
+        device_props = _get_device_props()
+        MAX_SMS = device_props.multi_processor_count
+        _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
+        _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+    return _global_locks, _global_P
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -168,7 +188,11 @@ def streamk_matmul_lt(
     block_size = BLK_M * BLK_N
 
     # Use global buffers with optimized zeroing
+    device_props = _get_device_props()
+    MAX_SMS = device_props.multi_processor_count
+    
     if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+        _global_locks, _global_P = _get_global_buffers()
         locks = _global_locks[:grids]
         P = _global_P[:grids, :block_size]
     else:

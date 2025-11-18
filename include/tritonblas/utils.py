@@ -115,16 +115,24 @@ def matmul_input_gen(
     device = "cuda"
     M, N = size
 
-    if init_type == "hpl":
-        base = torch.empty(size, device=device, dtype=torch.float32).uniform_(-0.5, 0.5)
-    elif init_type == "trig_float":
-        base = torch.arange(0, M * N, device=device, dtype=torch.float32).reshape(M, N).sin()
-    elif init_type == "zeros":
-        base = torch.zeros(size, dtype=torch.float32, device=device)
-    elif init_type == "randn":
-        base = torch.randn(size, dtype=torch.float32, device=device)
-    else:
-        raise ValueError(f"Unsupported init_type: {init_type}")
+    try:
+        if init_type == "hpl":
+            base = torch.empty(size, device=device, dtype=torch.float32).uniform_(-0.5, 0.5)
+        elif init_type == "trig_float":
+            base = torch.arange(0, M * N, device=device, dtype=torch.float32).reshape(M, N).sin()
+        elif init_type == "zeros":
+            base = torch.zeros(size, dtype=torch.float32, device=device)
+        elif init_type == "randn":
+            base = torch.randn(size, dtype=torch.float32, device=device)
+        else:
+            raise ValueError(f"Unsupported init_type: {init_type}")
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower() or "cuda" in str(e).lower():
+            raise RuntimeError(
+                f"Failed to allocate tensor of size {size} on {device}. "
+                f"This may be due to insufficient GPU memory. Error: {e}"
+            ) from e
+        raise
 
     mode = quantize
     if mode is None:
