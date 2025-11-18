@@ -226,7 +226,7 @@ def streamk_matmul_lt(
     return c
 
 def matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, bias: Optional[torch.Tensor] = None, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False, bias: Optional[torch.Tensor] = None
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
@@ -236,7 +236,7 @@ def matmul_lt(
         return persistent_matmul_lt(a, b, c, selector, bias=bias)
 
 def matmul_a8w8_lt(
-    a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, bias: Optional[torch.Tensor] = None, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False, bias: Optional[torch.Tensor] = None
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 

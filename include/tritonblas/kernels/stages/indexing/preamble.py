@@ -89,6 +89,6 @@ def compute_scale_indices(output_coord_m, output_coord_n, M, N, BLOCK_SIZE_M: tl
     Returns:
         Tuple of (row_scale_indices, col_scale_indices)
     """
-    row_scale_indices = output_coord_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
-    col_scale_indices = output_coord_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
+    row_scale_indices = (output_coord_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    col_scale_indices = (output_coord_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     return row_scale_indices, col_scale_indices

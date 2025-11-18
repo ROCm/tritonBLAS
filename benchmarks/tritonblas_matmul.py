@@ -29,7 +29,7 @@ def _is_quantized_dtype(dtype):
     return _is_float8_like(dtype) or _is_int8(dtype)
 
 
-def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
+def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk, use_bias=False):
     """Test matmul with proper input generation - handles both quantized and non-quantized dtypes"""
 
     # Adjust dimensions for transposition and apply tensor.T if needed
@@ -165,6 +165,7 @@ def bench_matmul(
     output_csv=None,
     write_csv_freq=100,
     enable_streamk=False,
+    use_bias=False,
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -247,17 +248,21 @@ def bench_matmul(
                 B = B.T
 
         C = torch.zeros((m, n), device="cuda", dtype=out_dtype)
+        
+        # Generate bias if requested
+        bias = torch.randn((m,), device="cuda", dtype=out_dtype) if use_bias else None
 
         # Compute performance metrics
         flops = lambda: 2 * m * n * k * 1e-12
         gflops = lambda ms: 2 * m * n * k * 1e-9 / (ms * 1e-3)
-        # Include scale tensors in byte count for quantized dtypes
+        # Include scale tensors and bias in byte count
         bytes_fn = lambda: (
             A.numel() * A.element_size()
             + B.numel() * B.element_size()
             + C.numel() * C.element_size()
             + (0 if scaleA is None else scaleA.numel() * scaleA.element_size())
             + (0 if scaleB is None else scaleB.numel() * scaleB.element_size())
+            + (0 if bias is None else bias.numel() * bias.element_size())
         )
 
         # Build a tritonBLAS selector config and launch matmul
@@ -276,16 +281,17 @@ def bench_matmul(
                 else:  # (1, N) case
                     scaleB_expanded = scaleB.squeeze(0)
             else:
-            matmul = lambda: tritonblas.matmul_a8w8_lt(A, B, scaleA_expanded, scaleB_expanded, C, selector, enable_streamk)
+                scaleB_expanded = None
+            matmul = lambda: tritonblas.matmul_a8w8_lt(A, B, scaleA_expanded, scaleB_expanded, C, selector, bias=bias, enable_streamk=enable_streamk)
         else:
-            matmul = lambda: tritonblas.matmul(A, B, C, enable_streamk=enable_streamk)
+            matmul = lambda: tritonblas.matmul(A, B, C, bias=bias, enable_streamk=enable_streamk)
 
         ms = triton.testing.do_bench(matmul, warmup=20, rep=20)
         perf = gflops(ms)
 
         if print_verbose:
             print(
-                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, init={init_type}, perf={perf}(GFLOPs) selected_tile={selector.config[0]}x{selector.config[1]}x{selector.config[2]}"
+                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, init={init_type}, time={ms:.4f}ms, perf={perf:.2f}GFLOPs, selected_tile={selector.config[0]}x{selector.config[1]}x{selector.config[2]}"
             )
 
         metrics = {
@@ -410,6 +416,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable Stream-K mode for matrix multiplication (default: False for persistent mode).",
     )
+    parser.add_argument(
+        "--use-bias",
+        action="store_true",
+        help="Enable bias addition in matrix multiplication (default: False).",
+    )
     args = parser.parse_args()
 
     benchmark_results = bench_matmul(
@@ -420,6 +431,7 @@ if __name__ == "__main__":
         write_csv_freq=args.csv_write_freq,
         print_verbose=args.print_verbose,
         enable_streamk=args.enable_streamk,
+        use_bias=args.use_bias,
     )
 
     if args.output_csv:

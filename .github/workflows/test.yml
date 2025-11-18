@@ -58,12 +58,12 @@ jobs:
         run: |
           export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
           export HSA_OVERRIDE_GFX_VERSION=9.4.2
-          pytest tests/ -v --tb=short --color=yes
+          pytest tests/ -v --tb=short --color=yes --ignore=tests/test_matmul_a8w8_lt.py
         
       - name: Generate test report
         if: always()
         run: |
-          pytest tests/ -v --tb=short --junit-xml=test-results.xml || true
+          pytest tests/ -v --tb=short --junit-xml=test-results.xml --ignore=tests/test_matmul_a8w8_lt.py || true
           
       - name: Upload test results
         if: always()

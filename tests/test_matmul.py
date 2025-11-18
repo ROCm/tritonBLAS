@@ -64,7 +64,7 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
     bias = torch.zeros((m,), device="cuda", dtype=out_dtype)
 
     # Run TritonBLAS matmul
-    tritonblas.matmul(A, B, C, enable_streamk)
+    tritonblas.matmul(A, B, C, bias=None, enable_streamk=enable_streamk)
 
     # Check correctnes: Fix tolerance later
     torch_c = torch.matmul(A, B)
