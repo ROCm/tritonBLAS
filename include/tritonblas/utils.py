@@ -17,22 +17,133 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-# FP8 support flags
-TORCH_HAS_FP8E5B16 = hasattr(torch, 'float8_e5m2fnuz')
-TORCH_HAS_FP8E4B8 = hasattr(torch, 'float8_e4m3fnuz')
+# FP8 support flags - check for both variants
+TORCH_HAS_FP8E5B16_FNUZ = hasattr(torch, 'float8_e5m2fnuz')
+TORCH_HAS_FP8E4B8_FNUZ = hasattr(torch, 'float8_e4m3fnuz')
+TORCH_HAS_FP8E5B16_STD = hasattr(torch, 'float8_e5m2')
+TORCH_HAS_FP8E4B8_STD = hasattr(torch, 'float8_e4m3fn')
 
-# Mapping from Triton language types to torch types
-tl_to_torch_types = {
+# Base mapping from Triton language types to torch types (non-FP8)
+_tl_to_torch_types_base = {
     tl.float16: torch.float16,
     tl.bfloat16: torch.bfloat16,
     tl.float32: torch.float32,
     tl.int8: torch.int8,
     tl.int32: torch.int32,
 }
-if TORCH_HAS_FP8E5B16:
-    tl_to_torch_types[tl.float8e5b16] = torch.float8_e5m2fnuz
-if TORCH_HAS_FP8E4B8:
-    tl_to_torch_types[tl.float8e4b8] = torch.float8_e4m3fnuz
+
+
+def get_arch() -> str:
+    """
+    Get the current GPU architecture string (e.g., 'gfx950', 'gfx942').
+
+    Returns:
+        str: Architecture string, or 'unknown' if unable to determine.
+    """
+    try:
+        target = triton.runtime.driver.active.get_current_target()
+        return target.arch
+    except Exception:
+        return 'unknown'
+
+
+def get_fp8_dtypes() -> Tuple[torch.dtype, torch.dtype]:
+    """
+    Get architecture-specific FP8 dtypes.
+
+    For gfx950 (MI300): uses standard FP8 dtypes (float8_e5m2, float8_e4m3fn)
+    For other architectures: uses FNUZ variants (float8_e5m2fnuz, float8_e4m3fnuz)
+
+    Returns:
+        Tuple[torch.dtype, torch.dtype]: (e5m2_dtype, e4m3_dtype)
+
+    Raises:
+        RuntimeError: If required FP8 dtypes are not available in PyTorch.
+    """
+    arch = get_arch()
+
+    if arch == "gfx950":
+        if not TORCH_HAS_FP8E5B16_STD:
+            raise RuntimeError(f"Architecture {arch} requires torch.float8_e5m2 but it's not available")
+        if not TORCH_HAS_FP8E4B8_STD:
+            raise RuntimeError(f"Architecture {arch} requires torch.float8_e4m3fn but it's not available")
+        e5m2_dtype = torch.float8_e5m2
+        e4m3_dtype = torch.float8_e4m3fn
+    else:
+        if not TORCH_HAS_FP8E5B16_FNUZ:
+            raise RuntimeError(f"Architecture {arch} requires torch.float8_e5m2fnuz but it's not available")
+        if not TORCH_HAS_FP8E4B8_FNUZ:
+            raise RuntimeError(f"Architecture {arch} requires torch.float8_e4m3fnuz but it's not available")
+        e5m2_dtype = torch.float8_e5m2fnuz
+        e4m3_dtype = torch.float8_e4m3fnuz
+
+    return e5m2_dtype, e4m3_dtype
+
+
+def get_tl_to_torch_types() -> dict:
+    """
+    Get the complete mapping from Triton language types to torch types,
+    including architecture-specific FP8 dtypes.
+
+    Returns:
+        dict: Mapping from tl types to torch dtypes.
+    """
+    mapping = _tl_to_torch_types_base.copy()
+
+    # Add FP8 dtypes based on architecture
+    try:
+        e5m2_dtype, e4m3_dtype = get_fp8_dtypes()
+        mapping[tl.float8e5b16] = e5m2_dtype
+        mapping[tl.float8e4b8] = e4m3_dtype
+    except RuntimeError:
+        # FP8 not available, skip
+        pass
+
+    return mapping
+
+
+# For backward compatibility, create a lazy mapping that gets updated on first access
+_tl_to_torch_types_cache = None
+
+
+def _get_tl_to_torch_types_cached() -> dict:
+    """Get cached version of tl_to_torch_types mapping."""
+    global _tl_to_torch_types_cache
+    if _tl_to_torch_types_cache is None:
+        _tl_to_torch_types_cache = get_tl_to_torch_types()
+    return _tl_to_torch_types_cache
+
+
+# Backward compatibility: provide tl_to_torch_types as a property-like access
+# This allows existing code using tl_to_torch_types to continue working
+class _TlToTorchTypesProxy:
+    """Proxy object that provides dict-like access to tl_to_torch_types."""
+    def __getitem__(self, key):
+        return _get_tl_to_torch_types_cached()[key]
+
+    def get(self, key, default=None):
+        return _get_tl_to_torch_types_cached().get(key, default)
+
+    def __contains__(self, key):
+        return key in _get_tl_to_torch_types_cached()
+
+    def keys(self):
+        return _get_tl_to_torch_types_cached().keys()
+
+    def values(self):
+        return _get_tl_to_torch_types_cached().values()
+
+    def items(self):
+        return _get_tl_to_torch_types_cached().items()
+
+
+# Create proxy instance for backward compatibility
+tl_to_torch_types = _TlToTorchTypesProxy()
+
+# Backward compatibility: provide old flag names for code that still uses them
+# These check if ANY variant is available (not architecture-specific)
+TORCH_HAS_FP8E5B16 = TORCH_HAS_FP8E5B16_FNUZ or TORCH_HAS_FP8E5B16_STD
+TORCH_HAS_FP8E4B8 = TORCH_HAS_FP8E4B8_FNUZ or TORCH_HAS_FP8E4B8_STD
 
 # Mapping from shorthand string names to Triton language types
 name_to_tl_types = {
@@ -333,22 +444,22 @@ def generate_matmul_inputs(
         if in_dtype is None:
             raise ValueError("Either in_dtype or dtype_b must be provided")
         dtype_b = in_dtype
-    
+
     dtype_a = _ensure_dtype(dtype_a)
     dtype_b = _ensure_dtype(dtype_b)
     out_dtype = _ensure_dtype(out_dtype)
-    
+
     if transA not in {"T", "N"}:
         raise ValueError(f"transA must be 'T' or 'N', got: {transA}")
     if transB not in {"T", "N"}:
         raise ValueError(f"transB must be 'T' or 'N', got: {transB}")
-    
+
     # Set seed if provided
     if seed is not None:
         torch.manual_seed(seed)
         if device == "cuda":
             torch.cuda.manual_seed(seed)
-    
+
     # Determine quantization needs for A and B separately
     needs_quant_a = False
     needs_quant_b = False
@@ -381,7 +492,7 @@ def generate_matmul_inputs(
         A = qA
     else:
         A = A.to(dtype_a)
-    
+
     if needs_quant_b:
         qB, scaleB = quantize_tensor_per_channel(B, dtype_b, axis=0)  # Per-column scaling → (n,)
         B = qB
