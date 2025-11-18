@@ -31,6 +31,7 @@ from tritonblas.utils import (
     get_filename_compile_driver,
     get_filename_myKernels,
     get_filename_profile_driver,
+    get_fp8_dtypes,
     get_num_sms,
     get_output_dir,
     name_to_tl_types,
@@ -38,8 +39,6 @@ from tritonblas.utils import (
     run_bash_command,
     run_bash_command_wrapper,
     tl_to_torch_types,
-    TORCH_HAS_FP8E4B8,
-    TORCH_HAS_FP8E5B16,
 )
 
 
@@ -50,6 +49,87 @@ def is_hip_available():
         return False
     else:
         return True
+
+
+def is_async_copy_enabled():
+    """
+    Check if async_copy is enabled via Triton knobs.
+
+    The async_copy feature is controlled by triton.knobs.amd.use_async_copy.
+    This is the same knob used by the Triton AMD backend compiler when generating
+    kernels, so the LDS calculation will match the actual kernel behavior.
+
+    To enable async_copy, set it before running:
+        triton.knobs.amd.use_async_copy = True
+
+    Or via environment variable (if supported by your Triton version):
+        TRITON_AMD_USE_ASYNC_COPY=1
+
+    Returns:
+        bool: True if async_copy is enabled, False otherwise.
+    """
+    try:
+        # Access triton.knobs.amd.use_async_copy
+        # This is the same knob used by the Triton AMD backend compiler
+        return triton.knobs.amd.use_async_copy
+    except (AttributeError, TypeError):
+        # If knobs are not available or not set, default to False
+        return False
+
+
+def calculate_lds_usage(block_m, block_n, block_k, elemBytes_a, elemBytes_b, num_stages, use_async_copy=False):
+    """
+    Calculate Local Data Store (shared memory) usage for a matmul kernel configuration.
+
+    In Triton's pipelining model:
+    - num_stages = 1: No pipelining, buffers A and B can reuse the same memory space
+    - num_stages > 1: Pipelining requires (num_stages - 1) additional buffer sets
+                      to hold data for different pipeline stages simultaneously
+
+    When async_copy is enabled:
+    - Each load operation needs one additional buffer since async_copy doesn't use
+      a register buffer (see LowerLoops.cpp in Triton AMD backend)
+    - This means: numBuffers = max(1, stage_distance) + 1 for async_copy
+
+    Args:
+        block_m, block_n, block_k: Tile sizes
+        elemBytes_a, elemBytes_b: Element sizes in bytes for matrices A and B
+        num_stages: Number of pipeline stages
+        use_async_copy: Whether async_copy is enabled (default: False)
+
+    Returns:
+        int: Total LDS usage in bytes
+    """
+    # Base buffer size per matrix
+    LDSA = block_k * block_m * elemBytes_a
+    LDSB = block_k * block_n * elemBytes_b
+
+    if num_stages <= 1:
+        # No pipelining: buffers A and B can reuse each other's memory
+        # We only need space for the larger of the two
+        LDS = max(LDSA, LDSB)
+        # With async_copy, we still need one extra buffer per load
+        if use_async_copy:
+            # Each matrix needs one additional buffer
+            LDS = LDSA + LDSB
+    else:
+        # With pipelining: calculate number of buffers needed
+        # Base calculation: numBuffers = max(1, stage_distance)
+        # For typical matmul: stage_distance = num_stages - 1
+        base_num_buffers = max(1, num_stages - 1)
+
+        # With async_copy: add one more buffer per load (A and B)
+        if use_async_copy:
+            num_buffers_a = base_num_buffers + 1
+            num_buffers_b = base_num_buffers + 1
+        else:
+            num_buffers_a = base_num_buffers
+            num_buffers_b = base_num_buffers
+
+        # Total LDS = sum of all buffers for A and B
+        LDS = (LDSA * num_buffers_a) + (LDSB * num_buffers_b)
+
+    return LDS
 
 
 def get_full_tuning_space(num_cus):
@@ -63,7 +143,7 @@ def get_full_tuning_space(num_cus):
     # But keep this explicit so that we do not forget we may need to set it to
     # other values in the future
     num_stage_range = [2, 3]
-    waves_per_eu_range = [0]
+    waves_per_eu_range = [0, 1, 2, 4]
     matrix_instr_nonkdim_range = [16, 32]
     kpack_range = [1]
     num_sms_range = [num_cus]
@@ -128,13 +208,10 @@ def get_tuning_space_with_selector(M, N, K, dtype_a, dtype_b, dtype_c, num_cus):
     for instance in space:
         num_warps, num_stages, waves_per_eu, matrix_instr_nonkdim, kpack, chunk_size = instance
 
-        # Check shared memory constraint (same logic as prune_configs)
-        LDSA = BLK_K * BLK_M * elemBytes_a
-        LDSB = BLK_K * BLK_N * elemBytes_b
-        if num_stages <= 1:
-            LDS = max(LDSA, LDSB)
-        else:
-            LDS = (LDSA + LDSB) * (num_stages - 1)
+        # Check shared memory constraint using the standard LDS calculation
+        # Automatically detect if async_copy is enabled via Triton knobs
+        use_async_copy = is_async_copy_enabled()
+        LDS = calculate_lds_usage(BLK_M, BLK_N, BLK_K, elemBytes_a, elemBytes_b, num_stages, use_async_copy=use_async_copy)
 
         # Skip configs that exceed shared memory limit
         if LDS > max_shared:
@@ -207,16 +284,14 @@ def prune_configs(M, N, K, configs, elemBytes_a, elemBytes_b):
             continue
         # out of shared memory resource
         # TODO (zhanglx): This does not consider the LDS usage in the epilogue
-        LDSA = BLOCK_SIZE_K * BLOCK_SIZE_M * elemBytes_a
-        LDSB = BLOCK_SIZE_K * BLOCK_SIZE_N * elemBytes_b
-        if num_stages <= 1:
-            # No pipeline, buffer A and buffer B can re-use each other
-            LDS = max(LDSA, LDSB)
-        else:
-            # Pipeline, we need (num_stages - 1) buffers for both A and B at the same time
-            LDS = (LDSA + LDSB) * (num_stages - 1)
         driver = triton.runtime.driver.active
         max_shared = driver.utils.get_device_properties(driver.get_current_device())["max_shared_mem"]
+
+        # Calculate LDS usage using the standard formula
+        # Automatically detect if async_copy is enabled via Triton knobs
+        use_async_copy = is_async_copy_enabled()
+        LDS = calculate_lds_usage(BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, elemBytes_a, elemBytes_b, num_stages, use_async_copy=use_async_copy)
+
         if LDS > max_shared:
             continue
         # Skip small block sizes and num_warps for large gemm
@@ -443,12 +518,18 @@ def gen_input(M, N, ty_name, needTrans, seed, init_type, device='cuda', is_matri
             else:
                 input_f16 = quantized_tensor.to(torch.float16)
         else:
-            # For fp8/bf8: use existing conversion logic
-            if (d_type == tl.float8e4b8 and TORCH_HAS_FP8E4B8) or \
-               (d_type == tl.float8e5b16 and TORCH_HAS_FP8E5B16):
-                input_f16 = quantized_tensor.to(torch.float16)
-            else:
-                # Fallback: convert via int8 reinterpret
+            # For fp8/bf8: use architecture-specific conversion logic
+            try:
+                # Check if this is an FP8 type and if we have architecture-specific support
+                if d_type.is_fp8():
+                    # Try to get architecture-specific FP8 dtypes
+                    e5m2_dtype, e4m3_dtype = get_fp8_dtypes()
+                    # If we got here, FP8 is supported, so we can convert directly
+                    input_f16 = quantized_tensor.to(torch.float16)
+                else:
+                    input_f16 = quantized_tensor.to(torch.float16)
+            except RuntimeError:
+                # FP8 not available for this architecture, fallback to int8 reinterpret
                 @triton.jit
                 def copy_kernel(input_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
                     offsets = tl.program_id(axis=0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -492,11 +573,16 @@ def gen_input(M, N, ty_name, needTrans, seed, init_type, device='cuda', is_matri
         raw_data = init_by_size_and_type((N, M) if needTrans else (M, N), torch.float32, init_type)
         if needTrans:
             raw_data = raw_data.T
-        if (d_type == tl.float8e4b8 and TORCH_HAS_FP8E4B8) or \
-            (d_type == tl.float8e5b16 and TORCH_HAS_FP8E5B16) or not d_type.is_fp8():
+        # Use architecture-specific FP8 dtypes via tl_to_torch_types
+        try:
+            if d_type.is_fp8():
+                # Check if FP8 is available for this architecture
+                get_fp8_dtypes()  # This will raise RuntimeError if not available
+            # If we get here, we can use the standard conversion
             input = raw_data.to(tl_to_torch_types[d_type])
             input_f16 = input.to(torch.float16)
-        else:
+        except (RuntimeError, KeyError):
+            # FP8 not available or dtype not in mapping, fallback to int8 reinterpret
             f8_tensor = raw_data.to(torch.int8)
             # keep only two bits of exponent to avoid overflow
             f8_tensor = f8_tensor & 0b00111111
@@ -1042,11 +1128,19 @@ def main():
             pruned_configs = [myConfig]
         elif args.use_selector:
             # Use selector to fix tile sizes, only tune other parameters
+            # Get architecture-specific FP8 dtypes
+            try:
+                e5m2_dtype, e4m3_dtype = get_fp8_dtypes()
+            except RuntimeError:
+                e5m2_dtype = torch.float16
+                e4m3_dtype = torch.float16
+
             dtype_map = {
                 'fp16': torch.float16,
                 'bf16': torch.bfloat16,
                 'fp32': torch.float32,
-                'fp8': torch.float8_e4m3fn if hasattr(torch, 'float8_e4m3fn') else torch.float16,
+                'fp8': e4m3_dtype,  # Architecture-specific FP8 dtype
+                'bf8': e5m2_dtype,  # Architecture-specific BF8 dtype
             }
             torch_dtype_a = dtype_map.get(dtype_a, torch.float16)
             torch_dtype_b = dtype_map.get(dtype_b, torch.float16)
