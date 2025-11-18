@@ -982,9 +982,26 @@ def get_rocm_version():
 def main():
     args = parse_args()
     # parse kernel file and kernel function name
-    module_name, kernel_name = args.kernel.split(',')
-    module_name = module_name.strip()
-    kernel_name = kernel_name.strip()
+    kernel_parts = args.kernel.split(',')
+    if len(kernel_parts) == 2:
+        module_name, kernel_name = kernel_parts
+        module_name = module_name.strip()
+        kernel_name = kernel_name.strip()
+    elif len(kernel_parts) == 1:
+        # If only one value provided, treat it as kernel_type hint and use defaults
+        kernel_type_hint = kernel_parts[0].strip().lower()
+        if 'persistent' in kernel_type_hint:
+            module_name = 'tritonblas.internal.persistent_matmul'
+            kernel_name = 'persistent_matmul'
+        elif 'streamk' in kernel_type_hint:
+            module_name = 'tritonblas.internal.streamk_matmul'
+            kernel_name = 'streamk_matmul'
+        else:
+            # Default to streamk if unclear
+            module_name = 'tritonblas.internal.streamk_matmul'
+            kernel_name = 'streamk_matmul'
+    else:
+        raise ValueError(f"Invalid --kernel format: '{args.kernel}'. Expected 'module_name,kernel_name' or just 'persistent'/'streamk'")
 
     # Auto-detect kernel type from module name
     if args.kernel_type == 'auto':
