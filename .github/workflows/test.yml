@@ -56,7 +56,6 @@ jobs:
       - name: Run tests
         run: |
           export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
-          export HSA_OVERRIDE_GFX_VERSION=9.4.2
           pytest tests/ -v --tb=short --color=yes --ignore=tests/test_matmul_a8w8_lt.py
         
       - name: Generate test report
