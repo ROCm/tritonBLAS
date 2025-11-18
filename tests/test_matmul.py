@@ -1,7 +1,9 @@
 import pytest
-import torch
-import triton
-import tritonblas
+import torch  # type: ignore
+import triton  # type: ignore
+import tritonblas  # type: ignore
+from tritonblas.utils import generate_matmul_inputs  # type: ignore
+
 
 @pytest.mark.parametrize(
     "m, n, k",
@@ -12,7 +14,7 @@ import tritonblas
     ],
 )
 @pytest.mark.parametrize(
-    "in_dtype, out_dtype", 
+    "in_dtype, out_dtype",
     [
         # (torch.float8_e4m3fn, torch.float8_e4m3fn),
         # (torch.float8_e5m2, torch.float8_e5m2),
@@ -22,7 +24,7 @@ import tritonblas
     ],
 )
 @pytest.mark.parametrize(
-    "transA, transB", 
+    "transA, transB",
     [
         ("T", "T"),  # A^T @ B^T
         ("N", "N"),  # A @ B
@@ -31,41 +33,22 @@ import tritonblas
     ],
 )
 @pytest.mark.parametrize(
-    "enable_streamk", 
+    "enable_streamk",
     [
-        False, True,
+        False,
+        True,
     ],
 )
 def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
-    
-    # Adjust dimensions for transposition and apply tensor.T if needed
-    if transA == "T":
-        A_size = (m, k)  # A is MxK
-    else:
-        A_size = (k, m)  # A is KxM (we will later transpose it with .T)
+    """Test non-quantized matmul with all transpose combinations using shared input generation utilities."""
+    init_type = "randn"
 
-    if transB == "T":
-        B_size = (k, n)  # B is KxN
-    else:
-        B_size = (n, k)  # B is NxK (we will later transpose it with .T)
-    
-    A = torch.randn(A_size, device="cuda", dtype=in_dtype)
-    B = torch.randn(B_size, device="cuda", dtype=in_dtype)
-    
-    # Apply transpose on A or B if necessary (only needed for "N" case)
-    if transA == "N":
-        A = A.T  # Apply transpose to A if transA is "N"
-
-    if transB == "N":
-        B = B.T  # Apply transpose to B if transB is "N"
-            
-    # Allocate Tensors
-    C = torch.zeros((m, n), device="cuda", dtype=out_dtype)
-    bias = torch.zeros((m,), device="cuda", dtype=out_dtype)
+    # Generate all inputs using shared utility (handles transposes automatically)
+    inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
 
     # Run TritonBLAS matmul
-    tritonblas.matmul(A, B, C, bias=None, enable_streamk=enable_streamk)
+    tritonblas.matmul(inputs.A, inputs.B, inputs.C, enable_streamk=enable_streamk)
 
-    # Check correctnes: Fix tolerance later
-    torch_c = torch.matmul(A, B)
-    torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1, rtol=1)
+    # Check correctness
+    torch_c = torch.matmul(inputs.A, inputs.B)
+    torch.testing.assert_close(inputs.C.to(out_dtype), torch_c, atol=1, rtol=1)
