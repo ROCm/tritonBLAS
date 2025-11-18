@@ -70,3 +70,49 @@ jobs:
           name: test-results
           path: test-results.xml
           retention-days: 30
+  
+  performance-test:
+    needs: test
+    runs-on: [self-hosted, amd-gpu]
+    continue-on-error: true
+    
+    container:
+      image: rocm/7.0-preview:rocm7.0_preview_pytorch_training_mi35x_beta
+      options: --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Set up environment
+        run: |
+          echo "Setting up ROCm environment..."
+          export ROCM_PATH=/opt/rocm
+          export PATH=$ROCM_PATH/bin:$PATH
+          
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y git
+          
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install -e .
+          
+      - name: Run performance benchmarks
+        run: |
+          export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
+          pytest tests/test_performance.py::test_mi350_performance_report -s -v --tb=short --color=yes
+          
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results
+          path: |
+            performance-results.json
+            performance-report.txt
+          retention-days: 30
