@@ -418,7 +418,12 @@ from icache_flush import icache_flush
         module_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "include", module_file)
     else:
         module_path = f"{module_name}.py"
-    
+
+    # Verify the file exists (provides better error message than open() alone)
+    if not os.path.exists(module_path):
+        raise FileNotFoundError(f"Kernel module file not found: {module_path}. "
+                               f"Module name: {module_name}, Kernel name: {kernel_name}, Kernel type: {kernel_type}")
+
     with open(module_path, "r") as file:
         kernel_code = file.read()
 
@@ -430,7 +435,10 @@ from icache_flush import icache_flush
                                                                          dtype_p, dtype_lock, bias_size, False,
                                                                          kernel_name, kernel_type)
         # Copy the kernel_name with kernel_name_configStr replaced
-        kernel_config_code = kernel_code.replace(f"{kernel_name}", f"{kernel_name}_{configStr}")
+        # Use exact function definition pattern to ensure correct replacement
+        kernel_config_code = kernel_code.replace(f"def {kernel_name}(", f"def {kernel_name}_{configStr}(")
+        # Also replace any references to the kernel function name
+        kernel_config_code = kernel_config_code.replace(f"@{kernel_name}", f"@{kernel_name}_{configStr}")
         kernel_config_code = kernel_config_code.replace("import triton.language as tl", "")
         kernel_config_code = kernel_config_code.replace("import triton", "")
         kernel_config_code = kernel_config_code.replace("from .pid_transforms import chiplet_transform_chunked", "")
@@ -500,7 +508,7 @@ from icache_flush import icache_flush
         block_m = config.get('BLOCK_SIZE_M')
         block_n = config.get('BLOCK_SIZE_N')
         num_sms = config.get('NUM_SMS')
-        
+
         if kernel_type == 'persistent':
             # Persistent kernel - no P, locks allocation
             matmul_call_str = f"""
@@ -543,7 +551,7 @@ from icache_flush import icache_flush
             except triton.runtime.errors.OutOfResources as e:
                 print(f"Error: {{e}}")
                 break"""
-        
+
         f_kernel[idx % jobs].write(matmul_call_str + "\n")
         idx += 1
     # post string
@@ -572,7 +580,7 @@ def main():
    sys.exit(main())""")
         f_kernel[fi].flush()  # Ensure all data is written to disk
         f_kernel[fi].close()
-    
+
     if verbose >= 2:
         print(f"DEBUG: Profile driver files created: {filenames}")
     # Verify files exist
