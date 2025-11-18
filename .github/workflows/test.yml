@@ -24,7 +24,6 @@ jobs:
       - name: Set up environment
         run: |
           echo "Setting up ROCm environment..."
-          export HSA_OVERRIDE_GFX_VERSION=9.4.2
           export ROCM_PATH=/opt/rocm
           export PATH=$ROCM_PATH/bin:$PATH
           
