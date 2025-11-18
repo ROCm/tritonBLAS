@@ -387,7 +387,7 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dtype_p, 
     # Generate kernels out of all configs
     generate_profile_tasks(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dtype_p, dtype_lock, init_type, configs,
                            jobs, iters, run_bench, rotating_buffer_size, bias_size, icache_flush, module_name,
-                           kernel_name, kernel_type)
+                           kernel_name, kernel_type, verbose=verbose)
 
     # profile generated kernels
     running = [

@@ -65,7 +65,7 @@ from tritonblas.internal.pid_transforms import chiplet_transform_chunked
         module_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "include", module_file)
     else:
         module_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", f"{module_name}.py")
-    
+
     with open(module_path, "r") as file:
         matmul_kernel_code = file.read()
 
@@ -371,7 +371,7 @@ def main():
 
 def generate_profile_tasks(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dtype_p, dtype_lock, init_type, configs,
                            jobs, iters, run_bench, rotating_buffer_size, bias_size, icache_flush, module_name,
-                           kernel_name, kernel_type='streamk'):
+                           kernel_name, kernel_type='streamk', verbose=0):
     """
     Open {len(jobs)} files
     generated_kernelM-N-K-0.py, generated_kernelM-N-K-1.py, ..., generated_kernelM-N-K-{njobs-1}.py
@@ -379,12 +379,16 @@ def generate_profile_tasks(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dty
     1. matmul kernels of all configs
     2. wrapper function matmul to invoke all the generated kernels
     3. test_gemm to invoke matmul in a loop of {iters} iterations
+
+    Args:
+        verbose: Verbosity level (0=quiet, 1=some output, 2=verbose/debug)
     """
 
     filenames = []
     for i in range(jobs):
         filenames.append(get_filename_profile_driver(M, N, K, i))
-    print(f"DEBUG: Creating profile driver files: {filenames}")
+    if verbose >= 2:
+        print(f"DEBUG: Creating profile driver files: {filenames}")
     f_kernel = [open(path, 'w') for path in filenames]
 
     # write imports
@@ -569,16 +573,19 @@ def main():
         f_kernel[fi].flush()  # Ensure all data is written to disk
         f_kernel[fi].close()
     
-    print(f"DEBUG: Profile driver files created: {filenames}")
+    if verbose >= 2:
+        print(f"DEBUG: Profile driver files created: {filenames}")
     # Verify files exist
     for fname in filenames:
         if os.path.exists(fname):
-            print(f"DEBUG: File exists: {fname}")
+            if verbose >= 2:
+                print(f"DEBUG: File exists: {fname}")
             # Save the first file for debugging
             if fname == filenames[0]:
                 debug_file = fname.replace('.py', '_debug.py')
                 import shutil
                 shutil.copy(fname, debug_file)
-                print(f"DEBUG: Copied for inspection: {debug_file}")
+                if verbose >= 2:
+                    print(f"DEBUG: Copied for inspection: {debug_file}")
         else:
             print(f"ERROR: File missing: {fname}")
