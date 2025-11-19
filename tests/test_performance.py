@@ -42,7 +42,7 @@ def benchmark_matmul(m, n, k, dtype, enable_streamk=False, warmup=5, iterations=
     
     # Warmup
     for _ in range(warmup):
-        tritonblas.matmul(A, B, C, bias=None, enable_streamk=enable_streamk)
+        tritonblas.matmul(A, B, C, enable_streamk=enable_streamk)
     
     # Synchronize before timing
     torch.cuda.synchronize()
@@ -50,7 +50,7 @@ def benchmark_matmul(m, n, k, dtype, enable_streamk=False, warmup=5, iterations=
     # Benchmark
     start_time = time.perf_counter()
     for _ in range(iterations):
-        tritonblas.matmul(A, B, C, bias=None, enable_streamk=enable_streamk)
+        tritonblas.matmul(A, B, C, enable_streamk=enable_streamk)
     torch.cuda.synchronize()
     end_time = time.perf_counter()
     
