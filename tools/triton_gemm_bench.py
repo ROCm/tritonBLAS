@@ -588,8 +588,8 @@ def gen_input(M, N, ty_name, needTrans, seed, init_type, device='cuda', is_matri
             f8_tensor = f8_tensor & 0b00111111
             input = triton.reinterpret(f8_tensor, d_type)
             input_f16 = torch.empty_like(f8_tensor, dtype=torch.float16)
-            grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
             n_elements = raw_data.numel()
+            grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
             copy_kernel[grid](input, input_f16, n_elements, BLOCK_SIZE=1024)
 
         return input, input_f16, None  # No scale for non-quantized types
