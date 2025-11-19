@@ -3,10 +3,10 @@ import triton.language as tl
 import torch
 
 from .stages.indexing import grid_setup, idx2coord, compute_scale_indices
-from .stages.algorithms import multiply_accumulate, gemm_loop
+from .stages.algorithms import gemm_loop
 from .stages.algorithms.binary import apply_scales, add_vector
 from .stages.algorithms.unary import convert_dtype
-from .stages.memory import load, store
+from .stages.memory import store
 
 @triton.jit()
 def persistent_matmul(
@@ -39,8 +39,6 @@ def persistent_matmul(
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
-    load_func: tl.constexpr = load,  # Custom load function (default: tritonblas load)
-    store_func: tl.constexpr = store,  # Custom store function (default: tritonblas store)
 ):
     # Stride guards
     tl.assume(stride_am > 0)
@@ -88,7 +86,6 @@ def persistent_matmul(
             BLOCK_SIZE_K, #Block Size in K dimension
             CACHE_MODIFIER_A, CACHE_MODIFIER_B, #Cache modifiers to control locality
             QUANTIZED, ALLOW_TF32, EVEN_K, #Extra compile time constants
-            load_func, multiply_accumulate #Lamdas for load and per-iter compute.
         )
         
         # ============================================================
@@ -113,7 +110,7 @@ def persistent_matmul(
         # ============================================================
         # Store result to output matrix
         # ============================================================
-        store_func(
+        store(
             C, result, #Output tensor pointer and output accumulator
             row_indices, col_indices, #Precomputed offsets
             M, N, #M and N dimension for masking OOB writes

@@ -8,6 +8,9 @@ loading tiles and accumulating the matrix multiplication result.
 import triton
 import triton.language as tl
 
+from ..memory import load
+from . import multiply_accumulate
+
 
 @triton.jit
 def gemm_loop(
@@ -27,8 +30,6 @@ def gemm_loop(
     QUANTIZED: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
     EVEN_K: tl.constexpr,
-    load_func: tl.constexpr,
-    multiply_accumulate_func: tl.constexpr,
 ):
     """
     Execute the main GEMM loop over the K dimension.
@@ -71,10 +72,6 @@ def gemm_loop(
         Whether to allow TF32 computation
     EVEN_K : constexpr bool
         Whether K is evenly divisible by BLOCK_SIZE_K
-    load_func : constexpr function
-        Function to use for loading tiles
-    multiply_accumulate_func : constexpr function
-        Function to use for multiply-accumulate operation
     
     Returns:
     --------
@@ -92,21 +89,21 @@ def gemm_loop(
         k0 = k_iter * BLOCK_SIZE_K
         
         # Load - Address math + global → CU load
-        a = load_func(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=False, is_row_major=True)
-        b = load_func(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=False, is_row_major=False)
+        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=False, is_row_major=True)
+        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=False, is_row_major=False)
         
         # Compute - Math only
-        acc = multiply_accumulate_func(acc, a, b, QUANTIZED, ALLOW_TF32)
+        acc = multiply_accumulate(acc, a, b, QUANTIZED, ALLOW_TF32)
     
     # Handle K tail if needed
     if not EVEN_K:
         k0 = loop_k * BLOCK_SIZE_K
         
         # Load with masking
-        a = load_func(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=True, is_row_major=True)
-        b = load_func(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=True, is_row_major=False)
+        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=True, is_row_major=True)
+        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=True, is_row_major=False)
         
         # Compute
-        acc = multiply_accumulate_func(acc, a, b, QUANTIZED, ALLOW_TF32)
+        acc = multiply_accumulate(acc, a, b, QUANTIZED, ALLOW_TF32)
     
     return acc
