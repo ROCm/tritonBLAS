@@ -16,6 +16,11 @@ dtype_to_str = {
     torch.float8_e5m2: "f8",
     torch.float8_e4m3fn: "f8",
 }
+# Add FP8 FNUZ variants if available (for non-gfx950 architectures)
+if hasattr(torch, 'float8_e5m2fnuz'):
+    dtype_to_str[torch.float8_e5m2fnuz] = "f8"
+if hasattr(torch, 'float8_e4m3fnuz'):
+    dtype_to_str[torch.float8_e4m3fnuz] = "f8"
 
 
 class MatmulHeuristicResult:
@@ -52,7 +57,11 @@ class MatmulHeuristicResult:
         self.element_size_A = get_dtype_bits(a_dtype)
         self.element_size_B = get_dtype_bits(b_dtype)
         self.element_size_out = get_dtype_bits(c_dtype)
-        self.mi_dtype = dtype_to_str.get(c_dtype)
+        # For matrix instruction latency lookup, use input dtype (not output dtype)
+        # because the matrix instruction type is determined by input operand types
+        # Example: FP8 inputs with BF16 output still uses FP8 matrix instructions
+        input_dtype_for_mi = a_dtype if get_dtype_bits(a_dtype) <= get_dtype_bits(b_dtype) else b_dtype
+        self.mi_dtype = dtype_to_str.get(input_dtype_for_mi, dtype_to_str.get(c_dtype))
 
         # Infer Matrix Instruction Dimensions from datatypes
         self.MI_dim = self._infer_matrix_instruction_dimensions(
