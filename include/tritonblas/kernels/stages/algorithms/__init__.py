@@ -13,7 +13,6 @@ Operations that work on a single tile (usually the accumulator):
 - apply_quantization_scales: Apply per-row/column quantization scales
 - add_bias: Add bias vector
 - convert_dtype: Convert to output dtype
-- apply_activation: Apply activation function (relu, gelu, etc.)
 
 Example usage:
     from tritonblas.shards.algorithms.binary import multiply_accumulate
@@ -32,9 +31,7 @@ from .binary import (
 )
 from .unary import (
     convert_dtype,
-    apply_activation,
 )
-from .postprocess import postprocess
 from .gemm_loop import gemm_loop
 
 __all__ = [
@@ -44,8 +41,6 @@ __all__ = [
     'add_vector',
     # Unary operations
     'convert_dtype',
-    'apply_activation',
     # Composition
-    'postprocess',
     'gemm_loop',
 ]

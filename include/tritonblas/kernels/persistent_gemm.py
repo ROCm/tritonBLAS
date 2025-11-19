@@ -65,7 +65,7 @@ def persistent_matmul(
     # Persistent loop: process multiple tiles per workgroup
     for tile_id in range(pid, total_tiles, NUM_SMS):
         # ============================================================
-        # Compute tile coordinates and initialize accumulator
+        # Compute tile coordinates and initialize accumulator (tile_id is 1D index row major)
         # ============================================================
         output_coord_m, output_coord_n, row_indices, col_indices, acc = idx2coord(
             tile_id, num_pid_m, num_pid_n,
