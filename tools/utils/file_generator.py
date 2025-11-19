@@ -65,7 +65,7 @@ from tritonblas.internal.pid_transforms import chiplet_transform_chunked
         module_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "include", module_file)
     else:
         module_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", f"{module_name}.py")
-    
+
     with open(module_path, "r") as file:
         matmul_kernel_code = file.read()
 
@@ -371,7 +371,7 @@ def main():
 
 def generate_profile_tasks(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dtype_p, dtype_lock, init_type, configs,
                            jobs, iters, run_bench, rotating_buffer_size, bias_size, icache_flush, module_name,
-                           kernel_name, kernel_type='streamk'):
+                           kernel_name, kernel_type='streamk', verbose=0):
     """
     Open {len(jobs)} files
     generated_kernelM-N-K-0.py, generated_kernelM-N-K-1.py, ..., generated_kernelM-N-K-{njobs-1}.py
@@ -379,12 +379,16 @@ def generate_profile_tasks(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dty
     1. matmul kernels of all configs
     2. wrapper function matmul to invoke all the generated kernels
     3. test_gemm to invoke matmul in a loop of {iters} iterations
+
+    Args:
+        verbose: Verbosity level (0=quiet, 1=some output, 2=verbose/debug)
     """
 
     filenames = []
     for i in range(jobs):
         filenames.append(get_filename_profile_driver(M, N, K, i))
-    print(f"DEBUG: Creating profile driver files: {filenames}")
+    if verbose >= 2:
+        print(f"DEBUG: Creating profile driver files: {filenames}")
     f_kernel = [open(path, 'w') for path in filenames]
 
     # write imports
@@ -414,7 +418,12 @@ from icache_flush import icache_flush
         module_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "include", module_file)
     else:
         module_path = f"{module_name}.py"
-    
+
+    # Verify the file exists (provides better error message than open() alone)
+    if not os.path.exists(module_path):
+        raise FileNotFoundError(f"Kernel module file not found: {module_path}. "
+                               f"Module name: {module_name}, Kernel name: {kernel_name}, Kernel type: {kernel_type}")
+
     with open(module_path, "r") as file:
         kernel_code = file.read()
 
@@ -426,7 +435,10 @@ from icache_flush import icache_flush
                                                                          dtype_p, dtype_lock, bias_size, False,
                                                                          kernel_name, kernel_type)
         # Copy the kernel_name with kernel_name_configStr replaced
-        kernel_config_code = kernel_code.replace(f"{kernel_name}", f"{kernel_name}_{configStr}")
+        # Use exact function definition pattern to ensure correct replacement
+        kernel_config_code = kernel_code.replace(f"def {kernel_name}(", f"def {kernel_name}_{configStr}(")
+        # Also replace any references to the kernel function name
+        kernel_config_code = kernel_config_code.replace(f"@{kernel_name}", f"@{kernel_name}_{configStr}")
         kernel_config_code = kernel_config_code.replace("import triton.language as tl", "")
         kernel_config_code = kernel_config_code.replace("import triton", "")
         kernel_config_code = kernel_config_code.replace("from .pid_transforms import chiplet_transform_chunked", "")
@@ -496,7 +508,7 @@ from icache_flush import icache_flush
         block_m = config.get('BLOCK_SIZE_M')
         block_n = config.get('BLOCK_SIZE_N')
         num_sms = config.get('NUM_SMS')
-        
+
         if kernel_type == 'persistent':
             # Persistent kernel - no P, locks allocation
             matmul_call_str = f"""
@@ -539,7 +551,7 @@ from icache_flush import icache_flush
             except triton.runtime.errors.OutOfResources as e:
                 print(f"Error: {{e}}")
                 break"""
-        
+
         f_kernel[idx % jobs].write(matmul_call_str + "\n")
         idx += 1
     # post string
@@ -568,17 +580,20 @@ def main():
    sys.exit(main())""")
         f_kernel[fi].flush()  # Ensure all data is written to disk
         f_kernel[fi].close()
-    
-    print(f"DEBUG: Profile driver files created: {filenames}")
+
+    if verbose >= 2:
+        print(f"DEBUG: Profile driver files created: {filenames}")
     # Verify files exist
     for fname in filenames:
         if os.path.exists(fname):
-            print(f"DEBUG: File exists: {fname}")
+            if verbose >= 2:
+                print(f"DEBUG: File exists: {fname}")
             # Save the first file for debugging
             if fname == filenames[0]:
                 debug_file = fname.replace('.py', '_debug.py')
                 import shutil
                 shutil.copy(fname, debug_file)
-                print(f"DEBUG: Copied for inspection: {debug_file}")
+                if verbose >= 2:
+                    print(f"DEBUG: Copied for inspection: {debug_file}")
         else:
             print(f"ERROR: File missing: {fname}")
