@@ -5,6 +5,7 @@ import time
 import sys
 import json
 from datetime import datetime
+from tritonblas.utils import matmul_input_gen
 
 
 def get_gpu_name():
@@ -35,9 +36,24 @@ def get_gpu_name():
 
 def benchmark_matmul(m, n, k, dtype, enable_streamk=False, warmup=5, iterations=100):
     """Benchmark matmul performance and return TFLOPs."""
-    # Create input tensors
-    A = torch.randn((m, k), device="cuda", dtype=dtype)
-    B = torch.randn((k, n), device="cuda", dtype=dtype)
+    # Create input tensors using matmul_input_gen
+    # Use "auto" quantization mode to handle FP8 dtypes properly
+    A_result = matmul_input_gen((m, k), dtype, "randn", quantize="auto")
+    B_result = matmul_input_gen((k, n), dtype, "randn", quantize="auto")
+    
+    # Handle quantized vs non-quantized results
+    if isinstance(A_result, tuple):
+        A, scaleA = A_result
+    else:
+        A = A_result
+        scaleA = None
+    
+    if isinstance(B_result, tuple):
+        B, scaleB = B_result
+    else:
+        B = B_result
+        scaleB = None
+    
     C = torch.zeros((m, n), device="cuda", dtype=dtype)
     
     # Warmup
@@ -67,10 +83,23 @@ def benchmark_matmul(m, n, k, dtype, enable_streamk=False, warmup=5, iterations=
     reason="Test requires CUDA GPU"
 )
 @pytest.mark.parametrize(
+    "m,n,k",
+    [
+        (256, 256, 256),
+        (512, 512, 512),
+        (1024, 1024, 1024),
+        (2048, 2048, 2048),
+        (4096, 4096, 4096),
+        (8192, 8192, 8192),
+        (16384, 16384, 16384),
+    ],
+)
+@pytest.mark.parametrize(
     "dtype",
     [
         torch.float16,
         torch.bfloat16,
+        torch.float8_e4m3fn,
     ],
 )
 @pytest.mark.parametrize(
@@ -80,10 +109,10 @@ def benchmark_matmul(m, n, k, dtype, enable_streamk=False, warmup=5, iterations=
         True,
     ],
 )
-def test_mi350_performance_8192(dtype, enable_streamk):
-    """Test that 8192x8192x8192 matmul achieves at least 1000 TFLOPs."""
-    m = n = k = 8192
-    min_tflops = 1000.0
+def test_mi350_performance(m, n, k, dtype, enable_streamk):
+    """Test matmul performance for various sizes and configurations."""
+    # Set minimum TFLOPs requirement for 8192x8192x8192
+    min_tflops = 1000.0 if (m == 8192 and n == 8192 and k == 8192) else 0.0
     
     tflops, elapsed_time = benchmark_matmul(m, n, k, dtype, enable_streamk)
     
@@ -94,10 +123,11 @@ def test_mi350_performance_8192(dtype, enable_streamk):
     print(f"  Performance: {tflops:.2f} TFLOPs")
     print(f"  Time per iteration: {elapsed_time*1000:.3f} ms")
     
-    assert tflops >= min_tflops, (
-        f"Performance {tflops:.2f} TFLOPs is below minimum requirement "
-        f"of {min_tflops} TFLOPs for {m}x{n}x{k} on MI350"
-    )
+    if min_tflops > 0:
+        assert tflops >= min_tflops, (
+            f"Performance {tflops:.2f} TFLOPs is below minimum requirement "
+            f"of {min_tflops} TFLOPs for {m}x{n}x{k} on MI350"
+        )
 
 
 @pytest.mark.skipif(
@@ -107,11 +137,15 @@ def test_mi350_performance_8192(dtype, enable_streamk):
 def test_mi350_performance_report(capsys):
     """Generate a performance report for various sizes."""
     sizes = [
+        (256, 256, 256),
+        (512, 512, 512),
+        (1024, 1024, 1024),
+        (2048, 2048, 2048),
         (4096, 4096, 4096),
         (8192, 8192, 8192),
         (16384, 16384, 16384),
     ]
-    dtypes = [torch.float16, torch.bfloat16]
+    dtypes = [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
     
     # Collect results
     results = []
@@ -119,12 +153,22 @@ def test_mi350_performance_report(capsys):
     for m, n, k in sizes:
         for dtype in dtypes:
             for enable_streamk in [False, True]:
+                # Determine dtype string first
+                if dtype == torch.float16:
+                    dtype_str = "fp16"
+                elif dtype == torch.bfloat16:
+                    dtype_str = "bf16"
+                elif dtype == torch.float8_e4m3fn:
+                    dtype_str = "fp8"
+                else:
+                    dtype_str = str(dtype)
+                
+                mode = "StreamK" if enable_streamk else "Persistent"
+                
                 try:
                     tflops, elapsed_time = benchmark_matmul(
                         m, n, k, dtype, enable_streamk, warmup=3, iterations=50
                     )
-                    mode = "StreamK" if enable_streamk else "Persistent"
-                    dtype_str = "fp16" if dtype == torch.float16 else "bf16"
                     results.append({
                         'size': f"{m}x{n}x{k}",
                         'dtype': dtype_str,
@@ -135,8 +179,8 @@ def test_mi350_performance_report(capsys):
                 except Exception as e:
                     results.append({
                         'size': f"{m}x{n}x{k}",
-                        'dtype': dtype_str if 'dtype_str' in locals() else 'N/A',
-                        'mode': mode if 'mode' in locals() else 'N/A',
+                        'dtype': dtype_str,
+                        'mode': mode,
                         'tflops': 0.0,
                         'time_ms': 0.0,
                         'error': str(e)
