@@ -26,7 +26,7 @@ from utils.file_generator import (
     generate_profile_tasks,
     read_config,
 )
-from tritonblas.utils import (
+from utils.utils import (
     get_default_tuning_result_filename,
     get_filename_compile_driver,
     get_filename_myKernels,
@@ -39,6 +39,8 @@ from tritonblas.utils import (
     run_bash_command,
     run_bash_command_wrapper,
     tl_to_torch_types,
+    TORCH_HAS_FP8E4B8,
+    TORCH_HAS_FP8E5B16,
 )
 
 

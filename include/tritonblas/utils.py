@@ -2,8 +2,7 @@
 """
 Utility functions for TritonBLAS
 
-This module provides helper functions for dtype handling, quantization, input generation,
-and various utility functions for tuning and benchmarking.
+This module provides helper functions for dtype handling, quantization, and input generation.
 """
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
@@ -13,9 +12,6 @@ import triton
 import triton.language as tl
 
 import os
-import subprocess
-from datetime import datetime
-from pathlib import Path
 
 # FP8 support flags - check for both variants
 TORCH_HAS_FP8E5B16_FNUZ = hasattr(torch, 'float8_e5m2fnuz')
@@ -503,141 +499,3 @@ def generate_matmul_inputs(
     bias = torch.zeros((m,), device=device, dtype=out_dtype)
 
     return MatmulInputs(A=A, B=B, C=C, bias=bias, scaleA=scaleA, scaleB=scaleB)
-
-
-# ============================================================================
-# Utility functions for tuning and benchmarking (merged from tools/utils/utils.py)
-# ============================================================================
-
-def get_num_sms():
-    """Returns the Compute Unit count of the current device."""
-    current_device_index = torch.cuda.current_device()
-    current_device = torch.cuda.get_device_properties(current_device_index)
-    num_sms = current_device.multi_processor_count
-    return num_sms
-
-
-def get_output_dir():
-    """Get the output directory for profiling results, creating it if needed."""
-    # Try to determine the tools directory relative to this file
-    # If we're in include/tritonblas/utils.py, tools is at ../../tools
-    current_file = Path(__file__)
-    tools_dir = current_file.parent.parent.parent / "tools"
-    if not tools_dir.exists():
-        # Fallback: use current directory
-        tools_dir = Path.cwd()
-    output_dir = tools_dir / "output"
-    if not output_dir.exists():
-        output_dir.mkdir(parents=True)
-    return output_dir
-
-
-def run_bash_command(commandstring, capture=True):
-    """Run a bash command and optionally capture output."""
-    if capture:
-        proc = subprocess.run(commandstring, shell=True, check=True, executable='/bin/bash', stdout=subprocess.PIPE)
-        return proc.stdout.splitlines()
-    proc = subprocess.run(commandstring, shell=True, check=True, executable='/bin/bash')
-    return None
-
-
-def run_bash_command_wrapper(commandstring, capture=True):
-    """Run a bash command with retry logic."""
-    try:
-        run_bash_command(commandstring, capture)
-    except subprocess.CalledProcessError:
-        if not capture:
-            print(f"running {commandstring} one more time")
-        try:
-            run_bash_command(commandstring, capture)
-        except subprocess.CalledProcessError:
-            print("failed again!!!!")
-
-
-def get_filename_myKernels():
-    """Get the path to myKernels.py file."""
-    # Try to determine the tools directory relative to this file
-    current_file = Path(__file__)
-    tools_dir = current_file.parent.parent.parent / "tools"
-    if not tools_dir.exists():
-        # Fallback: use current directory
-        tools_dir = Path.cwd()
-    return str(tools_dir / "myKernels.py")
-
-
-def get_filename_without_extension(file_path):
-    """Get filename without extension."""
-    base_name = os.path.basename(file_path)
-    file_name, _ = os.path.splitext(base_name)
-    return file_name
-
-
-def get_filename_compile_driver():
-    """Get the path to compile_driver.py file."""
-    # Try to determine the tools directory relative to this file
-    current_file = Path(__file__)
-    tools_dir = current_file.parent.parent.parent / "tools"
-    if not tools_dir.exists():
-        # Fallback: use current directory
-        tools_dir = Path.cwd()
-    return str(tools_dir / "compile_driver.py")
-
-
-def get_filename_profile_driver(M, N, K, job_id):
-    """Get the path to profile_driver_{M}x{N}x{K}_{job_id}.py file."""
-    # Try to determine the tools directory relative to this file
-    current_file = Path(__file__)
-    tools_dir = current_file.parent.parent.parent / "tools"
-    if not tools_dir.exists():
-        # Fallback: use current directory
-        tools_dir = Path.cwd()
-    return str(tools_dir / f"profile_driver_{M}x{N}x{K}_{job_id}.py")
-
-
-def get_default_tuning_result_filename(kernel_name):
-    """Generate default filename for tuning results."""
-    git_branch_name = run_bash_command("git rev-parse --abbrev-ref HEAD")
-    git_branch_name = git_branch_name[0].decode()
-    # handle branch name of "xxx/xxx" format
-    git_branch_name = git_branch_name.replace('/', '_')
-    git_commit_hash = run_bash_command("git rev-parse --short HEAD")
-    git_commit_hash = git_commit_hash[0].decode()
-
-    dt_string = datetime.now().strftime("%m-%d-%Y-%H:%M:%S")
-
-    # Try to determine the tools directory relative to this file
-    current_file = Path(__file__)
-    tools_dir = current_file.parent.parent.parent / "tools"
-    if not tools_dir.exists():
-        # Fallback: use current directory
-        tools_dir = Path.cwd()
-    defaultName = str(tools_dir / f"tuning_results@{kernel_name}@{git_branch_name}@{git_commit_hash}_{dt_string}.yaml")
-    return defaultName
-
-
-def patch_triton_compiler():
-    """Patch triton compiler to avoid backend queries (hacky workaround)."""
-    device = triton.runtime.driver.active.get_current_device()
-    stream = triton.runtime.driver.active.get_current_stream(device)
-    target = triton.runtime.driver.active.get_current_target()
-
-    triton_location_str = run_bash_command("pip show triton | grep Editable")
-    if not triton_location_str:
-        print("triton source not found from pip show triton")
-        return
-
-    triton_dir = triton_location_str[0].split()[-1].decode('utf-8')
-
-    jit_filename = os.path.join(triton_dir, "triton/runtime", "jit.py")
-
-    run_bash_command(f"sed -i 's/driver.active.get_current_device()/{device}/g' {jit_filename}")
-    run_bash_command(f"sed -i 's/driver.active.get_current_stream(device)/{stream}/g' {jit_filename}")
-
-    hip_driver_filename = os.path.join(triton_dir, "../third_party/amd/backend/", "driver.py")
-    cuda_driver_filename = os.path.join(triton_dir, "../third_party/nvidia/backend/", "driver.py")
-
-    run_bash_command(f"sed -i 's/import torch/return True/g' {hip_driver_filename}")
-    run_bash_command(
-        f"sed -i 's/device = self.get_current_device()/return GPUTarget(\"hip\", \"{target.arch}\", 64)/g' {hip_driver_filename}"
-    )
-    run_bash_command(f"sed -i 's/import torch/return False/g' {cuda_driver_filename}")

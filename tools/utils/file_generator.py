@@ -1,5 +1,5 @@
 import os
-from tritonblas.utils import (
+from .utils import (
     get_filename_compile_driver,
     get_filename_myKernels,
     get_filename_profile_driver,
