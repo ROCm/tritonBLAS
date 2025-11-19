@@ -130,7 +130,7 @@ def bench_matmul(
         # Compute performance metrics
         flops = lambda: 2 * m * n * k * 1e-12
         gflops = lambda ms: 2 * m * n * k * 1e-9 / (ms * 1e-3)
-        # Include scale tensors in byte count for quantized dtypes
+        # Include scale tensors in byte count
         bytes_fn = lambda: (
             inputs.A.numel() * inputs.A.element_size()
             + inputs.B.numel() * inputs.B.element_size()
@@ -168,7 +168,7 @@ def bench_matmul(
 
         if print_verbose:
             print(
-                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, init={init_type}, perf={perf}(GFLOPs) selected_tile={selector.config[0]}x{selector.config[1]}x{selector.config[2]}"
+                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, init={init_type}, time={ms:.4f}ms, perf={perf:.2f}GFLOPs, selected_tile={selector.config[0]}x{selector.config[1]}x{selector.config[2]}"
             )
 
         metrics = {

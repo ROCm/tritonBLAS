@@ -1,0 +1,118 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: [self-hosted, amd-gpu]
+    
+    container:
+      image: rocm/7.0-preview:rocm7.0_preview_pytorch_training_mi35x_beta
+      options: --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Set up environment
+        run: |
+          echo "Setting up ROCm environment..."
+          export ROCM_PATH=/opt/rocm
+          export PATH=$ROCM_PATH/bin:$PATH
+          
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y git
+          
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install -e .
+          
+      - name: Verify installation
+        run: |
+          python3 -c "import tritonblas; print('tritonBLAS imported successfully')"
+          python3 -c "import torch; print(f'PyTorch version: {torch.__version__}')"
+          python3 -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+          python3 -c "import torch; print(f'CUDA device count: {torch.cuda.device_count()}')"
+          if python3 -c "import torch; exit(0 if torch.cuda.is_available() else 1)"; then
+            python3 -c "import torch; print(f'CUDA device name: {torch.cuda.get_device_name(0)}')"
+          fi
+          
+      - name: Run linting
+        run: |
+          pip3 install ruff
+          ruff check include/ tests/ --output-format=github
+        continue-on-error: true
+        
+      - name: Run tests
+        run: |
+          export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
+          pytest tests/ -v --tb=short --color=yes --ignore=tests/test_matmul_a8w8_lt.py
+        
+      - name: Generate test report
+        if: always()
+        run: |
+          pytest tests/ -v --tb=short --junit-xml=test-results.xml --ignore=tests/test_matmul_a8w8_lt.py || true
+          
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+          retention-days: 30
+  
+  performance-test:
+    needs: test
+    runs-on: [self-hosted, amd-gpu]
+    continue-on-error: true
+    
+    container:
+      image: rocm/7.0-preview:rocm7.0_preview_pytorch_training_mi35x_beta
+      options: --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Set up environment
+        run: |
+          echo "Setting up ROCm environment..."
+          export ROCM_PATH=/opt/rocm
+          export PATH=$ROCM_PATH/bin:$PATH
+          
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y git
+          
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install -e .
+          
+      - name: Run performance benchmarks
+        run: |
+          export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
+          pytest tests/test_performance.py::test_mi350_performance_report -s -v --tb=short --color=yes
+          
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results
+          path: |
+            performance-results.json
+            performance-report.txt
+          retention-days: 30

@@ -2,7 +2,7 @@ import triton
 import triton.language as tl
 import torch
 
-from .pid_transforms import chiplet_transform_chunked
+from .stages.indexing.pid_transforms import chiplet_transform_chunked
 
 @triton.jit()
 def streamk_matmul(
