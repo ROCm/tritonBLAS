@@ -34,7 +34,7 @@ def persistent_matmul(
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
-    ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    ALLOW_TF32: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
