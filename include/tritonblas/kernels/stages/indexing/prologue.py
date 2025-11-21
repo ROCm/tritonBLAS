@@ -5,7 +5,13 @@ Handles global setup and tile coordinate calculation.
 import triton
 import triton.language as tl
 
-from .utils import pid_identity, pid_chiplet_chunked
+from .pid_transforms import chiplet_transform_chunked
+
+
+@triton.jit
+def _pid_identity(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE):
+    """Identity PID mapping - returns the PID unchanged."""
+    return pid
 
 
 @triton.jit
@@ -30,8 +36,8 @@ def grid_setup(
         Tuple of (pid, num_pid_m, num_pid_n, total_tiles)
     """
     pid = tl.program_id(0)
-    pid = pid_chiplet_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE) if USE_CHIPLET_PID \
-          else pid_identity(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
+    pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE) if USE_CHIPLET_PID \
+          else _pid_identity(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n

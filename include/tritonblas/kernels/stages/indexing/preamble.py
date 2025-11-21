@@ -36,6 +36,7 @@ def idx2coord(
     M, N,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    acc_dtype: tl.constexpr = tl.float32,
 ):
     """
     Convert tile index to coordinates and initialize accumulator.
@@ -48,6 +49,7 @@ def idx2coord(
         M, N: Matrix dimensions
         BLOCK_SIZE_M, BLOCK_SIZE_N: Tile sizes
         GROUP_SIZE_M: Number of M tiles to group together
+        acc_dtype: Data type for accumulator (default: tl.float32, use tl.int32 for int8 output)
     
     Returns:
         Tuple of (output_coord_m, output_coord_n, row_indices, col_indices, acc) where:
@@ -69,9 +71,9 @@ def idx2coord(
     row_indices = tl.max_contiguous(tl.multiple_of(row_indices, BLOCK_SIZE_M), BLOCK_SIZE_M)
     col_indices = tl.max_contiguous(tl.multiple_of(col_indices, BLOCK_SIZE_N), BLOCK_SIZE_N)
     
-    # Initialize accumulator - always use float32 for compatibility
-    # The conversion to output dtype happens in postprocess phase
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    # Initialize accumulator with specified dtype
+    # Typically float32 for fp16/bf16 output, int32 for int8 output
+    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
     
     return output_coord_m, output_coord_n, row_indices, col_indices, acc
 

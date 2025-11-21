@@ -48,8 +48,9 @@ def persistent_matmul(
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
 
-    # Determine output dtype for accumulator
-    OUTPUT_IS_INT8 = C.type.element_ty == tl.int8
+    # Determine accumulator dtype based on output type
+    # Use int32 for int8 output, float32 for all other types (fp16/bf16/fp32)
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
     
     # Use chiplet-aware PID mapping if NUM_XCDS > 1
     USE_CHIPLET_PID = NUM_XCDS != 1
@@ -72,6 +73,7 @@ def persistent_matmul(
             M, N,
             BLOCK_SIZE_M, BLOCK_SIZE_N,
             GROUP_SIZE_M,
+            acc_dtype,
         )
         
         # ============================================================
