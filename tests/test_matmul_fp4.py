@@ -6,6 +6,7 @@ import torch
 import tritonblas
 import time
 import argparse
+import pytest
 from fp4_utils import dynamic_mxfp4_quant, mxfp4_to_f32, e8m0_to_f32
 
 torch.set_default_device("cuda")
@@ -59,7 +60,7 @@ def benchmark_kernel(func, *args, num_iters=10, warmup=3):
     return avg_time_us
 
 
-def test_gemm_fp4(dtype, M, N, K, verbose=True):
+def run_gemm_fp4_test(dtype, M, N, K, verbose=True):
     """
     Test FP4 GEMM with given dimensions and dtype.
     
@@ -152,6 +153,25 @@ def test_gemm_fp4(dtype, M, N, K, verbose=True):
     return ret
 
 
+# Pytest test functions
+@pytest.mark.parametrize("M,N,K", [
+    (128, 128, 128),
+    (256, 256, 256),
+    (512, 512, 512),
+    (1024, 1024, 1024),
+    (2048, 2048, 2048),
+])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_gemm_fp4(dtype, M, N, K):
+    """Pytest test for FP4 GEMM correctness."""
+    ret = run_gemm_fp4_test(dtype, M, N, K, verbose=False)
+    
+    # Assert validity thresholds
+    assert ret["valid_%"] >= 95.0, f"Only {ret['valid_%']:.1f}% valid values"
+    assert ret["nan_%"] <= 5.0, f"{ret['nan_%']:.1f}% NaN values"
+    assert ret["inf_%"] <= 5.0, f"{ret['inf_%']:.1f}% Inf values"
+
+
 def test_correctness():
     """Run correctness tests on various problem sizes."""
     print("\n" + "="*80)
@@ -170,7 +190,7 @@ def test_correctness():
     all_passed = True
     
     for M, N, K in test_sizes:
-        ret = test_gemm_fp4(dtype, M, N, K, verbose=False)
+        ret = run_gemm_fp4_test(dtype, M, N, K, verbose=False)
         
         # Check validity thresholds
         passed = True
@@ -237,7 +257,7 @@ def benchmark_production_sizes():
     
     for M, N, K in test_sizes:
         try:
-            ret = test_gemm_fp4(dtype, M, N, K, verbose=False)
+            ret = run_gemm_fp4_test(dtype, M, N, K, verbose=False)
             results.append(ret)
             print(f"M={M:5d}, N={N:6d}, K={K:5d}: {ret['TFLOPS']:6.2f} TFLOPS, "
                   f"{ret['us']:8.2f} us, err={ret['mean_abs_err']:.6f}")
@@ -392,7 +412,7 @@ def main():
     if args.mode == "single" and args.mnk:
         # Single test
         M, N, K = map(int, args.mnk.split(","))
-        test_gemm_fp4(dtype, M, N, K, verbose=True)
+        run_gemm_fp4_test(dtype, M, N, K, verbose=True)
     
     elif args.mode == "correctness" or args.mode == "all":
         # Correctness tests
