@@ -216,7 +216,8 @@ def test_correctness():
         print("❌ Some correctness tests FAILED!")
     print("="*80 + "\n")
     
-    return all_passed
+    # Assert that all tests passed instead of returning a value
+    assert all_passed, "Some correctness tests failed"
 
 
 def benchmark_production_sizes():
