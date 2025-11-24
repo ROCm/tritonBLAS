@@ -21,12 +21,7 @@ import triton
 import time
 import argparse
 import csv
-import sys
-from pathlib import Path
-
-# Add tests directory to path for fp4_utils
-sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
-from fp4_utils import dynamic_mxfp4_quant
+from tritonblas.utils import dynamic_mxfp4_quant
 
 torch.set_default_device("cuda")
 

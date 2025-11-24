@@ -7,7 +7,7 @@ import tritonblas
 import time
 import argparse
 import pytest
-from fp4_utils import dynamic_mxfp4_quant, mxfp4_to_f32, e8m0_to_f32
+from tritonblas.utils import dynamic_mxfp4_quant, mxfp4_to_f32, e8m0_to_f32
 
 torch.set_default_device("cuda")
 torch.set_printoptions(sci_mode=False)
