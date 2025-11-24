@@ -3,9 +3,8 @@ import triton
 import random
 import functools
 import time
-from .internal.persistent_matmul import persistent_matmul
-from .internal.streamk_matmul import streamk_matmul
-from .internal.fp4_matmul import fp4_matmul
+from .kernels import persistent_matmul, streamk_matmul
+from .kernels.fp4_matmul import fp4_matmul
 from .origami import MatmulHeuristicResult
 from typing import Dict, Tuple, Optional
 
