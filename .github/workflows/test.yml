@@ -56,7 +56,7 @@ jobs:
       - name: Run tests
         run: |
           export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
-          pytest tests/ -v --tb=short --color=yes --ignore=tests/test_matmul_a8w8_lt.py
+          pytest tests/ -v --tb=short --color=yes --ignore=tests/test_matmul_a8w8_lt.py -m "not performance"
         
       - name: Generate test report
         if: always()
@@ -116,3 +116,8 @@ jobs:
             performance-results.json
             performance-report.txt
           retention-days: 30
+  
+      - name: Run FP4 performance benchmarks
+        run: |
+          export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
+          pytest tests/test_matmul_fp4.py -v -s --tb=short --color=yes -m performance

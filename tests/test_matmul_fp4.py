@@ -172,62 +172,14 @@ def test_gemm_fp4(dtype, M, N, K):
     assert ret["inf_%"] <= 5.0, f"{ret['inf_%']:.1f}% Inf values"
 
 
-def test_correctness():
-    """Run correctness tests on various problem sizes."""
-    print("\n" + "="*80)
-    print("FP4 GEMM Correctness Tests")
-    print("="*80)
-    
-    test_sizes = [
-        (128, 128, 128),
-        (256, 256, 256),
-        (512, 512, 512),
-        (1024, 1024, 1024),
-        (2048, 2048, 2048),
-    ]
-    
-    dtype = torch.bfloat16
-    all_passed = True
-    
-    for M, N, K in test_sizes:
-        ret = run_gemm_fp4_test(dtype, M, N, K, verbose=False)
-        
-        # Check validity thresholds
-        passed = True
-        if ret["valid_%"] < 95.0:
-            print(f"❌ FAILED: M={M}, N={N}, K={K} - Only {ret['valid_%']:.1f}% valid values")
-            passed = False
-        elif ret["nan_%"] > 5.0:
-            print(f"❌ FAILED: M={M}, N={N}, K={K} - {ret['nan_%']:.1f}% NaN values")
-            passed = False
-        elif ret["inf_%"] > 5.0:
-            print(f"❌ FAILED: M={M}, N={N}, K={K} - {ret['inf_%']:.1f}% Inf values")
-            passed = False
-        else:
-            print(f"✓ PASSED: M={M}, N={N}, K={K} - {ret['TFLOPS']:.2f} TFLOPS, "
-                  f"err={ret['mean_abs_err']:.6f}")
-        
-        all_passed = all_passed and passed
-    
-    print("="*80)
-    if all_passed:
-        print("✓ All correctness tests PASSED!")
-    else:
-        print("❌ Some correctness tests FAILED!")
-    print("="*80 + "\n")
-    
-    # Assert that all tests passed instead of returning a value
-    assert all_passed, "Some correctness tests failed"
-
-
-def benchmark_production_sizes():
-    """Benchmark on production-realistic problem sizes from aiter."""
+@pytest.mark.performance
+def test_fp4_production_benchmarks():
+    """Pytest test for FP4 production benchmarks - prints performance tables."""
     print("\n" + "="*80)
     print("FP4 GEMM Production Benchmark")
     print("="*80)
     
     # Problem sizes from aiter test_gemm_a4w4.py
-    # Skipping very large sizes to avoid OOM in Docker
     test_sizes = [
         # Pure compute
         (256, 2048, 8192),
@@ -273,16 +225,18 @@ def benchmark_production_sizes():
                 raise
     
     print("="*80 + "\n")
-    return results
+    
+    # Assert we got at least some results
+    assert len(results) > 0, "No benchmark results collected"
 
 
-def benchmark_block_sizes():
-    """Sweep block sizes to find optimal configuration."""
+@pytest.mark.performance
+def test_fp4_block_size_sweep():
+    """Pytest test for FP4 block size sweep - prints performance tables."""
     print("\n" + "="*80)
-    print("FP4 GEMM Block Size Sweep (8192x8192x8192)")
+    print("FP4 GEMM Block Size Sweep (16384x16384x16384)")
     print("="*80)
     
-    # Use smaller size to avoid OOM in Docker
     M, N, K = 16384, 16384, 16384
     dtype = torch.bfloat16
     
@@ -364,72 +318,51 @@ def benchmark_block_sizes():
         print(f"  Performance: {best_tflops:.2f} TFLOPS")
     
     print("="*80 + "\n")
-    return results
+    
+    # Assert we found a best configuration
+    assert best_config is not None, "No valid block size configuration found"
+    assert best_tflops > 0, "Best configuration has zero throughput"
 
 
 def main():
-    """Main test runner."""
+    """Main test runner - now just runs pytest with appropriate markers."""
     parser = argparse.ArgumentParser(
         description="TritonBLAS FP4 GEMM Test Suite",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
-        "-d", "--dtype",
-        type=str,
-        choices=["bf16", "fp16"],
-        default="bf16",
-        help="Data type for output (default: bf16)"
-    )
-    parser.add_argument(
         "-m", "--mode",
         type=str,
-        choices=["all", "correctness", "production", "blocksweep", "single"],
+        choices=["all", "correctness", "performance"],
         default="all",
-        help="Test mode (default: all)"
-    )
-    parser.add_argument(
-        "--mnk",
-        type=str,
-        default=None,
-        help="Single test size as M,N,K (e.g., --mnk 1024,1024,1024)"
+        help="Test mode: 'correctness' runs basic tests, 'performance' runs benchmarks, 'all' runs both (default: all)"
     )
     
     args = parser.parse_args()
     
-    # Map dtype string to torch dtype
-    dtype_map = {
-        "bf16": torch.bfloat16,
-        "fp16": torch.float16,
-    }
-    dtype = dtype_map[args.dtype]
-    
     print("\n" + "="*80)
     print("TritonBLAS FP4 GEMM Test Suite")
     print("="*80)
-    print(f"Output dtype: {dtype}")
     print(f"Test mode: {args.mode}")
-    print("="*80)
+    print("="*80 + "\n")
     
-    if args.mode == "single" and args.mnk:
-        # Single test
-        M, N, K = map(int, args.mnk.split(","))
-        run_gemm_fp4_test(dtype, M, N, K, verbose=True)
+    # Build pytest arguments
+    pytest_args = [__file__, "-v", "-s"]
     
-    elif args.mode == "correctness" or args.mode == "all":
-        # Correctness tests
-        test_correctness()
+    if args.mode == "correctness":
+        pytest_args.extend(["-m", "not performance"])
+    elif args.mode == "performance":
+        pytest_args.extend(["-m", "performance"])
+    # For "all", run everything (no marker filter)
     
-    if args.mode == "production" or args.mode == "all":
-        # Production benchmarks
-        benchmark_production_sizes()
-    
-    if args.mode == "blocksweep" or args.mode == "all":
-        # Block size sweep
-        benchmark_block_sizes()
+    # Run pytest
+    exit_code = pytest.main(pytest_args)
     
     print("\n" + "="*80)
     print("Test suite completed!")
     print("="*80 + "\n")
+    
+    return exit_code
 
 
 if __name__ == "__main__":
