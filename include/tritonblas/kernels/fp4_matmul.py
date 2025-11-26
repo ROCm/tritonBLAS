@@ -79,28 +79,22 @@ def fp4_matmul(
         
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
-        tl.assume(stride_am > 0)
-        tl.assume(stride_ak > 0)
-        tl.assume(stride_bn > 0)
-        tl.assume(stride_bk > 0)
-        tl.assume(stride_cm > 0)
-        tl.assume(stride_cn > 0)
         # Create pointers for first block of A and B input matrices
         # The BLOCK sizes are of the elements and in fp4 we pack 2 per uint8 container.
-        offs_k = tl.arange(0, BLOCK_SIZE_K // 2)
-        offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        rk = tl.arange(0, BLOCK_SIZE_K // 2)
+        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         
-        A_BASE = A + offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
-        B_BASE = B + offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
+        A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
+        B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
         
         # Create pointers for the first block of A and B scales
-        offs_ks = tl.arange(0, BLOCK_SIZE_K // SCALE_GROUP_SIZE)
-        A_scale_BASE = A_scales + offs_am[:, None] * stride_asm + offs_ks[None, :] * stride_ask
+        rks = tl.arange(0, BLOCK_SIZE_K // SCALE_GROUP_SIZE)
+        A_scale_BASE = A_scales + rm[:, None] * stride_asm + rks[None, :] * stride_ask
         # B scales are N x K even though B operand is K x N.
-        B_scale_BASE = B_scales + offs_bn[:, None] * stride_bsn + offs_ks[None, :] * stride_bsk
+        B_scale_BASE = B_scales + rn[:, None] * stride_bsn + rks[None, :] * stride_bsk
 
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
         
         # Calculate loop iterations - note K is unpacked dimension
         loop_k = tl.cdiv(K, BLOCK_SIZE_K)
@@ -114,11 +108,11 @@ def fp4_matmul(
                 a = tl.load(A_BASE)
                 b = tl.load(B_BASE)
             else:
-                # offs_k is in packed space (BLOCK_SIZE_K // 2), K is unpacked
-                a = tl.load(A_BASE, mask=offs_k[None, :] < (K // 2) - k * (BLOCK_SIZE_K // 2), other=0)
-                b = tl.load(B_BASE, mask=offs_k[:, None] < (K // 2) - k * (BLOCK_SIZE_K // 2), other=0)
+                # rk is in packed space (BLOCK_SIZE_K // 2), K is unpacked
+                a = tl.load(A_BASE, mask=rk[None, :] < (K // 2) - k * (BLOCK_SIZE_K // 2), other=0)
+                b = tl.load(B_BASE, mask=rk[:, None] < (K // 2) - k * (BLOCK_SIZE_K // 2), other=0)
             
-            accumulator += tl.dot_scaled(a, a_scales, "e2m1", b, b_scales, "e2m1")
+            acc += tl.dot_scaled(a, a_scales, "e2m1", b, b_scales, "e2m1")
             
             # Advance the ptrs to the next K block.
             A_BASE += (BLOCK_SIZE_K // 2) * stride_ak
@@ -126,11 +120,11 @@ def fp4_matmul(
             A_scale_BASE += (BLOCK_SIZE_K // SCALE_GROUP_SIZE) * stride_ask
             B_scale_BASE += (BLOCK_SIZE_K // SCALE_GROUP_SIZE) * stride_bsk
 
-        c = accumulator.to(C.type.element_ty)
+        c = acc.to(C.type.element_ty)
 
         # Write back the block of the output matrix C with masks.
-        offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-        offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-        C_ptrs = C + offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+        C_ptrs = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_ptrs, c, mask=c_mask)

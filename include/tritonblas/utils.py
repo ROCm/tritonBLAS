@@ -235,8 +235,10 @@ class MatmulInputs:
         B (torch.Tensor): The right-hand matrix.
         C (torch.Tensor): The output matrix.
         bias (torch.Tensor): Optional bias tensor, reserved for future support of bias-enabled matmul operations.
-        scaleA (Optional[torch.Tensor]): Optional scale for quantized A.
-        scaleB (Optional[torch.Tensor]): Optional scale for quantized B.
+        scaleA (Optional[torch.Tensor]): Optional scale for quantized A. For FP8/INT8: 1D per-channel scales.
+                                         For FP4: 2D block scales (M, K//32).
+        scaleB (Optional[torch.Tensor]): Optional scale for quantized B. For FP8/INT8: 1D per-channel scales.
+                                         For FP4: 2D block scales (N, K//32).
     """
 
     A: torch.Tensor
@@ -249,6 +251,14 @@ class MatmulInputs:
     @property
     def is_quantized(self) -> bool:
         return self.scaleA is not None and self.scaleB is not None
+    
+    @property
+    def is_fp4(self) -> bool:
+        """Check if this is FP4 quantized data (2D block scales)."""
+        if not self.is_quantized:
+            return False
+        # FP4 has 2D scales, FP8/INT8 have 1D scales
+        return self.scaleA.ndim == 2 and self.scaleB.ndim == 2
 
 
 def matmul_input_gen(
@@ -397,7 +407,7 @@ def generate_matmul_inputs(
     Produce tensors (and optional scale metadata) for matmul benchmarks/tests.
 
     Generates A (m×k), B (k×n), C (m×n), and bias (m,) tensors. For quantized dtypes
-    (fp8/int8), also produces per-channel scale vectors for A and B.
+    (fp4/fp8/int8), also produces scale tensors for A and B.
 
     Args:
         m (int): Number of rows of output matrix C (and A if not transposed).
@@ -405,33 +415,37 @@ def generate_matmul_inputs(
         k (int): Shared dimension for A and B.
         in_dtype (torch.dtype or str, optional): Data type for input matrices A and B (if dtype_a/dtype_b not provided).
             For backward compatibility. If both in_dtype and dtype_a/dtype_b are provided, dtype_a/dtype_b take precedence.
+            Special value "fp4" enables FP4 quantization.
         out_dtype (torch.dtype or str): Data type for output matrix C and bias. Default: torch.float16.
         transA (str): "T" if A is stored as m×k, "N" if stored as k×m and needs transpose. Default: "T".
         transB (str): "T" if B is stored as k×n, "N" if stored as n×k and needs transpose. Default: "T".
         init_type (str): Initialization method for A and B ("randn", "hpl", "trig_float", "zeros"). Default: "randn".
         device (str, optional): Device to allocate tensors on. Default: "cuda".
-        quantize_mode (str, optional): "auto" (quantize if dtype is fp8/int8), "fp8", "int8", or None. Default: "auto".
+        quantize_mode (str, optional): "auto" (quantize if dtype is fp4/fp8/int8), "fp4", "fp8", "int8", or None. Default: "auto".
         dtype_a (torch.dtype or str, optional): Data type for matrix A. If None, uses in_dtype. Default: None.
         dtype_b (torch.dtype or str, optional): Data type for matrix B. If None, uses in_dtype. Default: None.
         seed (int, optional): Random seed for reproducibility. If None, uses current random state. Default: None.
 
     Returns:
         MatmulInputs: Dataclass with fields:
-            - A (Tensor): Input matrix A, shape (m, k) after any transpose.
-            - B (Tensor): Input matrix B, shape (k, n) after any transpose.
+            - A (Tensor): Input matrix A, shape (m, k//2) for FP4 (packed), (m, k) otherwise.
+            - B (Tensor): Input matrix B, shape (k//2, n) for FP4 (packed), (k, n) otherwise.
             - C (Tensor): Output matrix, shape (m, n).
             - bias (Tensor): Bias vector, shape (m,).
-            - scaleA (Tensor or None): Per-channel scale for A (if quantized), shape (m,) or None.
-            - scaleB (Tensor or None): Per-channel scale for B (if quantized), shape (n,) or None.
+            - scaleA (Tensor or None): Scale for A. For FP4: shape (m, k//32). For FP8/INT8: shape (m,). None if not quantized.
+            - scaleB (Tensor or None): Scale for B. For FP4: shape (n, k//32). For FP8/INT8: shape (n,). None if not quantized.
 
     Notes:
-        - If quantization is enabled (via quantize_mode or dtype), A and B are quantized and scaleA/scaleB are populated.
+        - For FP4: K must be divisible by 32. Produces 2D block scales.
+        - For FP8/INT8: Produces 1D per-channel scales.
         - The shapes of A and B depend on transA/transB: if "T", shape is (m, k)/(k, n); if "N", input is transposed.
         - Output C and bias are always allocated as (m, n) and (m,) respectively.
-        - scaleA has shape (m,) for per-row scaling of A.
-        - scaleB has shape (n,) for per-column scaling of B.
     """
     # Determine dtypes: dtype_a/dtype_b take precedence over in_dtype
+    # Handle special "fp4" string before dtype conversion
+    is_fp4_a = False
+    is_fp4_b = False
+    
     if dtype_a is None:
         if in_dtype is None:
             raise ValueError("Either in_dtype or dtype_a must be provided")
@@ -440,6 +454,14 @@ def generate_matmul_inputs(
         if in_dtype is None:
             raise ValueError("Either in_dtype or dtype_b must be provided")
         dtype_b = in_dtype
+    
+    # Check for FP4 before dtype conversion
+    if isinstance(dtype_a, str) and dtype_a.lower() == "fp4":
+        is_fp4_a = True
+        dtype_a = torch.uint8  # FP4 is stored as packed uint8
+    if isinstance(dtype_b, str) and dtype_b.lower() == "fp4":
+        is_fp4_b = True
+        dtype_b = torch.uint8  # FP4 is stored as packed uint8
 
     dtype_a = _ensure_dtype(dtype_a)
     dtype_b = _ensure_dtype(dtype_b)
@@ -483,13 +505,27 @@ def generate_matmul_inputs(
 
     # Quantize A and B separately with their respective dtypes
     scaleA = scaleB = None
-    if needs_quant_a:
+    
+    # Handle FP4 quantization
+    if is_fp4_a:
+        if k % 32 != 0:
+            raise ValueError(f"For FP4 quantization, K must be divisible by 32, got K={k}")
+        A_fp4, scaleA = dynamic_mxfp4_quant(A)  # Returns (m, k//2) and (m, k//32)
+        A = A_fp4
+    elif needs_quant_a:
         qA, scaleA = quantize_tensor_per_channel(A, dtype_a, axis=1)  # Per-row scaling → (m,)
         A = qA
     else:
         A = A.to(dtype_a)
 
-    if needs_quant_b:
+    if is_fp4_b:
+        if k % 32 != 0:
+            raise ValueError(f"For FP4 quantization, K must be divisible by 32, got K={k}")
+        # B is (k, n), need to transpose for quantization, then transpose back
+        B_T = B.T  # (n, k)
+        B_fp4, scaleB = dynamic_mxfp4_quant(B_T)  # Returns (n, k//2) and (n, k//32)
+        B = B_fp4.T  # (k//2, n)
+    elif needs_quant_b:
         qB, scaleB = quantize_tensor_per_channel(B, dtype_b, axis=0)  # Per-column scaling → (n,)
         B = qB
     else:
