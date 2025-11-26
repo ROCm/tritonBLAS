@@ -68,16 +68,24 @@ def run_gemm_fp4_test(dtype, M, N, K, verbose=True):
     """
     ret = {}
     
-    # Generate random input data
-    x = torch.randn((M, K), dtype=dtype)
-    w = torch.randn((N, K), dtype=dtype)
+    # Generate FP4 input data using unified API
+    from tritonblas.utils import generate_matmul_inputs
     
-    # Quantize to FP4
-    x_fp4, x_scales = dynamic_mxfp4_quant(x)
-    w_fp4, w_scales = dynamic_mxfp4_quant(w)
+    inputs = generate_matmul_inputs(
+        m=M, n=N, k=K,
+        in_dtype="fp4",  # Use FP4 quantization
+        out_dtype=dtype,
+        init_type="randn"
+    )
+    
+    # Extract FP4 tensors and scales
+    x_fp4 = inputs.A      # Shape: (M, K//2)
+    w_fp4 = inputs.B.T    # Shape: (K//2, N) -> transpose to (N, K//2) for reference
+    x_scales = inputs.scaleA  # Shape: (M, K//32)
+    w_scales = inputs.scaleB  # Shape: (N, K//32)
     
     # Allocate output
-    out = torch.empty((M, N), dtype=dtype)
+    out = inputs.C
     
     # Compute reference
     ref = run_torch_reference(x_fp4, w_fp4, x_scales, w_scales, dtype)

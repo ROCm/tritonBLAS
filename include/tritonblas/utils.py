@@ -428,15 +428,16 @@ def generate_matmul_inputs(
 
     Returns:
         MatmulInputs: Dataclass with fields:
-            - A (Tensor): Input matrix A, shape (m, k//2) for FP4 (packed), (m, k) otherwise.
-            - B (Tensor): Input matrix B, shape (k//2, n) for FP4 (packed), (k, n) otherwise.
+            - A (Tensor): Input matrix A. Shape (m, k) for non-FP4. For FP4: shape (m, k//2) physically packed.
+            - B (Tensor): Input matrix B. Shape (k, n) for non-FP4. For FP4: shape (k//2, n) physically packed.
             - C (Tensor): Output matrix, shape (m, n).
             - bias (Tensor): Bias vector, shape (m,).
             - scaleA (Tensor or None): Scale for A. For FP4: shape (m, k//32). For FP8/INT8: shape (m,). None if not quantized.
             - scaleB (Tensor or None): Scale for B. For FP4: shape (n, k//32). For FP8/INT8: shape (n,). None if not quantized.
 
     Notes:
-        - For FP4: K must be divisible by 32. Produces 2D block scales.
+        - For FP4: K (the parameter) represents the unpacked logical dimension. Physical tensors are packed (2 FP4 values per uint8).
+          K must be divisible by 32. Produces 2D block scales with one scale per 32 elements.
         - For FP8/INT8: Produces 1D per-channel scales.
         - The shapes of A and B depend on transA/transB: if "T", shape is (m, k)/(k, n); if "N", input is transposed.
         - Output C and bias are always allocated as (m, n) and (m,) respectively.
