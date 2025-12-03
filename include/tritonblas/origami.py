@@ -54,6 +54,7 @@ class MatmulHeuristicResult:
             # Handle MX types (string-based)
             if dtype in mx_types:
                 return origami.datatype_to_bits(origami.string_to_datatype(dtype))
+
             # Handle torch dtypes
             try:
                 return torch.finfo(dtype).bits
@@ -129,7 +130,10 @@ class MatmulHeuristicResult:
                 MI_dim = [16, 16, 32]
             # F4F6F8
             if max(element_size_A, element_size_B) <= 8:
-                self.block_k_range = [128,256]
+                if self.k % 256 == 0:
+                    self.block_k_range = [256]
+                else:
+                    self.block_k_range = [128]
                 self.block_mn_range = [32,64,128,256]
                 MI_dim = [16, 16, 128]
         # gfx942

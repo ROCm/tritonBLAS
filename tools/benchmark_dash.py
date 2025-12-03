@@ -361,4 +361,4 @@ def on_update(selected_files, n_intervals, cu, n_clicks):
 # Entrypoint
 # ---------------------------
 if __name__ == "__main__":
-    app.run(debug=True, port=8050)
+    app.run(debug=True, port=8051)
