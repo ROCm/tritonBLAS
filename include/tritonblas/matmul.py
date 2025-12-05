@@ -4,6 +4,7 @@ import random
 import functools
 import time
 from .kernels import persistent_matmul, streamk_matmul
+from .kernels.fp4_matmul import fp4_matmul
 from .origami import MatmulHeuristicResult
 from typing import Dict, Tuple, Optional
 
@@ -29,9 +30,10 @@ def _make_matmul_selector(
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
+    mx_block_size = 0
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype)
+    return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype, mx_block_size=mx_block_size)
 
 
 def persistent_matmul_lt(
@@ -270,3 +272,101 @@ def matmul_a8w8(
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:
         return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+
+def matmul_fp4(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    block_m: int = None, #Overrides Origami value
+    block_n: int = None, #Overrides Origami value
+    block_k: int = None, #Overrides Origami value
+    group_size_m: int = 8, #Overrides Origami value
+    num_warps: int = 8,
+    num_stages: int = 2,
+):
+    """
+    FP4 matrix multiplication: C = A @ B
+    
+    Args:
+        a: Input matrix A in FP4 format (M, K//2), packed 2 elements per uint8
+        b: Input matrix B in FP4 format (N, K//2), packed 2 elements per uint8
+        c: Output matrix C (M, N) in bfloat16 or float16
+        a_scales: Scales for A in e8m0 format (M, K // 32)
+        b_scales: Scales for B in e8m0 format (N, K // 32)
+        block_m: Block size for M dimension
+        block_n: Block size for N dimension
+        block_k: Block size for K dimension (must be multiple of 64 for FP4)
+        group_size_m: Group size for M dimension tiling
+        num_warps: Number of warps per thread block (default: 8)
+        num_stages: Number of pipeline stages (default: 2)
+    
+    Returns:
+        Output matrix C
+    """
+
+
+    M, K = a.shape
+    _, N = b.shape
+    
+    if(block_m == None):
+        selector = _make_matmul_selector(M, N, K, "f4", "f4", c.dtype,mx_block_size=32)
+        block_m, block_n, block_k, gsize_m = selector.get_config()
+        #print(f"Selected {block_m}x{block_n}x{block_k}")
+    # Get actual dimensions (accounting for packing)
+    M = a.shape[0]
+    K = a.shape[1] * 2  # Unpacked K dimension
+    N = b.shape[0]  # B has shape (N, K//2)
+    
+    # Verify dimensions are compatible
+    assert b.shape[1] * 2 == K, f"Incompatible Dimensions: A has K={K}, B has K={b.shape[1] * 2}"
+    
+    # Transpose B to match kernel expectations (kernel expects B as K x N)
+    b = b.T
+    
+    # Ensure block_k is appropriate for FP4 (must be multiple of 64)
+    assert block_k % 64 == 0, "BLOCK_K must be multiple of 64 for FP4"
+    
+    total_blocks_M = triton.cdiv(M, block_m)
+    total_blocks_N = triton.cdiv(N, block_n)
+    total_tiles = total_blocks_M * total_blocks_N
+    
+    # Set chunk size to same area as L2 tiles
+    num_xcds = 8
+    chunk_size = group_size_m * group_size_m
+    chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
+    
+    grid = (total_tiles,)
+    
+    fp4_matmul[grid](
+        a,
+        b,
+        c,
+        a_scales,
+        b_scales,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        a_scales.stride(0),
+        a_scales.stride(1),
+        b_scales.stride(0),
+        b_scales.stride(1),
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+        GROUP_SIZE_M=group_size_m,
+        NUM_SMS=total_tiles,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        num_stages=num_stages,
+        num_warps=num_warps,
+    )
+    
+    return c
