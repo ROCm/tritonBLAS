@@ -49,7 +49,7 @@ def fp4_matmul(
     
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS)
+        pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, GROUP_SIZE_M*GROUP_SIZE_M)
     
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
