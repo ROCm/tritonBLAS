@@ -26,7 +26,10 @@ else:
 # Stream-K kernel is always the same
 from .streamk_gemm import streamk_matmul
 
+# FP4 kernel
+from .fp4_matmul import fp4_matmul
+
 # Export stages submodule
 from . import stages
 
-__all__ = ['persistent_matmul', 'streamk_matmul', 'stages']
+__all__ = ['persistent_matmul', 'streamk_matmul', 'fp4_matmul', 'stages']
