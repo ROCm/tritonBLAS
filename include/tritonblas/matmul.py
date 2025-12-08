@@ -5,6 +5,7 @@ import functools
 import time
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .mv import mv
 from .origami import MatmulHeuristicResult
 from typing import Dict, Tuple, Optional
 
@@ -237,16 +238,53 @@ def matmul_a8w8_lt(
     else:
         return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
 
+
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
-    c: torch.Tensor,
+    c: torch.Tensor = None,
     enable_streamk=False,
     sk_grid=None,
 ):
+    """
+    Matrix multiplication: C = A @ B
+    
+    Automatically detects if one of the inputs is a vector and uses GEMV kernel.
+    
+    Args:
+        a: Input matrix A of shape (M, K) or vector of shape (K,)
+        b: Input matrix B of shape (K, N) or vector of shape (K,)
+        c: Output matrix/vector (optional). If None, will be allocated.
+        enable_streamk: Enable Stream-K algorithm for load balancing
+        sk_grid: Stream-K grid size (optional)
+    
+    Returns:
+        Output matrix/vector c
+    """
+    # Check if this is a GEMV case (at least one input is 1D, or M=1, or N=1)
+    a_is_vector = a.dim() == 1
+    b_is_vector = b.dim() == 1
+    is_gemv_case = a_is_vector or b_is_vector
+    
+    # For 2D inputs, check if M=1 or N=1
+    if not is_gemv_case and a.dim() == 2 and b.dim() == 2:
+        M, K = a.shape
+        K2, N = b.shape
+        is_gemv_case = (M == 1) or (N == 1)
+    
+    # Try vector/GEMV path if applicable
+    if is_gemv_case:
+        result = mv(a, b, c)
+        if result is not None:
+            return result
+    
+    # Standard matrix-matrix multiplication
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+    
+    if c is None:
+        c = torch.empty((M, N), device=a.device, dtype=a.dtype)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype)
     if enable_streamk:

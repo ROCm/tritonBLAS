@@ -1,10 +1,13 @@
 """
 Kernel implementations for tritonblas.
 
-This package contains specific GEMM kernel implementations:
+This package contains specific GEMM and GEMV kernel implementations:
 - persistent_gemm: Persistent (data-parallel) GEMM kernel using composable stages
 - persistent_gemm_monolithic: Monolithic persistent GEMM kernel (legacy, for debugging)
 - streamk_gemm: Stream-K GEMM kernel for load balancing
+- gemv: General Matrix-Vector multiplication
+  - gemv_kernel: GEMV kernel (y = A @ x, handles transpose via A.T)
+- fp4_matmul: FP4 matrix multiplication kernel
 - stages: Composable kernel building blocks
 
 Environment Variables:
@@ -29,7 +32,10 @@ from .streamk_gemm import streamk_matmul
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
+# GEMV kernels
+from .gemv import gemv_kernel_m1, gemv_kernel_n1, gemv_kernel_k1, gemv_kernel_general
+
 # Export stages submodule
 from . import stages
 
-__all__ = ['persistent_matmul', 'streamk_matmul', 'fp4_matmul', 'stages']
+__all__ = ['persistent_matmul', 'streamk_matmul', 'fp4_matmul', 'gemv_kernel_m1', 'gemv_kernel_n1', 'gemv_kernel_k1', 'gemv_kernel_general', 'stages']
