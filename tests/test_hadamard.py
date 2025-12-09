@@ -20,7 +20,7 @@ def is_triton_available() -> bool:
 
 
 # Reference implementation
-def hadamard_matrix(n: int) -> np.ndarray:
+def hadamard_matrix(n: int, dtype=torch.float32) -> np.ndarray:
     """
     Create a Hadamard matrix of size n x n using Sylvester's construction.
     n must be a power of 2.
@@ -49,7 +49,7 @@ def hadamard_matrix(n: int) -> np.ndarray:
     for i in range(0, lg2 - 1):
         H = np.vstack((np.hstack((H, H)), np.hstack((H, -H))))
 
-    return H
+    return H.to(dtype)
 
 
 def fwht_matmul(x: torch.Tensor) -> torch.Tensor:
@@ -69,7 +69,7 @@ def fwht_matmul(x: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"N must be power-of-two, got {N}")
     
     # Create Hadamard matrix
-    H = generate_hadamard_matrix(N).cuda() / math.sqrt(N)
+    H = generate_hadamard_matrix(N, dtype=x.dtype).cuda() / math.sqrt(N)
 
     # H_tensor = torch.from_numpy(H).to(x.device).to(x.dtype)
     # Perform matrix multiplication: x @ H
@@ -213,8 +213,9 @@ def test_full_hadamard():
     """Test full Hadamard: matrix multiplication, PyTorch reference, and Triton kernel."""
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    test_sizes = [32] #[64, 128, 256, 512, 1024]
+    dtype = torch.bfloat16
+
+    test_sizes = [32] #, 64, 128, 256, 512, 1024]
     batch_sizes = [1, 4]
     
     print(f"\nRunning tests on device: {device}")
@@ -226,7 +227,7 @@ def test_full_hadamard():
             print("-" * 40)
             
             # Create random input
-            x = torch.randn(batch, N, device=device, dtype=torch.float32)
+            x = torch.randn(batch, N, device=device, dtype=dtype)
             
             # 1. Matrix multiplication version
             matmul_result = fwht_matmul(x.clone()) 
@@ -238,11 +239,10 @@ def test_full_hadamard():
             triton_result = full_hadamard_triton(x.clone()) / math.sqrt(N)
 
             # 4. blocked GEMM
-            H = generate_hadamard_matrix(N).cuda() / math.sqrt(N)
+            H = generate_hadamard_matrix(N, dtype=dtype).cuda() / math.sqrt(N)
             blocked_result = hadamard_blocked_transform(x.clone(), H) 
 
             # 5. fast blocked GEMM
-            H = generate_hadamard_matrix(N).cuda() / math.sqrt(N)
             fast_blocked_result = tritonblas.hadamard_blocked_fast(x.clone()) 
 
             # matmul vs ref

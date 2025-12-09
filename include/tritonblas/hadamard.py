@@ -26,7 +26,7 @@ import torch
 #     return H.cast(dtype)
 
 @triton.jit
-def build_H(SIZE: tl.constexpr, dtype: tl.constexpr):
+def build_H(SIZE: tl.constexpr):
     r"""
     Construct Hadamard matrix using H_{i,j} = (-1)^{popcount(i & j)}.
     
@@ -43,7 +43,7 @@ def build_H(SIZE: tl.constexpr, dtype: tl.constexpr):
         SIZE x SIZE Hadamard matrix
     """
     tl.static_assert(0 < SIZE)
-    tl.static_assert(SIZE <= 64)
+    tl.static_assert(SIZE <= 64) # extend to 128 ?
     
     # Create row and column indices
     i = tl.arange(0, SIZE)
@@ -61,10 +61,9 @@ def build_H(SIZE: tl.constexpr, dtype: tl.constexpr):
     
     # Map: even popcount -> +1, odd popcount -> -1
     H = 1 - 2 * (bit_sum & 1)
-    H = H.to(dtype)
-    norm_factor = 1.0 / tl.math.sqrt(float(SIZE))
-    H = H * norm_factor
-    
+
+    # normalize by sqrt(d)
+    H = H  / tl.math.sqrt(float(SIZE))
     return H
 
 
@@ -107,11 +106,11 @@ def hadamard_blocked_kernel(
     a_block = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
     
     # Materialize Hadamard matrix [BLOCK_SIZE, BLOCK_SIZE]
-    h_block = build_H(BLOCK_SIZE, a_block.dtype)
+    h_block = build_H(BLOCK_SIZE)
     
     # Perform matrix multiplication: A_block @ H_block
     # This is a single 32x32 @ 32x32 operation
-    result = tl.dot(a_block, h_block)
+    result = tl.dot(a_block, h_block.to(a_block.dtype))
     
     # Store result to output
     out_ptrs = Out_ptr + m_offs[:, None] * stride_om + k_offs[None, :] * stride_ok

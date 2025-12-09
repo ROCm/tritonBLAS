@@ -107,7 +107,7 @@ def hadamard_blocked_transform(A: torch.Tensor, H: torch.Tensor) -> torch.Tensor
     
     return Out
 
-def generate_hadamard_matrix(n: int) -> torch.Tensor:
+def generate_hadamard_matrix(n: int, dtype=torch.float32) -> torch.Tensor:
     """
     Generate a Hadamard matrix of size n x n using Sylvester's construction.
     n must be a power of 2.
@@ -119,7 +119,7 @@ def generate_hadamard_matrix(n: int) -> torch.Tensor:
     
     # Recursive construction
     H_half = generate_hadamard_matrix(n // 2)
-    H = torch.zeros((n, n))
+    H = torch.zeros((n, n), dtype=dtype)
     half = n // 2
     
     H[:half, :half] = H_half
