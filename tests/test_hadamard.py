@@ -216,7 +216,7 @@ def test_full_hadamard():
     dtype = torch.bfloat16
 
     test_sizes = [32] #, 64, 128, 256, 512, 1024]
-    batch_sizes = [1, 4]
+    batch_sizes = [1, 4, 32, 64, 128, 512]
     
     print(f"\nRunning tests on device: {device}")
     print("=" * 60)

@@ -4,7 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 from hadamard import hadamard_blocked_transform, generate_hadamard_matrix
 import tritonblas 
-
+from fp4_utils import dynamic_mxfp4_quant, mxfp4_to_f32, e8m0_to_f32
+import aiter 
 def is_power_of_2(n: int) -> bool:
     """Check if n is a power of 2."""
     return n > 0 and (n & (n - 1)) == 0
@@ -169,6 +170,16 @@ def _select_block(N: int, candidate_blocks=(32, 64, 128), max_mono_kernel_n=2048
         return sorted(small, reverse=True)[0]
     return max(divs)
 
+def torch_rmsnorm(x, g, out_dtype=torch.float16, epsilon=1e-6):
+    M, N = x.shape
+    # cast to float32 as the triton kernel
+    x_f32 = x.float()
+    g_f32 = g.float()
+    rms = torch.sqrt(torch.sum(x_f32 * x_f32, dim=-1) * 1 / N)
+    rsigma = 1.0 / rms
+    rms_norm_f32 = x_f32 * rsigma.unsqueeze(1) * g_f32
+    rms_norm = rms_norm_f32.to(out_dtype)
+    return rms_norm
 
 def full_hadamard_triton(x: torch.Tensor, block_size=None):
     """
@@ -213,13 +224,14 @@ def test_full_hadamard():
     """Test full Hadamard: matrix multiplication, PyTorch reference, and Triton kernel."""
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16
+    dtype = torch.float16
 
     test_sizes = [32] #, 64, 128, 256, 512, 1024]
-    batch_sizes = [1, 4]
+    batch_sizes = [1, 4, 32, 64]
     
     print(f"\nRunning tests on device: {device}")
     print("=" * 60)
+    
     
     for N in test_sizes:
         for batch in batch_sizes:
@@ -229,39 +241,21 @@ def test_full_hadamard():
             # Create random input
             x = torch.randn(batch, N, device=device, dtype=dtype)
             
-            # 1. Matrix multiplication version
-            matmul_result = fwht_matmul(x.clone()) 
-            
-            # 2. Python FWHT reference
-            ref_result = fwht_torch_reference(x.clone(), N) 
-
-            # 3. triton FWHT reference
-            triton_result = full_hadamard_triton(x.clone()) / math.sqrt(N)
-
-            # 4. blocked GEMM
-            H = generate_hadamard_matrix(N, dtype=dtype).cuda() / math.sqrt(N)
-            blocked_result = hadamard_blocked_transform(x.clone(), H) 
+            # rmsnorm parameters
+            weight = torch.randn(N, dtype=dtype, device=device)
+            eps = 1e-5
+            use_model_sensitive_rmsnorm = 0
 
             # 5. fast blocked GEMM
-            fast_blocked_result = tritonblas.hadamard_blocked_fast(x.clone()) 
+            x_norm_1 = torch_rmsnorm(x.clone(), weight, epsilon=eps, out_dtype=dtype)
+            x_had = tritonblas.hadamard_blocked_fast(x_norm_1) 
+            x_fp4_v1, x_scales_v1 = dynamic_mxfp4_quant(x_had)
 
-            # matmul vs ref
-            print(f"matmul vs ref: {F.mse_loss(matmul_result, ref_result).item():.2e}")
+            (x_fp4, x_scales), _, _ = tritonblas.fused_rms_hadamard_mxfp4_quant(x.clone(), weight, eps)
+            # (x_fp4, x_scales), _, _ = tritonblas.fused_mxfp4_quant(x.clone(), weight, eps)
 
-            # matmul vs triton
-            print(f"matmul vs triton: {F.mse_loss(matmul_result, triton_result).item():.2e}")
-
-            # ref vs triton
-            print(f"ref vs triton: {F.mse_loss(ref_result, triton_result).item():.2e}")
-
-            # blocked GEMM vs triton
-            print(f"blocked gemm vs. triton: {F.mse_loss(blocked_result, triton_result)}")
-
-            # blocked GEMM vs ref
-            print(f"blocked gemm vs. matmul: {F.mse_loss(blocked_result, matmul_result)}")
-
-            # fast blocked GEMM vs blocked GEMM
-            print(f"fast blocked gemm vs. blocked gemm: {F.mse_loss(fast_blocked_result, blocked_result)}")
+            print(f"unfused vs. fused xfp4: {F.mse_loss(x_fp4_v1.to(torch.float), x_fp4.to(torch.float))}")
+            print(f"unfused vs. fused fp4 scales: {F.mse_loss(x_scales_v1.to(torch.float), x_scales.to(torch.float))}")
 
     
     print("\n" + "=" * 60)

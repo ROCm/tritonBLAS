@@ -139,7 +139,7 @@ def _dynamic_mxfp4_quant_kernel(
     x = tl.load(x_ptr + x_offs, mask=x_mask).to(tl.float32)
 
     # Calculate scale per row (max absolute value)
-    amax = tl.max(tl.abs(x), axis=1, keep_dims=True)
+    amax = tl.max(tl.abs(x), axis=-1, keep_dims=True)
     
     # Convert to e8m0 format
     # Round up to nearest power of 2 for better numerical stability
