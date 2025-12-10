@@ -56,14 +56,14 @@ def _hadamard_mxfp4_quant_op(
 
     """
     NUM_QUANT_BLOCKS: tl.constexpr = BLOCK_SIZE_N // MXFP4_QUANT_BLOCK_SIZE
-    x = x.reshape(BLOCK_SIZE_M, NUM_QUANT_BLOCKS, MXFP4_QUANT_BLOCK_SIZE)
+    x = x.reshape(BLOCK_SIZE_M* NUM_QUANT_BLOCKS, MXFP4_QUANT_BLOCK_SIZE)
 
     # to print: tl.device_print to print values @ runtime maybe....
     
     # add hadamard here
-    h_block = build_H(MXFP4_QUANT_BLOCK_SIZE)
-    x = tl.dot(x, h_block.to(x.dtype).reshape(1, MXFP4_QUANT_BLOCK_SIZE, MXFP4_QUANT_BLOCK_SIZE))
-
+    h_block = build_H(MXFP4_QUANT_BLOCK_SIZE).to(x.dtype)
+    x = tl.dot(x, h_block)
+    x = x.reshape(BLOCK_SIZE_M, NUM_QUANT_BLOCKS, MXFP4_QUANT_BLOCK_SIZE)
     # 1 x 32  block size 
     # Calculate scale
     amax = tl.max(tl.abs(x), axis=-1, keep_dims=True) # 32 x 1 scales, 32 threads doing 1 x 32 parallel across threads
