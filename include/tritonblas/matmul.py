@@ -5,6 +5,7 @@ import functools
 import time
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.fused_gemm import fused_persistent_matmul
 from .origami import MatmulHeuristicResult
 from typing import Dict, Tuple, Optional
 
@@ -253,6 +254,127 @@ def matmul(
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
     else:
         return persistent_matmul_lt(a, b, c, selector)
+    
+
+def fused_matmul(
+    a: torch.Tensor,
+    b0: torch.Tensor,
+    c0: torch.Tensor,
+    b1: torch.Tensor,
+    c1: torch.Tensor,
+    kernel_alpha_selector,
+    kernel_beta_selector
+):
+    """
+    c0 = a @ b0
+    c1 = c0 @ b1
+    """
+    assert a.shape[1] == b0.shape[0], "Incompatible Dimensions"
+    assert a.shape[0] == c1.shape[0], "Incompatible Dimensions"
+    assert c0.shape[1] == b1.shape[0], "Incompatible Dimensions"
+    assert c0.shape[0] == c1.shape[0], "Incompatible Dimensions"
+    assert c0.shape[1] == b1.shape[0], "Incompatible Dimensions"
+
+    # Extract dimensions
+    # ALPHA: C0 = A @ B0
+    # A is (M, K), B0 is (K, N), C0 is (M, N)
+    M = a.shape[0]
+    K = a.shape[1]  # Also b0.shape[0]
+    N = b0.shape[1]  # Also c0.shape[1]
+    # BETA: C1 = C0 @ B1
+    # C0 is (M, N), B1 is (N, P), C1 is (M, P)
+    P = b1.shape[1]  # Also c1.shape[1]
+    
+    ALPHA_BLK_M, ALPHA_BLK_N, ALPHA_BLK_K, ALPHA_GSIZE_M = kernel_alpha_selector.get_config()
+    alpha_total_blocks_m = triton.cdiv(M, ALPHA_BLK_M)
+    alpha_total_blocks_n = triton.cdiv(N, ALPHA_BLK_N)
+    alpha_total_tiles = alpha_total_blocks_m * alpha_total_blocks_n
+    alpha_total_programs = alpha_total_tiles
+    alpha_even_k = K % ALPHA_BLK_K == 0
+    
+    BETA_BLK_M, BETA_BLK_N, BETA_BLK_K, BETA_GSIZE_M = kernel_beta_selector.get_config()
+    # Force BLK_M and BLK_N to be the same as ALPHA_BLK_M and ALPHA_BLK_N
+    BETA_BLK_M = ALPHA_BLK_M
+    BETA_BLK_N = ALPHA_BLK_N
+    BETA_BLK_K = ALPHA_BLK_K
+    beta_total_blocks_m = triton.cdiv(M, BETA_BLK_M)
+    beta_total_blocks_n = triton.cdiv(P, BETA_BLK_N)
+    beta_total_tiles = beta_total_blocks_m * beta_total_blocks_n
+    beta_total_programs = beta_total_tiles
+    beta_even_k = N % BETA_BLK_K == 0  # For BETA, K dimension is N (from C0)
+    
+    # EVEN_K is used by both ALPHA (for K dimension) and BETA (for N dimension)
+    # Since the kernel only accepts one EVEN_K, we use the more restrictive value
+    # Both branches will handle remainders correctly if either dimension is not divisible
+    even_k = alpha_even_k and beta_even_k
+    
+    num_stages = 2
+    num_warps = 8
+    waves_per_eu = 0
+    mfmaInstrSize = 16
+    kpack = 1
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
+    grids = alpha_total_programs + beta_total_programs
+    
+    # Set chunk size to same area as L2 tiles
+    num_xcds = 8
+    chunk_size = ALPHA_GSIZE_M * ALPHA_GSIZE_M
+    chunk_size = min(chunk_size, grids // num_xcds)
+    
+    # Initialize locks for synchronization
+    locks = torch.zeros(alpha_total_tiles, device="cuda", dtype=torch.int32)
+    
+    # Invoke the fused kernel
+    fused_persistent_matmul[(grids,)](
+        a,
+        b0,
+        c0,
+        b1,
+        c1,
+        locks,
+        None,  # A_scale_ptr (TODO: support quantization)
+        None,  # B_scale_ptr (TODO: support quantization)
+        None,  # bias_ptr (TODO: enable bias)
+        M,
+        N,
+        K,
+        P,
+        a.stride(0),  # stride_am
+        b0.stride(1),  # stride_b0n
+        c0.stride(0),  # stride_c0m
+        c0.stride(1),  # stride_c0n
+        b1.stride(1),  # stride_b1n
+        c1.stride(0),  # stride_c1m
+        c1.stride(1),  # stride_c1n
+        0,  # stride_bias (TODO: enable bias)
+        stride_ak=a.stride(1),
+        stride_b0k=b0.stride(0),
+        stride_b1k=b1.stride(0),
+        BLOCK_SIZE_M=ALPHA_BLK_M,
+        BLOCK_SIZE_N=ALPHA_BLK_N,
+        BLOCK_SIZE_K=ALPHA_BLK_K,
+        GROUP_SIZE_M=ALPHA_GSIZE_M,
+        NUM_SMS=grids,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        BIAS=False,
+        EVEN_K=even_k,
+        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+        QUANTIZED=False,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu,
+        matrix_instr_nonkdim=mfmaInstrSize,
+        kpack=kpack,
+    )
+    
+    return c0, c1
+
+
+
+
 
 def matmul_a8w8(
     a: torch.Tensor,
