@@ -64,12 +64,10 @@ def idx2coord(
     tl.assume(output_coord_n >= 0)
     
     # Compute logical indices (no pointer math yet)
-    row_indices = (output_coord_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    col_indices = (output_coord_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    
-    # Apply max_contiguous and multiple_of hints for better codegen
-    row_indices = tl.max_contiguous(tl.multiple_of(row_indices, BLOCK_SIZE_M), BLOCK_SIZE_M)
-    col_indices = tl.max_contiguous(tl.multiple_of(col_indices, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    # NOTE: Do NOT use modulo here - it breaks boundary masking for partial tiles
+    # The mask (row_indices < M) must correctly identify out-of-bounds rows
+    row_indices = output_coord_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    col_indices = output_coord_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     
     # Initialize accumulator with specified dtype
     # Typically float32 for fp16/bf16 output, int32 for int8 output

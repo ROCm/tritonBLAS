@@ -16,12 +16,13 @@ def load(
     CACHE_MODIFIER: tl.constexpr,
     mask_k: tl.constexpr = False,
     is_row_major: tl.constexpr = True,
+    major_dim_size=None,
 ):
     """
     Load a single tile from global memory.
-    
+
     This function loads one tile (either A or B) from global memory.
-    
+
     Args:
         matrix_ptr: Pointer to the matrix
         indices: Row indices (for A) or column indices (for B)
@@ -33,13 +34,15 @@ def load(
         CACHE_MODIFIER: Cache modifier for load
         mask_k: Whether to apply K-dimension masking (for tail handling)
         is_row_major: Whether this is a row-major load (A=True) or column-major (B=False)
-    
+        major_dim_size: Size of major dimension (M for A, N for B) for boundary masking.
+                        If None, no major dimension masking is applied.
+
     Returns:
         Loaded tile: [BLOCK_SIZE_M, BLOCK_SIZE_K] for A or [BLOCK_SIZE_K, BLOCK_SIZE_N] for B
     """
     # Compute K indices
     rk = k0 + tl.arange(0, BLOCK_SIZE_K)
-    
+
     # Compute addresses based on layout
     if is_row_major:
         # For A: [BLOCK_SIZE_M, BLOCK_SIZE_K]
@@ -49,9 +52,19 @@ def load(
             ptrs = tl.multiple_of(ptrs, (1, 16))
         else:
             ptrs = tl.multiple_of(ptrs, (16, 1))
-        # Load with optional K masking
+        # Build mask: combine major dimension and K dimension masking
+        if major_dim_size is not None:
+            major_mask = indices[:, None] < major_dim_size
+        else:
+            major_mask = True
         if mask_k:
-            tile = tl.load(ptrs, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER)
+            k_mask = rk[None, :] < K
+            mask = major_mask & k_mask
+        else:
+            mask = major_mask
+        # Load with masking
+        if major_dim_size is not None or mask_k:
+            tile = tl.load(ptrs, mask=mask, other=0.0, cache_modifier=CACHE_MODIFIER)
         else:
             tile = tl.load(ptrs, cache_modifier=CACHE_MODIFIER)
     else:
@@ -62,10 +75,20 @@ def load(
             ptrs = tl.multiple_of(ptrs, (16, 1))
         else:
             ptrs = tl.multiple_of(ptrs, (1, 16))
-        # Load with optional K masking
+        # Build mask: combine major dimension and K dimension masking
+        if major_dim_size is not None:
+            major_mask = indices[None, :] < major_dim_size
+        else:
+            major_mask = True
         if mask_k:
-            tile = tl.load(ptrs, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER)
+            k_mask = rk[:, None] < K
+            mask = major_mask & k_mask
+        else:
+            mask = major_mask
+        # Load with masking
+        if major_dim_size is not None or mask_k:
+            tile = tl.load(ptrs, mask=mask, other=0.0, cache_modifier=CACHE_MODIFIER)
         else:
             tile = tl.load(ptrs, cache_modifier=CACHE_MODIFIER)
-    
+
     return tile
