@@ -82,7 +82,7 @@ def persistent_matmul(
         acc = gemm_loop(
             A, B, #Pointers to A and B tensors
             row_indices, col_indices, #The row and column indices to process
-            acc, K, #Accumulator and problem K dimension
+            acc, M, N, K, #Accumulator and problem dimensions
             stride_am, stride_ak, #A tensor strides
             stride_bn, stride_bk, #B tensor strides
             BLOCK_SIZE_K, #Block Size in K dimension

@@ -19,6 +19,8 @@ def gemm_loop(
     row_indices,
     col_indices,
     acc,
+    M,
+    N,
     K,
     stride_am,
     stride_ak,
@@ -33,11 +35,11 @@ def gemm_loop(
 ):
     """
     Execute the main GEMM loop over the K dimension.
-    
+
     This function encapsulates the loads, and MAC operations of a gemm loop over K.
-    
+
     Handles both the main loop and K tail (if K is not evenly divisible by BLOCK_SIZE_K).
-    
+
     Parameters:
     -----------
     A : tensor
@@ -50,6 +52,10 @@ def gemm_loop(
         Column indices for the current tile
     acc : tensor
         Accumulator tensor (will be updated in-place conceptually)
+    M : int
+        Total M dimension size (for boundary masking on A)
+    N : int
+        Total N dimension size (for boundary masking on B)
     K : int
         Total K dimension size
     stride_am : int
@@ -72,7 +78,7 @@ def gemm_loop(
         Whether to allow TF32 computation
     EVEN_K : constexpr bool
         Whether K is evenly divisible by BLOCK_SIZE_K
-    
+
     Returns:
     --------
     acc : tensor
@@ -83,27 +89,28 @@ def gemm_loop(
     if not EVEN_K:
         loop_k -= 1
     tl.assume(loop_k > 0)
-    
+
     # Main loop over K dimension
     for k_iter in range(loop_k):
         k0 = k_iter * BLOCK_SIZE_K
-        
-        # Load - Address math + global → CU load
-        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=False, is_row_major=True)
-        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=False, is_row_major=False)
-        
+
+        # Load - Address math + global -> CU load
+        # Pass M/N for boundary masking on partial tiles
+        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=False, is_row_major=True, major_dim_size=M)
+        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=False, is_row_major=False, major_dim_size=N)
+
         # Compute - Math only
         acc = multiply_accumulate(acc, a, b, QUANTIZED, ALLOW_TF32)
-    
+
     # Handle K tail if needed
     if not EVEN_K:
         k0 = loop_k * BLOCK_SIZE_K
-        
+
         # Load with masking
-        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=True, is_row_major=True)
-        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=True, is_row_major=False)
-        
+        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=True, is_row_major=True, major_dim_size=M)
+        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=True, is_row_major=False, major_dim_size=N)
+
         # Compute
         acc = multiply_accumulate(acc, a, b, QUANTIZED, ALLOW_TF32)
-    
+
     return acc

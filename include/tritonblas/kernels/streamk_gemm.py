@@ -67,13 +67,15 @@ def streamk_matmul(
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        # NOTE: Do NOT use modulo here - it breaks boundary masking for partial tiles
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         rk = tl.arange(0, BLOCK_SIZE_K)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+        # Compute masks for boundary handling
+        mask_m = rm[:, None] < M
+        mask_n = rn[None, :] < N
 
         if BIAS:
             bias_ = bias_ptr + rm * stride_bias
@@ -87,14 +89,14 @@ def streamk_matmul(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for k in range(0, loop_k):
             if stride_ak == 1:
-                a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_A)
+                a = tl.load(tl.multiple_of(A_BASE, (1, 16)), mask=mask_m, other=0.0, cache_modifier=CACHE_MODIFIER_A)
             else:
-                a = tl.load(tl.multiple_of(A_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_A)
+                a = tl.load(tl.multiple_of(A_BASE, (16, 1)), mask=mask_m, other=0.0, cache_modifier=CACHE_MODIFIER_A)
 
             if stride_bk == 1:
-                b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_B)
+                b = tl.load(tl.multiple_of(B_BASE, (16, 1)), mask=mask_n, other=0.0, cache_modifier=CACHE_MODIFIER_B)
             else:
-                b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
+                b = tl.load(tl.multiple_of(B_BASE, (1, 16)), mask=mask_n, other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
             # Conditional dot product precision based on quantization mode
             if QUANTIZED:
@@ -118,8 +120,8 @@ def streamk_matmul(
                 B_BASE = tl.multiple_of(B_BASE, (16, 1))
             else:
                 B_BASE = tl.multiple_of(B_BASE, (1, 16))
-            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
-            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
+            a = tl.load(A_BASE, mask=mask_m & (rk[None, :] < K), other=0.0, cache_modifier=CACHE_MODIFIER_A)
+            b = tl.load(B_BASE, mask=mask_n & (rk[:, None] < K), other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
             if QUANTIZED:
                 acc += tl.dot(a, b, input_precision="ieee")
@@ -129,10 +131,10 @@ def streamk_matmul(
         # Conditional scaling for quantized mode
         if QUANTIZED:
             # Create pointers for the scale tensors and load them
-            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
-            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
-            A_scale = tl.load(A_scale_ptr + rm_A_scale)
-            B_scale = tl.load(B_scale_ptr + rn_B_scale)
+            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            A_scale = tl.load(A_scale_ptr + rm_A_scale, mask=rm_A_scale < M, other=0.0)
+            B_scale = tl.load(B_scale_ptr + rn_B_scale, mask=rn_B_scale < N, other=0.0)
             acc *= A_scale[:, None] * B_scale[None, :]
 
         # Unified bias handling for full tiles
@@ -149,10 +151,7 @@ def streamk_matmul(
         else:
             c = acc.to(C.type.element_ty)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        # Store using original rm/rn (without modulo) for correct masking
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, mask=mask)
@@ -192,11 +191,10 @@ def streamk_matmul(
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        # NOTE: Do NOT use modulo here - it breaks boundary masking for partial tiles
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         rk = tl.arange(0, BLOCK_SIZE_K)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak + BLOCK_SIZE_K * stride_ak * remainder
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn + BLOCK_SIZE_K * stride_bk * remainder
         if stride_ak == 1:
@@ -209,6 +207,10 @@ def streamk_matmul(
         else:
             B_BASE = tl.multiple_of(B_BASE, (1, 16))
 
+        # Compute masks for boundary handling
+        mask_m = rm[:, None] < M
+        mask_n = rn[None, :] < N
+
         if BIAS:
             bias_ = bias_ptr + rm * stride_bias
             bias = tl.load(bias_, mask=rm < M, other=0.0)
@@ -216,13 +218,13 @@ def streamk_matmul(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for current_iter in range(start_iter, end_iter):
             if EVEN_K:
-                a = tl.load(A_BASE, cache_modifier=CACHE_MODIFIER_A)
-                b = tl.load(B_BASE, cache_modifier=CACHE_MODIFIER_B)
+                a = tl.load(A_BASE, mask=mask_m, other=0.0, cache_modifier=CACHE_MODIFIER_A)
+                b = tl.load(B_BASE, mask=mask_n, other=0.0, cache_modifier=CACHE_MODIFIER_B)
             else:
                 global_k_offset = (current_iter % iters_per_tile) * BLOCK_SIZE_K
                 k_mask = global_k_offset + rk < K
-                a = tl.load(A_BASE, mask=k_mask[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_A)
-                b = tl.load(B_BASE, mask=k_mask[:, None], other=0.0, cache_modifier=CACHE_MODIFIER_B)
+                a = tl.load(A_BASE, mask=mask_m & k_mask[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_A)
+                b = tl.load(B_BASE, mask=mask_n & k_mask[:, None], other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
             # Conditional dot product precision for Stream-K loop
             if QUANTIZED:
@@ -235,10 +237,10 @@ def streamk_matmul(
         # Conditional scaling for quantized mode in Stream-K section
         if QUANTIZED:
             # Create pointers for the scale tensors and load them
-            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
-            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
-            A_scale = tl.load(A_scale_ptr + rm_A_scale)
-            B_scale = tl.load(B_scale_ptr + rn_B_scale)
+            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            A_scale = tl.load(A_scale_ptr + rm_A_scale, mask=rm_A_scale < M, other=0.0)
+            B_scale = tl.load(B_scale_ptr + rn_B_scale, mask=rn_B_scale < N, other=0.0)
             acc *= A_scale[:, None] * B_scale[None, :]
 
         tile_iter = tile_id * iters_per_tile
@@ -351,11 +353,11 @@ def streamk_matmul(
             c10 = acc10.to(C.type.element_ty)
             c11 = acc11.to(C.type.element_ty)
 
-            # Store all 4 quadrants
-            rm_top = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M // 2)) % M
-            rm_bottom = (pid_m * BLOCK_SIZE_M + tl.arange(BLOCK_SIZE_M // 2, BLOCK_SIZE_M)) % M
-            rn_left = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N // 2)) % N
-            rn_right = (pid_n * BLOCK_SIZE_N + tl.arange(BLOCK_SIZE_N // 2, BLOCK_SIZE_N)) % N
+            # Store all 4 quadrants - NOTE: Do NOT use modulo for correct masking
+            rm_top = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M // 2)
+            rm_bottom = pid_m * BLOCK_SIZE_M + tl.arange(BLOCK_SIZE_M // 2, BLOCK_SIZE_M)
+            rn_left = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N // 2)
+            rn_right = pid_n * BLOCK_SIZE_N + tl.arange(BLOCK_SIZE_N // 2, BLOCK_SIZE_N)
 
             # Store quadrant 00 (top-left)
             mask00 = (rm_top < M)[:, None] & (rn_left < N)[None, :]
