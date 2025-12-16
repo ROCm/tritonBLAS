@@ -17,9 +17,9 @@ dtype_to_str = {
     torch.float8_e4m3fn: "f8",
 }
 # Add FP8 FNUZ variants if available (for non-gfx950 architectures)
-if hasattr(torch, 'float8_e5m2fnuz'):
+if hasattr(torch, "float8_e5m2fnuz"):
     dtype_to_str[torch.float8_e5m2fnuz] = "f8"
-if hasattr(torch, 'float8_e4m3fnuz'):
+if hasattr(torch, "float8_e4m3fnuz"):
     dtype_to_str[torch.float8_e4m3fnuz] = "f8"
 
 
@@ -49,7 +49,7 @@ class MatmulHeuristicResult:
 
         # Helper function to get bits for both float, int, and MX dtypes
         mx_types = ["f4"]
-        
+
         def get_dtype_bits(dtype):
             # Handle MX types (string-based)
             if dtype in mx_types:
@@ -60,11 +60,11 @@ class MatmulHeuristicResult:
                 return torch.finfo(dtype).bits
             except TypeError:
                 return torch.iinfo(dtype).bits
-        
+
         self.element_size_A = get_dtype_bits(a_dtype)
         self.element_size_B = get_dtype_bits(b_dtype)
         self.element_size_out = get_dtype_bits(c_dtype)
-        
+
         # For matrix instruction latency lookup, use input dtype (not output dtype)
         # because the matrix instruction type is determined by input operand types
         # Example: FP8 inputs with BF16 output still uses FP8 matrix instructions
@@ -72,8 +72,14 @@ class MatmulHeuristicResult:
         if a_dtype in mx_types:
             self.mi_dtype = a_dtype
         else:
-            input_dtype_for_mi = a_dtype if get_dtype_bits(a_dtype) <= get_dtype_bits(b_dtype) else b_dtype
-            self.mi_dtype = dtype_to_str.get(input_dtype_for_mi, dtype_to_str.get(c_dtype))
+            input_dtype_for_mi = (
+                a_dtype
+                if get_dtype_bits(a_dtype) <= get_dtype_bits(b_dtype)
+                else b_dtype
+            )
+            self.mi_dtype = dtype_to_str.get(
+                input_dtype_for_mi, dtype_to_str.get(c_dtype)
+            )
 
         # Infer Matrix Instruction Dimensions from datatypes
         self.MI_dim = self._infer_matrix_instruction_dimensions(
@@ -120,6 +126,9 @@ class MatmulHeuristicResult:
             sizes are not compatible with the detected hardware.
         """
         MI_dim = None
+        # Helper to check if hardware is gfx942 (304 CUs, 80 CUs, or 64 CUs)
+        is_gfx942 = self.hardware.N_CU in [304, 80, 64]
+
         # gfx950
         if self.hardware.N_CU == 256:
             # FP32
@@ -134,10 +143,10 @@ class MatmulHeuristicResult:
                     self.block_k_range = [256]
                 else:
                     self.block_k_range = [128]
-                self.block_mn_range = [32,64,128,256]
+                self.block_mn_range = [32, 64, 128, 256]
                 MI_dim = [16, 16, 128]
-        # gfx942
-        if self.hardware.N_CU == 304:
+        # gfx942 (304 CUs full, 80 CUs partitioned)
+        if is_gfx942:
             # FP32
             if max(element_size_A, element_size_B) == 32:
                 MI_dim = [16, 16, 4]
@@ -150,9 +159,9 @@ class MatmulHeuristicResult:
                 self.block_mn_range = self.block_mn_range + [512]
                 self.block_k_range = self.block_k_range + [128, 256]
 
-            # F4F6 -> Unsupported on MI300X
+            # F4F6 -> Unsupported on gfx942
             if max(element_size_A, element_size_B) < 8:
-                raise ValueError("MI300X doesn't support F4/F6")
+                raise ValueError("gfx942 doesn't support F4/F6")
 
         if self.hardware.N_CU == 228:
             # FP32
@@ -167,10 +176,10 @@ class MatmulHeuristicResult:
                 self.block_mn_range = self.block_mn_range + [512]
                 self.block_k_range = self.block_k_range + [128, 256]
 
-            # F4F6 -> Unsupported on MI300A
+            # F4F6 -> Unsupported on gfx942 228 CUs
             if max(element_size_A, element_size_B) < 8:
-                raise ValueError("MI300A doesn't support F4/F6")
-            
+                raise ValueError("gfx942 228CUs doesn't support F4/F6")
+
         if self.hardware.N_CU == 104:
             # FP32
             if max(element_size_A, element_size_B) == 32:
@@ -179,29 +188,11 @@ class MatmulHeuristicResult:
             if max(element_size_A, element_size_B) == 16:
                 MI_dim = [16, 16, 16]
             if max(element_size_A, element_size_B) == 8:
-                raise ValueError("MI200 doesn't support F8")
+                raise ValueError("gfx90s doesn't support F8")
 
             if max(element_size_A, element_size_B) < 8:
-                raise ValueError("MI200 doesn't support F4/F6")
-        
-        # MI308 or partitioned MI300X with 80 CUs
-        if self.hardware.N_CU == 80:
-            # FP32
-            if max(element_size_A, element_size_B) == 32:
-                MI_dim = [16, 16, 4]
-            # FP16/BF16
-            if max(element_size_A, element_size_B) == 16:
-                MI_dim = [16, 16, 16]
-            # F8
-            if max(element_size_A, element_size_B) == 8:
-                MI_dim = [16, 16, 32]
-                self.block_mn_range = self.block_mn_range + [512]
-                self.block_k_range = self.block_k_range + [128, 256]
+                raise ValueError("gfx90s doesn't support F4/F6")
 
-            # F4F6 -> Unsupported
-            if max(element_size_A, element_size_B) < 8:
-                raise ValueError("MI308/80CU doesn't support F4/F6")
-            
         # Architecture Detected is not valid
         if MI_dim == None:
             raise ValueError(
@@ -267,13 +258,11 @@ class MatmulHeuristicResult:
 
         best_result = results[0]
 
-        # Heuristic weightin to different tiles
-        if self.hardware.N_CU == 304:
+        # Heuristic weighting to different tiles
+        if self.hardware.N_CU in [304, 80, 64]:  # gfx942
             if best_result[1] == 256 and best_result[2] == 256:
                 if results[0][0] * 1.00 > results[1][0]:
                     best_result = results[1]
-
-
 
         return (best_result[1], best_result[2], best_result[3])
 
@@ -371,6 +360,10 @@ class MatmulHeuristicResult:
 
             # Really bad last wave, which would have originally been compensated for
             # by changing tile size, but triton tile sizes are limited
-            if last_wave_remainder < 128 and last_wave_remainder > 0 and self.hardware.N_CU == 304:
-                sk_grid = 256
+            if (
+                last_wave_remainder < 128
+                and last_wave_remainder > 0
+                and self.hardware.N_CU in [304, 80, 64]
+            ):  # gfx942
+                sk_grid = 256 if self.hardware.N_CU == 304 else 64
         return sk_grid
