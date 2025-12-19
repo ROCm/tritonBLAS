@@ -29,6 +29,9 @@ from .streamk_gemm import streamk_matmul
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
+# fused mxfp4 with rms
+from .fused_mxfp4_quant import _fused_rms_hadamard_mxfp4_quant_kernel, _fused_mxfp4_quant_kernel
+
 # Export stages submodule
 from . import stages
 
