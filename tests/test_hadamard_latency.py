@@ -165,7 +165,8 @@ def benchmark_block_sizes():
     # Use smaller size to avoid OOM in Docker
     M, N, K =  16384, 16384, 16384
     dtype = torch.bfloat16
-    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     # Generate test data once
     x = torch.randn((M, K), dtype=dtype)
     w = torch.randn((N, K), dtype=dtype)
@@ -177,10 +178,17 @@ def benchmark_block_sizes():
     eps = 1e-5
     use_model_sensitive_rmsnorm = 0
     quant_dtype = torch.float8_e4m3fnuz
-    xq_fused = torch.empty(x.shape, dtype=quant_dtype, device="cuda")
+    xq_fused = torch.empty(x.shape, dtype=quant_dtype, device=device)
     xscale_fused = torch.empty(x.shape[0], 1, dtype=torch.float32, device="cuda")
     # x_norm = tritonblas.rms_norm(x, weight, eps, use_model_sensitive_rmsnorm)
 
+    quant_dtype = torch.float8_e4m3fn
+    w_fp8 = torch.empty(w.shape, dtype=quant_dtype, device=device)
+    w_fp8_scales = torch.empty(w.shape[0], 1, dtype=torch.float32, device=device)
+    # w_fp8, w_fp8_scales =  quantize_tensor_per_channel(w.clone(), quant_dtype, axis=1
+    x_fp8 = torch.empty(x.shape, dtype=quant_dtype, device=device)
+    x_fp8_scales = torch.empty(x.shape[0], 1, dtype=torch.float32, device=device)
+    aiter.ops.triton.quant.dynamic_per_tensor_quant_fp8_i8(w_fp8, w, w_fp8_scales)
     # for Hadamard
     had_size = 32
 
@@ -199,8 +207,16 @@ def benchmark_block_sizes():
             for block_n in block_n_sizes:
                 try:
                     def run_kernel():
+                        x_norm = tritonblas.rms_norm(x.clone(), weight, eps, use_model_sensitive_rmsnorm)
+                        # x_fp82, x_fp8_scales2 =  quantize_tensor_per_channel(x_norm.clone(), quant_dtype, axis=1)
+                        aiter.ops.triton.quant.dynamic_per_tensor_quant_fp8_i8(x_fp8, x_norm, x_fp8_scales)
+                        selector = tritonblas.MatmulHeuristicResult(
+                            M, N, K, x_fp8.dtype, w_fp8.dtype, out.dtype
+                        )
+                        tritonblas.matmul_a8w8_lt(x_fp8, w_fp8, x_fp8_scales, w_fp8_scales, out, selector)
+
                         # x_norm = tritonblas.rms_norm(x, weight, eps, use_model_sensitive_rmsnorm)
-                        (x_fp4, x_scales), _, _ = tritonblas.fused_rms_hadamard_mxfp4_quant(x, weight, eps)
+                        # (x_fp4, x_scales), _, _ = tritonblas.fused_rms_hadamard_mxfp4_quant(x, weight, eps)
                         # x_norm = tritonblas.rmsnorm2d_fwd_with_dynamicquant(xq_fused, x, xscale_fused, weight, eps)
                         # x_fp4, x_scales = dynamic_mxfp4_quant(x)
                         
