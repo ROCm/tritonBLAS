@@ -36,6 +36,7 @@ class MatmulHeuristicResult:
         mx_block_size=0,  # Number of MX datatype elements that share a scale
         streamk=True,
     ):
+        print(f"[TRITONBLAS-ORIGAMI-DEBUG] Initializing MatmulHeuristicResult for {m}x{n}x{k}, dtypes: {a_dtype}, {b_dtype}, {c_dtype}, streamk={streamk}")
 
         # Set Instance Variables
         self.m = m
@@ -44,6 +45,7 @@ class MatmulHeuristicResult:
 
         # Instantiate hardare information object
         self.hardware = origami.get_hardware_for_device(0)
+        print(f"[TRITONBLAS-ORIGAMI-DEBUG] Hardware detected: N_CU={self.hardware.N_CU}")
         self.block_mn_range = [16, 32, 64, 128, 256]
         self.block_k_range = [16, 32, 64, 128, 256, 512]
 
@@ -90,6 +92,7 @@ class MatmulHeuristicResult:
         self.mx_block_size = mx_block_size
 
         self.config = self._prepare_config()
+        print(f"[TRITONBLAS-ORIGAMI-DEBUG] Final config: BLK_M={self.config[0]}, BLK_N={self.config[1]}, BLK_K={self.config[2]}, GSIZE={self.config[3]}")
 
         # Grid model constants
         self.split_factors = [8, 6, 4, 3, 2, 1]
@@ -106,8 +109,10 @@ class MatmulHeuristicResult:
 
         if streamk:
             self.grid = self.compute_sk_grid()
+            print(f"[TRITONBLAS-ORIGAMI-DEBUG] StreamK grid computed: {self.grid}")
         else:
             self.grid = self.hardware.N_CU
+            print(f"[TRITONBLAS-ORIGAMI-DEBUG] Using hardware grid: {self.grid}")
 
     def _infer_matrix_instruction_dimensions(self, element_size_A, element_size_B):
         """
