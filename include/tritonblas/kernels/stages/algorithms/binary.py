@@ -74,4 +74,5 @@ def add_vector(acc, bias_vector, QUANTIZED: tl.constexpr):
     if QUANTIZED:
         return acc + bias_vector[:, None].to(tl.float32)
     else:
-        return acc + bias_vector[:, None]
+        #return acc + bias_vector[:, None]
+        return acc + bias_vector[None, :]
