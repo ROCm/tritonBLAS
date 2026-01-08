@@ -39,7 +39,7 @@ python3 example_matmul.py
 Borrows from performant variants of BLAS interfaces such as `hipBLASLt` and `cuBLASLt`, where the user initiates an initial call to set up some arguments and learn from the matrix descriptors before calling the actual `matmul`.
 
 ```python
-tritonblas.MatmulHeuristicResult(m, n, k, a_dtype, b_dtype, c_dtype) → MatmulHeuristicResult
+tritonblas.OrigamiMatmulSelector(m, n, k, a_dtype, b_dtype, c_dtype, device) → OrigamiMatmulSelector
 ```
 
 **Parameters:**
@@ -50,10 +50,11 @@ tritonblas.MatmulHeuristicResult(m, n, k, a_dtype, b_dtype, c_dtype) → MatmulH
 - **a_dtype** (*torch.dtype*): Data type of left-hand matrix.
 - **b_dtype** (*torch.dtype*): Data type of right-hand matrix.
 - **c_dtype** (*torch.dtype*): Data type of output matrix.
+- **device** (*torch.device*): Torch device object for the GPU which the tensors reside on.
 
 **Returns:**
 
-- `MatmulHeuristicResult`: An object containing a precomputed kernel configuration optimized for the provided matrix dimensions.
+- `OrigamiMatmulSelector`: An object containing a precomputed kernel configuration optimized for the provided matrix dimensions.
 
 ```python
 tritonblas.matmul_lt(input,other,*,out=None,selector,enable_streamk=False) → Tensor
@@ -67,7 +68,7 @@ tritonblas.matmul_lt(input,other,*,out=None,selector,enable_streamk=False) → T
 #### Keyword Arguments
 
 - **out** (*Tensor*, optional) – the output tensor.
-- **selector** (*MatmulHeuristicResult*): Configuration object returned by `MatmulHeuristicResult`, providing optimal tiling and launch parameters.
+- **selector** (*OrigamiMatmulSelector*): Configuration object returned by `OrigamiMatmulSelector`, providing optimal tiling and launch parameters.
 - **enable_streamk** (*bool*, optional) – enable [Stream-K](https://arxiv.org/abs/2301.03598) GEMM algorithm. Default: `False`.
 
 ### Drop-in Replacement for `torch.matmul` (work-in-progress)

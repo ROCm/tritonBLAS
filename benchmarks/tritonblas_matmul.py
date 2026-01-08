@@ -22,8 +22,8 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk, in
     """Test matmul with proper input generation - handles both quantized and non-quantized dtypes"""
 
     inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
-    selector = tritonblas.MatmulHeuristicResult(
-        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype
+    selector = tritonblas.OrigamiMatmulSelector(
+        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device
     )
 
     if inputs.is_quantized:
@@ -148,10 +148,11 @@ def bench_matmul(
         )
 
         # Build a tritonBLAS selector config and launch matmul
-        selector = tritonblas.MatmulHeuristicResult(
-            m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype
+        selector = tritonblas.OrigamiMatmulSelector(
+            m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device
         )
-        config = selector.get_config()
+        ## TODO
+        config = (selector.block_m, selector.block_n, selector.block_k)
 
         # Use appropriate API based on quantization
         if inputs.is_quantized:
