@@ -48,8 +48,8 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
     inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
 
     # Run TritonBLAS matmul
-    selector = tritonblas.MatmulHeuristicResult(
-        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype
+    selector = tritonblas.OrigamiMatmulSelector(
+        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device
     )
     tritonblas.matmul_lt(inputs.A, inputs.B, inputs.C, selector, enable_streamk)
 
