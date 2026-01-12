@@ -332,6 +332,12 @@ def matmul_fp4(
         block_k      = selector.block_k
         group_size_m = selector.group_m
         num_xcds     = selector.num_sms
+        if(block_m < M):
+            block_m=128
+        if(block_n < N):
+            block_n=128
+        if(block_k < K):
+            block_k=128
         #print(f"Selected {block_m}x{block_n}x{block_k}")
     # Get actual dimensions (accounting for packing)
     M = a.shape[0]
