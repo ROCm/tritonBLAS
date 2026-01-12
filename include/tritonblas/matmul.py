@@ -3,6 +3,7 @@ import triton
 import random
 import functools
 import time
+import os
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import MatmulHeuristicResult
@@ -118,14 +119,15 @@ def persistent_matmul_lt(
     return c
 
 def streamk_matmul_lt(
-    a: torch.Tensor, 
-    b: torch.Tensor, 
-    c: torch.Tensor, 
-    selector, 
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
     sk_grid: Optional[int] = None,
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
+    debug: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -174,7 +176,79 @@ def streamk_matmul_lt(
     # Set chunk size to same area as L2 tiles.
     num_xcds = 8
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, grids // num_xcds) 
+    chunk_size = min(chunk_size, grids // num_xcds)
+
+    # Debug information
+    if debug or os.environ.get('TRITONBLAS_DEBUG', '0') == '1':
+        print(f"\n{'='*80}")
+        print(f"STREAMK_MATMUL DEBUG INFO")
+        print(f"{'='*80}")
+        print(f"Matrix Dimensions:")
+        print(f"  A: {a.shape} (dtype: {a.dtype})")
+        print(f"  B: {b.shape} (dtype: {b.dtype})")
+        print(f"  C: {c.shape} (dtype: {c.dtype})")
+        print(f"  M={M}, N={N}, K={K}")
+        print(f"  even_k: {even_k}")
+
+        print(f"\nBlock Configuration:")
+        print(f"  BLOCK_SIZE_M: {BLK_M}")
+        print(f"  BLOCK_SIZE_N: {BLK_N}")
+        print(f"  BLOCK_SIZE_K: {BLK_K}")
+        print(f"  GROUP_SIZE_M: {gsize_m}")
+        print(f"  block_size: {block_size}")
+
+        print(f"\nGrid Configuration:")
+        print(f"  total_blocks_M: {total_blocks_M}")
+        print(f"  total_blocks_N: {total_blocks_N}")
+        print(f"  total_tiles: {total_tiles}")
+        print(f"  total_programs_streamk: {total_programs_streamk}")
+        print(f"  total_tiles_streamk: {total_tiles_streamk}")
+        print(f"  grids (NUM_SMS): {grids}")
+        print(f"  sk_grid override: {sk_grid}")
+
+        print(f"\nHardware Configuration:")
+        print(f"  MAX_SMS: {MAX_SMS}")
+        print(f"  MAX_BLOCK_SIZE: {MAX_BLOCK_SIZE}")
+        print(f"  num_stages: {num_stages}")
+        print(f"  num_warps: {num_warps}")
+        print(f"  waves_per_eu: {waves_per_eu}")
+        print(f"  mfmaInstrSize: {mfmaInstrSize}")
+        print(f"  kpack: {kpack}")
+
+        print(f"\nMemory Configuration:")
+        print(f"  NUM_XCDS: {num_xcds}")
+        print(f"  CHUNK_SIZE calculation:")
+        print(f"    gsize_m * gsize_m = {gsize_m} * {gsize_m} = {gsize_m * gsize_m}")
+        print(f"    grids // num_xcds = {grids} // {num_xcds} = {grids // num_xcds}")
+        print(f"    min({gsize_m * gsize_m}, {grids // num_xcds}) = {chunk_size}")
+        print(f"  CHUNK_SIZE (final): {chunk_size}")
+        print(f"  using_global_buffers: {grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE}")
+        print(f"  locks.shape: {locks.shape}")
+        print(f"  P.shape: {P.shape}")
+
+        print(f"\nStride Information:")
+        print(f"  stride_am (a.stride(0)): {a.stride(0)}")
+        print(f"  stride_ak (a.stride(1)): {a.stride(1)}")
+        print(f"  stride_bn (b.stride(1)): {b.stride(1)}")
+        print(f"  stride_bk (b.stride(0)): {b.stride(0)}")
+        print(f"  stride_cm (c.stride(0)): {c.stride(0)}")
+        print(f"  stride_cn (c.stride(1)): {c.stride(1)}")
+
+        print(f"\nQuantization:")
+        print(f"  quantized: {quantized}")
+        print(f"  a_scale: {a_scale.shape if a_scale is not None else None}")
+        print(f"  b_scale: {b_scale.shape if b_scale is not None else None}")
+
+        print(f"\nCache Configuration:")
+        print(f"  CACHE_MODIFIER_A: {CACHE_MODIFIER_A}")
+        print(f"  CACHE_MODIFIER_B: {CACHE_MODIFIER_B}")
+
+        print(f"\nKernel Launch Configuration:")
+        print(f"  grid_size: ({grids},)")
+        print(f"  BIAS: False")
+        print(f"  EVEN_K: {even_k}")
+        print(f"  QUANTIZED: {quantized}")
+        print(f"{'='*80}")
 
     kk = streamk_matmul[(grids,)](
         a,
@@ -218,22 +292,22 @@ def streamk_matmul_lt(
     return c
 
 def matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False, debug=False
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector)
+        return streamk_matmul_lt(a, b, c, selector, debug=debug)
     else:
         return persistent_matmul_lt(a, b, c, selector)
 
 def matmul_a8w8_lt(
-    a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False, debug=False
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return streamk_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True, debug=debug)
     else:
         return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
 
@@ -243,6 +317,7 @@ def matmul(
     c: torch.Tensor,
     enable_streamk=False,
     sk_grid=None,
+    debug=False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -250,7 +325,7 @@ def matmul(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
+        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, debug=debug)
     else:
         return persistent_matmul_lt(a, b, c, selector)
 
@@ -262,6 +337,7 @@ def matmul_a8w8(
     c: torch.Tensor,
     enable_streamk=False,
     sk_grid=None,
+    debug=False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -269,7 +345,7 @@ def matmul_a8w8(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, debug=debug)
     else:
         return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
 

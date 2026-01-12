@@ -1,0 +1,28 @@
+# FP8 version of matmul_dataset_1009_ut.yaml
+# Test configuration for torch.float8_e4m3fn data type
+# Based on the original bf16 configuration
+- m: 3840
+  n: 4352
+  k: 3840
+  in_dtype: torch.float8_e4m3fn
+  out_dtype: torch.bfloat16
+  transA: T
+  transB: N
+
+# Alternative FP8 configuration using torch.float8_e5m2
+- m: 3840
+  n: 4352
+  k: 3840
+  in_dtype: torch.float8_e5m2
+  out_dtype: torch.bfloat16
+  transA: T
+  transB: N
+
+# FP16
+- m: 3840
+  n: 4352
+  k: 3840
+  in_dtype: torch.bfloat16
+  out_dtype: torch.bfloat16
+  transA: T
+  transB: N

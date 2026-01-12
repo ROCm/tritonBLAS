@@ -30,6 +30,10 @@ Usage Examples:
   # Custom accuracy tolerance for fp16
   python bench_matmul.py --input-yaml config.yaml --check-accuracy \\
     --accuracy-tolerance 1e-2 --enable-triton-sk
+
+  # Disable torch.matmul baseline (useful for torch-free environments)
+  python bench_matmul.py --input-yaml config.yaml --disable-torch-matmul \\
+    --enable-triton-sk --print-verbose
 """
 
 import yaml
@@ -257,6 +261,7 @@ def bench_matmul(
     enable_mm_env=False,
     enable_accuracy_check=False,
     accuracy_tolerance=1e-3,
+    enable_torch_matmul=True,
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -302,8 +307,10 @@ def bench_matmul(
         # ------------------------------------------------------------
         # 1️⃣ Torch.matmul (baseline)
         # ------------------------------------------------------------
-        ms_torch = triton.testing.do_bench(lambda: torch.matmul(A, B), warmup=20, rep=20)
-        perf_torch = tflops(ms_torch)
+        ms_torch, perf_torch = None, None
+        if enable_torch_matmul:
+            ms_torch = triton.testing.do_bench(lambda: torch.matmul(A, B), warmup=20, rep=20)
+            perf_torch = tflops(ms_torch)
 
         # ------------------------------------------------------------
         # 2️⃣ Torch.mm with env override
@@ -347,7 +354,7 @@ def bench_matmul(
         max_abs_error_mm_env, max_abs_error_compile, max_abs_error_triton = None, None, None
         max_rel_error_mm_env, max_rel_error_compile, max_rel_error_triton = None, None, None
 
-        if enable_accuracy_check:
+        if enable_accuracy_check and enable_torch_matmul:
             # Compute reference result (torch.matmul)
             reference_result = torch.matmul(A, B)
 
@@ -414,33 +421,39 @@ def bench_matmul(
         # ------------------------------------------------------------
         # Speedup vs Torch baseline
         # ------------------------------------------------------------
-        speedup_mm_env = perf_mm_env / perf_torch if perf_mm_env else None
-        speedup_compile = perf_compile / perf_torch if perf_compile else None
-        speedup_triton = perf_triton / perf_torch if perf_triton else None
+        speedup_mm_env = perf_mm_env / perf_torch if (perf_mm_env and perf_torch) else None
+        speedup_compile = perf_compile / perf_torch if (perf_compile and perf_torch) else None
+        speedup_triton = perf_triton / perf_torch if (perf_triton and perf_torch) else None
 
         # ------------------------------------------------------------
         # Logging
         # ------------------------------------------------------------
         if print_verbose:
-            msg = (
-                f"[M={m},N={n},K={k},trans={transA}{transB}] dtype={in_dtype} | "
-                f"Torch={perf_torch:.3f} TF/s ({ms_torch:.2f} ms) "
-            )
+            test_case_id = count + 1
+            msg = f"Test {test_case_id}: [M={m},N={n},K={k},trans={transA}{transB}] dtype={in_dtype}"
+            if perf_torch:
+                msg += f" | Torch={perf_torch:.3f} TF/s ({ms_torch:.2f} ms)"
+            else:
+                msg += " | Torch=DISABLED"
+            msg += " "
             if perf_mm_env:
                 acc_str = ""
                 if enable_accuracy_check and accuracy_mm_env is not None:
                     acc_str = f", {'✅' if accuracy_mm_env else '❌'}acc"
-                msg += f"| mm(env=2)={perf_mm_env:.3f} ({ms_mm_env:.2f} ms, {speedup_mm_env:.2f}x{acc_str}) "
+                speedup_str = f"{speedup_mm_env:.2f}x" if speedup_mm_env is not None else "N/A"
+                msg += f"| mm(env=2)={perf_mm_env:.3f} ({ms_mm_env:.2f} ms, {speedup_str}{acc_str}) "
             if perf_compile:
                 acc_str = ""
                 if enable_accuracy_check and accuracy_compile is not None:
                     acc_str = f", {'✅' if accuracy_compile else '❌'}acc"
-                msg += f"| compile={perf_compile:.3f} ({ms_compile:.2f} ms, {speedup_compile:.2f}x{acc_str}) "
+                speedup_str = f"{speedup_compile:.2f}x" if speedup_compile is not None else "N/A"
+                msg += f"| compile={perf_compile:.3f} ({ms_compile:.2f} ms, {speedup_str}{acc_str}) "
             if perf_triton:
                 acc_str = ""
                 if enable_accuracy_check and accuracy_triton is not None:
                     acc_str = f", {'✅' if accuracy_triton else '❌'}acc"
-                msg += f"| Triton={perf_triton:.3f} ({ms_triton:.2f} ms, {speedup_triton:.2f}x{acc_str})"
+                speedup_str = f"{speedup_triton:.2f}x" if speedup_triton is not None else "N/A"
+                msg += f"| Triton={perf_triton:.3f} ({ms_triton:.2f} ms, {speedup_str}{acc_str})"
             print(msg)
 
             # Print detailed accuracy info if enabled and verbose
@@ -492,9 +505,11 @@ def bench_matmul(
         }
         benchmark_results.append(metrics)
 
-        if output_csv and count % write_csv_freq == 0:
-            write_csv(output_csv, benchmark_results)
         count += 1
+
+        # Write to CSV after each test completion
+        if output_csv:
+            write_csv(output_csv, benchmark_results)
 
     return benchmark_results
 
@@ -548,6 +563,8 @@ if __name__ == "__main__":
                         help="Check numerical accuracy against torch.matmul reference")
     parser.add_argument("--accuracy-tolerance", type=float, default=1e-2,
                         help="Tolerance for accuracy checks (default: 1e-2)")
+    parser.add_argument("--disable-torch-matmul", action="store_true",
+                        help="Disable torch.matmul baseline benchmark")
     args = parser.parse_args()
 
     results = bench_matmul(
@@ -564,6 +581,7 @@ if __name__ == "__main__":
         enable_mm_env=args.enable_mm_env,
         enable_accuracy_check=args.check_accuracy,
         accuracy_tolerance=args.accuracy_tolerance,
+        enable_torch_matmul=not args.disable_torch_matmul,
     )
 
     if args.output_csv:
