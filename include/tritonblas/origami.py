@@ -270,7 +270,7 @@ class OrigamiMatmulSelector:
             if self.streamk:
                 new_config.grid_selection = origami.grid_selection_t.k_split_aware
             else:
-                new_config.grid_selection = origami.grid_selection_t.number_of_cus
+                new_config.grid_selection = origami.grid_selection_t.data_parallel
             config_list.append(new_config)
 
         return config_list
