@@ -1,0 +1,15 @@
+- in_dtype: torch.bfloat16
+  out_dtype: torch.bfloat16
+  transA: T
+  transB: N
+  m: 3840
+  n: 4352
+  k: 3840
+
+- in_dtype: torch.float8_e4m3fnuz
+  out_dtype: torch.bfloat16
+  transA: T
+  transB: N
+  m: 3840
+  n: 4352
+  k: 3840
