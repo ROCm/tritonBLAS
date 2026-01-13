@@ -169,7 +169,7 @@ def bench_matmul(
 
         if print_verbose:
             print(
-                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, init={init_type}, perf={perf}(GFLOPs) selected_tile={selector.config[0]}x{selector.config[1]}x{selector.config[2]}"
+                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, init={init_type}, perf={perf}(GFLOPs) selected_tile={selector.block_m}x{selector.block_n}x{selector.block_k}"
             )
 
         metrics = {

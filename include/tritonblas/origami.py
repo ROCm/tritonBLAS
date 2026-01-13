@@ -42,7 +42,7 @@ class OrigamiMatmulSelector:
         self._m = m
         self._n = n
         self._k = k
-
+        self.streamk=streamk
         # Save tensor dtypes as strings
         self._a_dtype_str   = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
         self._b_dtype_str   = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, b_dtype)
@@ -267,7 +267,10 @@ class OrigamiMatmulSelector:
             new_config.mt        = mt
             new_config.mi        = mi
             new_config.occupancy = occupancy
-
+            if self.streamk:
+                new_config.grid_selection = origami.grid_selection_t.k_split_aware
+            else:
+                new_config.grid_selection = origami.grid_selection_t.number_of_cus
             config_list.append(new_config)
 
         return config_list
