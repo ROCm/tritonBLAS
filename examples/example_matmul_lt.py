@@ -11,7 +11,7 @@ def example_matmul(m, n, k):
     C = torch.zeros((m, n), device="cuda", dtype=torch.float16)
 
     # Run TritonBLAS matmul
-    selector = tritonblas.MatmulHeuristicResult(m, n, k, A.dtype, B.dtype, C.dtype)
+    selector = tritonblas.OrigamiMatmulSelector(m, n, k, A.dtype, B.dtype, C.dtype, A.device)
     tritonblas.matmul_lt(A, B, C, selector)
 
     # Print result

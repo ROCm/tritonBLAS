@@ -19,19 +19,23 @@ def measure_heuristic_time(num_runs=100, m=512, n=512, k=512):
     times = []
     
     x_dtype = torch.float16
+    x_device = torch.device('cuda:0')
 
     ##
     # Initial Time
     ##
     start_time = time.perf_counter()
-    selector = tritonblas.MatmulHeuristicResult(m, n, k, x_dtype, x_dtype, x_dtype)
+    selector = tritonblas.OrigamiMatmulSelector(m, n, k, x_dtype, x_dtype, x_dtype, x_device)
     end_time = time.perf_counter()
     times.append(end_time - start_time)
     # Cached Time
     for _ in range(num_runs):
         start_time = time.perf_counter()
         # Create the heuristic instance and retrieve the configuration
-        config = selector.get_config()
+        config = (selector.block_m,
+                  selector.block_n,
+                  selector.block_k,
+                  selector.group_m)
         end_time = time.perf_counter()
         times.append(end_time - start_time)
     return times

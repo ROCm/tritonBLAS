@@ -35,8 +35,8 @@ class CustomBuildExt(build_ext):
                 "--filter=blob:none",
                 "--sparse",
                 "--branch",
-                "users/ibrahimw1/origami-standalone",
-                "https://github.com/ryanswann-amd/rocm-libraries.git",
+                "develop",
+                "https://github.com/ROCm/rocm-libraries.git",
                 "_origami",
             ]
         )

@@ -5,7 +5,7 @@ import functools
 import time
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
-from .origami import MatmulHeuristicResult
+from .origami import OrigamiMatmulSelector
 from typing import Dict, Tuple, Optional
 
 _tensor_cache = {}
@@ -30,10 +30,19 @@ def _make_matmul_selector(
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
+    device: torch.device,
     mx_block_size = 0
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype, mx_block_size=mx_block_size)
+    return OrigamiMatmulSelector(
+            M,
+            N,
+            K,
+            a_dtype,
+            b_dtype,
+            c_dtype,
+            device,
+            mx_block_size=mx_block_size)
 
 
 def persistent_matmul_lt(
@@ -49,8 +58,11 @@ def persistent_matmul_lt(
     M, K = a.shape
     _, N = b.shape
 
-    BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
-
+    BLK_M    = selector.block_m
+    BLK_N    = selector.block_n
+    BLK_K    = selector.block_k
+    gsize_m  = selector.group_m
+    num_xcds = selector.num_sms
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
@@ -74,7 +86,6 @@ def persistent_matmul_lt(
     grids = total_tiles
 
     # Set chunk size to same area as L2 tiles.
-    num_xcds = 8
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, total_programs // num_xcds)
 
@@ -131,7 +142,11 @@ def streamk_matmul_lt(
     M, K = a.shape
     _, N = b.shape
 
-    BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
+    BLK_M    = selector.block_m
+    BLK_N    = selector.block_n
+    BLK_K    = selector.block_k
+    gsize_m  = selector.group_m
+    num_xcds = selector.num_sms
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
@@ -141,7 +156,7 @@ def streamk_matmul_lt(
     ##
     # Grid Size
     ##
-    total_programs_streamk = selector.get_grid()
+    total_programs_streamk = selector.sk_grid
 
     if total_programs_streamk > 0:  # Stream-K
         total_tiles_streamk = total_tiles % total_programs_streamk
@@ -172,7 +187,6 @@ def streamk_matmul_lt(
         P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
 
     # Set chunk size to same area as L2 tiles.
-    num_xcds = 8
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, grids // num_xcds) 
 
@@ -248,7 +262,7 @@ def matmul(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype)
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device)
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
     else:
@@ -267,7 +281,7 @@ def matmul_a8w8(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype)
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device)
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:
@@ -306,13 +320,24 @@ def matmul_fp4(
         Output matrix C
     """
 
-
     M, K = a.shape
     _, N = b.shape
     
+    num_xcds = 8
+
     if(block_m == None):
-        selector = _make_matmul_selector(M, N, K, "f4", "f4", c.dtype,mx_block_size=32)
-        block_m, block_n, block_k, gsize_m = selector.get_config()
+        selector = _make_matmul_selector(M, N, K, "f4", "f4", c.dtype, a.device, mx_block_size=32)
+        block_m      = selector.block_m
+        block_n      = selector.block_n
+        block_k      = selector.block_k
+        group_size_m = selector.group_m
+        num_xcds     = selector.num_sms
+        if(block_m < M):
+            block_m=128
+        if(block_n < N):
+            block_n=128
+        if(block_k < K):
+            block_k=128
         #print(f"Selected {block_m}x{block_n}x{block_k}")
     # Get actual dimensions (accounting for packing)
     M = a.shape[0]
@@ -333,7 +358,6 @@ def matmul_fp4(
     total_tiles = total_blocks_M * total_blocks_N
     
     # Set chunk size to same area as L2 tiles
-    num_xcds = 8
     chunk_size = group_size_m * group_size_m
     chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
     
