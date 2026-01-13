@@ -32,6 +32,9 @@ class TorchMatmulHeuristic:
         self._b_dtype_bytes = b_dtype.itemsize
         self._c_dtype_bytes = c_dtype.itemsize
 
+        # Save other useful info
+        self._streamk = streamk
+
         # Get hardware info from Origami
         self._hardware = origami.get_hardware_for_device(device.index)
         self._N_CU = self._hardware.N_CU
@@ -55,10 +58,12 @@ class TorchMatmulHeuristic:
         else:
             self._grid = self._hardware.N_CU
 
-        _, self._workgroup_mapping = origami.select_workgroup_mapping(self._problem,
-                                                                      self._hardware,
-                                                                      self._result.config,
-                                                                      self._grid)
+        self._xcc_workgroup_mapping, self._workgroup_mapping = (
+            origami.select_workgroup_mapping(self._problem,
+                                             self._hardware,
+                                             self._result.config,
+                                             self._grid)
+        )
 
 
     @property
@@ -79,6 +84,11 @@ class TorchMatmulHeuristic:
     @property
     def group_m(self):
         return self._workgroup_mapping
+
+
+    @property
+    def num_sms(self):
+        return self._xcc_workgroup_mapping
 
 
     @property
@@ -112,9 +122,9 @@ class TorchMatmulHeuristic:
         cu_count = self._hardware.N_CU
 
         # Fallback if no better fractional split is found
-        tiles = ceil(M / BLK_M) * ceil(N / BLK_N)
+        tiles = math.ceil(M / BLK_M) * math.ceil(N / BLK_N)
         sk_grid = tiles
-        iters_per_tile = max(1, ceil(K / BLK_K))
+        iters_per_tile = max(1, math.ceil(K / BLK_K))
 
         # More tiles than CUs: try fractional splits to distribute work
         if tiles > cu_count:
@@ -194,6 +204,10 @@ class TorchMatmulHeuristic:
 
         mi = self._infer_matrix_instruction_dimensions()
 
+        grid_selection = origami.grid_selection_t.data_parallel
+        if self._streamk:
+            grid_selection = origami.grid_selection_t.k_split_aware
+
         for blk_m, blk_n, blk_k, occupancy in itertools.product(self.block_mn_range,
                                                                 self.block_mn_range,
                                                                 self.block_k_range,
@@ -202,10 +216,11 @@ class TorchMatmulHeuristic:
             mt = origami.dim3_t(blk_m, blk_n, blk_k)
 
             # Create and set new config_t values
-            new_config           = origami.config_t()
-            new_config.mt        = mt
-            new_config.mi        = mi
-            new_config.occupancy = occupancy
+            new_config                = origami.config_t()
+            new_config.mt             = mt
+            new_config.mi             = mi
+            new_config.occupancy      = occupancy
+            new_config.grid_selection = grid_selection
 
             config_list.append(new_config)
 

@@ -255,13 +255,13 @@ def matmul(
     else:
         return persistent_matmul_lt(a, b, c, selector)
 
-def persistent_matmul_lt_wrap(a: torch.Tensor,
-                              b: torch.Tensor,
-                              c: torch.Tensor,
-                              selector: TorchMatmulHeuristic,
-                              a_scale: Optional[torch.Tensor] = None,
-                              b_scale: Optional[torch.Tensor] = None,
-                              quantized: bool = False) -> torch.Tensor:
+def persistent_addmm_lt_wrap(a: torch.Tensor,
+                             b: torch.Tensor,
+                             c: torch.Tensor,
+                             selector: TorchMatmulHeuristic,
+                             a_scale: Optional[torch.Tensor] = None,
+                             b_scale: Optional[torch.Tensor] = None,
+                             quantized: bool = False) -> torch.Tensor:
     M, K = a.shape
     _, N = b.shape
 
@@ -271,6 +271,7 @@ def persistent_matmul_lt_wrap(a: torch.Tensor,
     GSIZE_M = selector.group_m
     WAVES_PER_EU = selector.waves_per_eu
     EVEN_K = selector.even_k
+    NUM_XCDS = selector.num_sms
 
     #####
     # Don't touch region
@@ -280,9 +281,8 @@ def persistent_matmul_lt_wrap(a: torch.Tensor,
     total_programs = total_tiles
     grids = total_tiles
     # Set chunk size to same area as L2 tiles.
-    num_xcds = 8
     chunk_size = GSIZE_M * GSIZE_M
-    chunk_size = min(chunk_size, total_programs // num_xcds)
+    chunk_size = min(chunk_size, total_programs // NUM_XCDS)
     chunk_size = max(chunk_size, 1)
     #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
     CACHE_MODIFIER_A = None
@@ -290,7 +290,6 @@ def persistent_matmul_lt_wrap(a: torch.Tensor,
     # basic configs for most of compute bound sizes
     num_stages = 2
     num_warps = 8
-    waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
     #
@@ -320,7 +319,7 @@ def persistent_matmul_lt_wrap(a: torch.Tensor,
         BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=GSIZE_M,
         NUM_SMS=total_programs,
-        NUM_XCDS=num_xcds,
+        NUM_XCDS=NUM_XCDS,
         CHUNK_SIZE=chunk_size,
         BIAS=True,
         EVEN_K=EVEN_K,
@@ -330,7 +329,112 @@ def persistent_matmul_lt_wrap(a: torch.Tensor,
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
         num_stages=num_stages,
         num_warps=num_warps,
-        waves_per_eu=waves_per_eu,
+        waves_per_eu=WAVES_PER_EU,
+        matrix_instr_nonkdim=mfmaInstrSize,
+        kpack=kpack,
+    )
+
+    return d
+
+
+def streamk_addmm_lt_wrap(
+    a: torch.Tensor, 
+    b: torch.Tensor, 
+    c: torch.Tensor, 
+    selector, 
+    sk_grid: Optional[int] = None,
+    a_scale: Optional[torch.Tensor] = None,
+    b_scale: Optional[torch.Tensor] = None,
+    quantized: bool = False,
+):
+    M, K = a.shape
+    _, N = b.shape
+
+    BLK_M = selector.block_m
+    BLK_N = selector.block_n
+    BLK_K = selector.block_k
+    GSIZE_M = selector.group_m
+    WAVES_PER_EU = selector.waves_per_eu
+    EVEN_K = selector.even_k
+    NUM_XCDS = selector.num_sms
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+
+    ##
+    # Grid Size
+    ##
+    total_programs_streamk = selector.sk_grid
+
+    if total_programs_streamk > 0:  # Stream-K
+        total_tiles_streamk = total_tiles % total_programs_streamk
+    else:  # all tiles are computed using classical blocking
+        total_tiles_streamk = 0
+
+    num_stages = 2
+    num_warps = 8
+    mfmaInstrSize = 16
+    kpack = 1
+    #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
+
+    if sk_grid is not None:
+        total_programs_streamk = sk_grid
+
+    grids = total_programs_streamk
+    block_size = BLK_M * BLK_N
+
+    # Use global buffers with optimized zeroing
+    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+        locks = _global_locks[:grids]
+        P = _global_P[:grids, :block_size]
+    else:
+        locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
+
+    # Set chunk size to same area as L2 tiles.
+    chunk_size = GSIZE_M * GSIZE_M
+    chunk_size = min(chunk_size, grids // NUM_XCDS) 
+
+    d = c.new_empty(M, N)
+
+    torch.library.wrap_triton(streamk_matmul)[(grids,)](
+        a,
+        b,
+        d,
+        a_scale if quantized else None,  # A_scale_ptr
+        b_scale if quantized else None,  # B_scale_ptr
+        c,  # Bias.
+        P,
+        locks,
+        M,
+        N,
+        K,
+        a.stride(0),
+        b.stride(1),
+        d.stride(0),
+        d.stride(1),
+        c.stride(0),  # Bias stride.
+        stride_ak=a.stride(1),
+        stride_bk=b.stride(0),
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=GSIZE_M,
+        NUM_SMS=grids,
+        NUM_XCDS=NUM_XCDS,
+        CHUNK_SIZE=chunk_size,
+        STREAMK_TILES=total_tiles_streamk,
+        BIAS=True,
+        EVEN_K=EVEN_K,
+        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+        QUANTIZED=quantized,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=WAVES_PER_EU,
         matrix_instr_nonkdim=mfmaInstrSize,
         kpack=kpack,
     )
@@ -348,14 +452,12 @@ def torch_addmm(a: torch.Tensor,
     M, K = a.shape
     _, N = b.shape
 
-    selector = TorchMatmulHeuristic(M, N, K, a.dtype, b.dtype, c.dtype, a.device)
-    #print('Selector Results:')
-    #print(f'\tBLK_M: {selector.block_m}')
-    #print(f'\tBLK_N: {selector.block_n}')
-    #print(f'\tBLK_K: {selector.block_k}')
-    #print(f'\tGROUP_M: {selector.group_m}')
+    selector = TorchMatmulHeuristic(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
 
-    return persistent_matmul_lt_wrap(a, b, c, selector)
+    if enable_streamk:
+        return streamk_addmm_lt_wrap(a, b, c, selector)
+    else:
+        return persistent_addmm_lt_wrap(a, b, c, selector)
 
 
 def _setup_context_torch_addmm_backwards(ctx, inputs, output):
@@ -375,10 +477,12 @@ def _torch_addmm_backwards(ctx, grad_output):
     b_t = b.T.contiguous()
     bias_a = grad_output.new_zeros(b.shape[0])
     grad_a = torch_addmm(grad_output_cont, b_t, bias_a, enable_streamk, sk_grid)
+    #grad_a = torch_matmul(grad_output_cont, b_t, enable_streamk, sk_grid)
 
     a_t = a.T.contiguous()
     bias_b = grad_output.new_zeros(grad_output.shape[1])
     grad_b = torch_addmm(a_t, grad_output_cont, bias_b, enable_streamk, sk_grid)
+    #grad_b = torch_matmul(a_t, grad_output_cont, enable_streamk, sk_grid)
 
     grad_c = grad_output_cont.sum(dim=0)
 
