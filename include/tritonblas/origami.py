@@ -98,7 +98,8 @@ class OrigamiMatmulSelector:
 
         # Create Origami problem_t based on problem metadata
         self._problem = self._make_problem()
-
+        print(f"{self._m},{self._n},{self._k}")
+        print(self._configs)
         # Run Origami solution selection
         self._result = origami.select_config(self._problem,
                                             self._hardware,
@@ -330,9 +331,9 @@ class OrigamiMatmulSelector:
             # F4F6F8
             if largest_bitsize <= 8:
                 if self._k % 256 == 0:
-                    self._block_k_range = [256]
+                    self._block_k_range = self._block_k_range + [256]
                 else:
-                    self._block_k_range = [128]
+                    self._block_k_range = self._block_k_range + [128]
                 self._block_mn_range = [32, 64, 128, 256]
                 mi_dim = origami.dim3_t(16, 16, 128)
         # gfx942
@@ -360,8 +361,8 @@ class OrigamiMatmulSelector:
                 mi_dim = origami.dim3_t(16, 16, 16)
             # F8
             if largest_bitsize == 8:
-                self._block_mn_range = self._block_mn_range + [512]
-                self._block_k_range = self._block_k_range + [128, 256]
+                self.block_mn_range = self.block_mn_range + [512]
+                self.block_k_range = self.block_k_range + [128, 256]
                 mi_dim = origami.dim3_t(16, 16, 32)
             # F4F6 -> Unsupported on MI300A
             if largest_bitsize < 8:
