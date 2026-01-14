@@ -1,8 +1,8 @@
 
 import itertools
-import math
 import torch
 import origami
+from math import ceil
 
 
 class OrigamiMatmulSelector:
@@ -173,9 +173,9 @@ class OrigamiMatmulSelector:
         cu_count = self._hardware.N_CU
 
         # Fallback if no better fractional split is found
-        tiles = math.ceil(M / BLK_M) * math.ceil(N / BLK_N)
+        tiles = ceil(M / BLK_M) * ceil(N / BLK_N)
         sk_grid = tiles
-        iters_per_tile = max(1, math.ceil(K / BLK_K))
+        iters_per_tile = max(1, ceil(K / BLK_K))
 
         # More tiles than CUs: try fractional splits to distribute work
         if tiles > cu_count:
@@ -238,7 +238,7 @@ class OrigamiMatmulSelector:
         return tileSize * sk_grid
         """
         # get the macro-tile dims you already compute
-        BLK_M, BLK_N, GSIZE = self.block_m, self.block_n, self.group_m
+        BLK_M, BLK_N = self.block_m, self.block_n
 
         # bytes per C element
         bytes_per_elem = self._out_dtype_bitsize // 8
@@ -360,8 +360,8 @@ class OrigamiMatmulSelector:
                 mi_dim = origami.dim3_t(16, 16, 16)
             # F8
             if largest_bitsize == 8:
-                self.block_mn_range = self.block_mn_range + [512]
-                self.block_k_range = self.block_k_range + [128, 256]
+                self._block_mn_range = self._block_mn_range + [512]
+                self._block_k_range = self._block_k_range + [128, 256]
                 mi_dim = origami.dim3_t(16, 16, 32)
             # F4F6 -> Unsupported on MI300A
             if largest_bitsize < 8:
