@@ -1,4 +1,3 @@
-
 import itertools
 import torch
 import origami
@@ -25,7 +24,6 @@ class OrigamiMatmulSelector:
     if hasattr(torch, "float8_e4m3fnuz"):
         dtype_to_str[torch.float8_e4m3fnuz] = "f8"
 
-
     def __init__(
         self,
         m: int,
@@ -36,18 +34,20 @@ class OrigamiMatmulSelector:
         out_dtype: torch.dtype,
         device: torch.device,
         mx_block_size=0,
-        streamk=False
+        streamk=False,
     ):
         # Save tensor sizes
         self._m = m
         self._n = n
         self._k = k
-        self.streamk=streamk
+        self.streamk = streamk
         # Save tensor dtypes as strings
-        self._a_dtype_str   = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
-        self._b_dtype_str   = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, b_dtype)
-        self._out_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(out_dtype, out_dtype)
-        
+        self._a_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
+        self._b_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, b_dtype)
+        self._out_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(
+            out_dtype, out_dtype
+        )
+
         # Save MX block size
         self._mx_block_size = mx_block_size
 
@@ -65,6 +65,7 @@ class OrigamiMatmulSelector:
                 return torch.finfo(dtype).bits
             except TypeError:
                 return torch.iinfo(dtype).bits
+
         self._a_dtype_bitsize = get_dtype_bits(a_dtype)
         self._b_dtype_bitsize = get_dtype_bits(a_dtype)
         self._out_dtype_bitsize = get_dtype_bits(a_dtype)
@@ -89,7 +90,7 @@ class OrigamiMatmulSelector:
         # Get hardware info from Origami
         self._hardware = origami.get_hardware_for_device(device.index)
         self._N_CU = self._hardware.N_CU
-        
+
         # Create list of Origami config_t objects from defaults.
         self._block_mn_range = [16, 32, 64, 128, 256]
         self._block_k_range = [16, 32, 64, 128, 256, 512]
@@ -100,9 +101,9 @@ class OrigamiMatmulSelector:
         self._problem = self._make_problem()
 
         # Run Origami solution selection
-        self._result = origami.select_config(self._problem,
-                                            self._hardware,
-                                            self._configs)
+        self._result = origami.select_config(
+            self._problem, self._hardware, self._configs
+        )
 
         if streamk:
             self._grid = self._compute_sk_grid()
@@ -110,63 +111,48 @@ class OrigamiMatmulSelector:
             self._grid = self._hardware.N_CU
 
         self._xcc_workgroup_mapping, self._workgroup_mapping = (
-            origami.select_workgroup_mapping(self._problem,
-                                             self._hardware,
-                                             self._result.config,
-                                             self._grid)
+            origami.select_workgroup_mapping(
+                self._problem, self._hardware, self._result.config, self._grid
+            )
         )
-
 
     @property
     def block_m(self):
         return self._result.config.mt.m
 
-
     @property
     def block_n(self):
         return self._result.config.mt.n
-
 
     @property
     def block_k(self):
         return self._result.config.mt.k
 
-
     @property
     def group_m(self):
         return self._workgroup_mapping
-
 
     @property
     def num_sms(self):
         return self._xcc_workgroup_mapping
 
-
     @property
     def waves_per_eu(self):
         return self._result.config.occupancy
-
 
     @property
     def even_k(self):
         return math.gcd(self._k, self.block_k) == self.block_k
 
-
     @property
     def sk_grid(self):
         return self._grid
 
-
     def _compute_sk_grid(self):
         # Grid model constants for StreamK
-        split_factors  = [8, 6, 4, 3, 2, 1]
-        tile_fractions = [0.0,
-                          1.0 / 2.0,
-                          1.0 / 8.0,
-                          1.0 / 5.0,
-                          1.0 / 4.0,
-                          1.0 / 3.0]
-        max_workspace  = 128 * 1024 * 1024
+        split_factors = [8, 6, 4, 3, 2, 1]
+        tile_fractions = [0.0, 1.0 / 2.0, 1.0 / 8.0, 1.0 / 5.0, 1.0 / 4.0, 1.0 / 3.0]
+        max_workspace = 128 * 1024 * 1024
 
         M, N, K = self._m, self._n, self._k
         BLK_M, BLK_N, BLK_K = self.block_m, self.block_n, self.block_k
@@ -223,10 +209,13 @@ class OrigamiMatmulSelector:
 
             # Really bad last wave, which would have originally been compensated for
             # by changing tile size, but triton tile sizes are limited
-            if last_wave_remainder < 128 and last_wave_remainder > 0 and cu_count == 304:
-                sk_grid = 256
+            if (
+                last_wave_remainder < 128
+                and last_wave_remainder > 0
+                and cu_count in [304, 80, 64]
+            ):  # gfx942
+                sk_grid = 256 if cu_count == 304 else 64
         return sk_grid
-
 
     def _partial_tile_size(self, sk_grid: int) -> int:
         """
@@ -249,23 +238,24 @@ class OrigamiMatmulSelector:
         # scale by the number of partial‑tiles per WG
         return tile_size * sk_grid
 
-
     def _generate_default_configs(self):
         config_list = []
 
         mi = self._infer_matrix_instruction_dimensions()
 
-        for blk_m, blk_n, blk_k, occupancy in itertools.product(self._block_mn_range,
-                                                                self._block_mn_range,
-                                                                self._block_k_range,
-                                                                self._kernel_occupancy_range):
+        for blk_m, blk_n, blk_k, occupancy in itertools.product(
+            self._block_mn_range,
+            self._block_mn_range,
+            self._block_k_range,
+            self._kernel_occupancy_range,
+        ):
             # Create special dim3_t object for BLK_* sizes
             mt = origami.dim3_t(blk_m, blk_n, blk_k)
 
             # Create and set new config_t values
-            new_config           = origami.config_t()
-            new_config.mt        = mt
-            new_config.mi        = mi
+            new_config = origami.config_t()
+            new_config.mt = mt
+            new_config.mi = mi
             new_config.occupancy = occupancy
             if self.streamk:
                 new_config.grid_selection = origami.grid_selection_t.k_split_aware
@@ -274,7 +264,6 @@ class OrigamiMatmulSelector:
             config_list.append(new_config)
 
         return config_list
-
 
     def _make_problem(self) -> origami.problem_t:
         # Create special dim3_t object for problem sizes
@@ -287,20 +276,19 @@ class OrigamiMatmulSelector:
 
         # Create and set new problem_t values
         problem = origami.problem_t()
-        problem.size            = size
-        problem.batch           = 1
-        problem.a_transpose     = origami.transpose_t.T
-        problem.b_transpose     = origami.transpose_t.N
-        problem.a_dtype         = a_origami_dtype
-        problem.b_dtype         = b_origami_dtype
-        problem.c_dtype         = c_origami_dtype
-        problem.d_dtype         = c_origami_dtype
-        problem.mi_dtype        = c_origami_dtype
+        problem.size = size
+        problem.batch = 1
+        problem.a_transpose = origami.transpose_t.T
+        problem.b_transpose = origami.transpose_t.N
+        problem.a_dtype = a_origami_dtype
+        problem.b_dtype = b_origami_dtype
+        problem.c_dtype = c_origami_dtype
+        problem.d_dtype = c_origami_dtype
+        problem.mi_dtype = c_origami_dtype
         problem.a_mx_block_size = self._mx_block_size
         problem.b_mx_block_size = self._mx_block_size
-    
-        return problem
 
+        return problem
 
     def _infer_matrix_instruction_dimensions(self):
         """
@@ -335,8 +323,9 @@ class OrigamiMatmulSelector:
                     self._block_k_range = self._block_k_range + [128]
                 self._block_mn_range = [32, 64, 128, 256]
                 mi_dim = origami.dim3_t(16, 16, 128)
-        # gfx942
-        if self._hardware.N_CU == 304:
+        # gfx942 (304 CUs full, 80 CUs partitioned, 64 CUs)
+        is_gfx942 = self._hardware.N_CU in [304, 80, 64]
+        if is_gfx942:
             # FP32
             if largest_bitsize == 32:
                 mi_dim = origami.dim3_t(16, 16, 4)
@@ -348,9 +337,9 @@ class OrigamiMatmulSelector:
                 self._block_mn_range = self._block_mn_range + [512]
                 self._block_k_range = self._block_k_range + [128, 256]
                 mi_dim = origami.dim3_t(16, 16, 32)
-            # F4F6 -> Unsupported on MI300X
+            # F4F6 -> Unsupported on gfx942
             if largest_bitsize < 8:
-                raise ValueError("MI300X doesn't support F4/F6")
+                raise ValueError("gfx942 doesn't support F4/F6")
         if self._hardware.N_CU == 228:
             # FP32
             if largest_bitsize == 32:
@@ -385,4 +374,3 @@ class OrigamiMatmulSelector:
             )
 
         return mi_dim
-
