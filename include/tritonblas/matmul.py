@@ -159,7 +159,6 @@ def streamk_matmul_lt(
     # Grid Size
     ##
     total_programs_streamk = selector.sk_grid
-    print(f"num_sums = {total_programs_streamk}")
 
     if total_programs_streamk > 0:  # Stream-K
         total_tiles_streamk = total_tiles % total_programs_streamk
