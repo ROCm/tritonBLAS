@@ -98,8 +98,7 @@ class OrigamiMatmulSelector:
 
         # Create Origami problem_t based on problem metadata
         self._problem = self._make_problem()
-        print(f"{self._m},{self._n},{self._k}")
-        print(self._configs)
+
         # Run Origami solution selection
         self._result = origami.select_config(self._problem,
                                             self._hardware,
