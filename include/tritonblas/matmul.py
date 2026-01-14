@@ -31,7 +31,8 @@ def _make_matmul_selector(
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
     device: torch.device,
-    mx_block_size = 0
+    mx_block_size = 0,
+    streamk = False
 ):
     # Run Heuristic Results (Only if key has not been seen before)
     return OrigamiMatmulSelector(
@@ -42,7 +43,8 @@ def _make_matmul_selector(
             b_dtype,
             c_dtype,
             device,
-            mx_block_size=mx_block_size)
+            mx_block_size=mx_block_size,
+            streamk=streamk)
 
 
 def persistent_matmul_lt(
@@ -157,6 +159,7 @@ def streamk_matmul_lt(
     # Grid Size
     ##
     total_programs_streamk = selector.sk_grid
+    print(f"num_sums = {total_programs_streamk}")
 
     if total_programs_streamk > 0:  # Stream-K
         total_tiles_streamk = total_tiles % total_programs_streamk
@@ -262,7 +265,7 @@ def matmul(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device)
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
     else:
@@ -281,7 +284,7 @@ def matmul_a8w8(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device)
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:

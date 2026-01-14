@@ -169,13 +169,13 @@ class OrigamiMatmulSelector:
         max_workspace  = 128 * 1024 * 1024
 
         M, N, K = self._m, self._n, self._k
-        BLK_M, BLK_N, BLK_K = self.block_m, self.block_n, self._result.block_k
+        BLK_M, BLK_N, BLK_K = self.block_m, self.block_n, self.block_k
         cu_count = self._hardware.N_CU
 
         # Fallback if no better fractional split is found
-        tiles = ceil(M / BLK_M) * ceil(N / BLK_N)
+        tiles = math.ceil(M / BLK_M) * math.ceil(N / BLK_N)
         sk_grid = tiles
-        iters_per_tile = max(1, ceil(K / BLK_K))
+        iters_per_tile = max(1, math.ceil(K / BLK_K))
 
         # More tiles than CUs: try fractional splits to distribute work
         if tiles > cu_count:

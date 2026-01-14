@@ -149,7 +149,8 @@ def bench_matmul(
 
         # Build a tritonBLAS selector config and launch matmul
         selector = tritonblas.OrigamiMatmulSelector(
-            m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device
+            m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
+            streamk=enable_streamk
         )
         ## TODO
         config = (selector.block_m, selector.block_n, selector.block_k)
