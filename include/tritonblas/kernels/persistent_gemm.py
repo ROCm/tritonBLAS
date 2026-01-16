@@ -13,6 +13,7 @@ def persistent_matmul(
     A,
     B,
     C,
+    OUT,  # Output pointer (same as C unless C is broadcast)
     A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
@@ -23,7 +24,11 @@ def persistent_matmul(
     stride_bn,
     stride_cm,
     stride_cn,
+    stride_outm,
+    stride_outn,
     stride_bias,
+    alpha,  # Scalar multiplier for A@B
+    beta,   # Scalar multiplier for initial C
     stride_ak: tl.constexpr,
     stride_bk: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -34,6 +39,9 @@ def persistent_matmul(
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     BIAS: tl.constexpr,
+    C_ROW_BROADCAST: tl.constexpr,  # True if C is a row vector (M,) to broadcast across columns
+    C_COL_BROADCAST: tl.constexpr,  # True if C is a column vector (N,) to broadcast across rows
+    C_SCALAR: tl.constexpr,  # True if C is a scalar to broadcast to all elements
     EVEN_K: tl.constexpr,
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
@@ -106,6 +114,30 @@ def persistent_matmul(
             # Check if we're using quantized mode based on whether scales were applied
             acc = add_vector(acc, bias_vector, QUANTIZED=(A_scale_ptr is not None)) #Add bias vector to output accumulator
         
+        # Apply addmm formula: result = beta*C + alpha*acc
+        # Load initial C values if beta != 0
+        if beta != 0.0:
+            if C_SCALAR:
+                # C is a scalar - load single value and broadcast to all elements
+                c_scalar = tl.load(C).to(tl.float32)
+                acc = beta * c_scalar + alpha * acc
+            elif C_ROW_BROADCAST:
+                # C is a row vector (M,) - load and broadcast across columns
+                c_vector = tl.load(C + row_indices * stride_cm, mask=row_indices < M, other=0.0).to(tl.float32)
+                acc = beta * c_vector[:, None] + alpha * acc
+            elif C_COL_BROADCAST:
+                # C is a column vector (N,) - load and broadcast across rows
+                c_vector = tl.load(C + col_indices * stride_cn, mask=col_indices < N, other=0.0).to(tl.float32)
+                acc = beta * c_vector[None, :] + alpha * acc
+            else:
+                # C is a full matrix (M, N) - load tile normally
+                c_offsets = row_indices[:, None] * stride_cm + col_indices[None, :] * stride_cn
+                c_mask = (row_indices[:, None] < M) & (col_indices[None, :] < N)
+                c_tile = tl.load(C + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
+                acc = beta * c_tile + alpha * acc
+        elif alpha != 1.0:
+            acc = acc * alpha
+        
         # Convert to output dtype
         result = convert_dtype(acc, C.type.element_ty) #Quantize output accumulator to output datatype
         
@@ -113,8 +145,8 @@ def persistent_matmul(
         # Store result to output matrix
         # ============================================================
         store(
-            C, result, #Output tensor pointer and output accumulator
+            OUT, result, #Output tensor pointer and output accumulator
             row_indices, col_indices, #Precomputed offsets
             M, N, #M and N dimension for masking OOB writes
-            stride_cm, stride_cn, #Stride of output dimensions.
+            stride_outm, stride_outn, #Stride of output dimensions.
         )

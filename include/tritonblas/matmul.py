@@ -51,10 +51,17 @@ def persistent_matmul_lt(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
+    out: torch.Tensor,
     selector,
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    c_row_broadcast: bool = False,
+    c_col_broadcast: bool = False,
+    c_scalar: bool = False,
     quantized: bool = False,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -91,22 +98,40 @@ def persistent_matmul_lt(
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, total_programs // num_xcds)
 
-    # TODO: Support other matmul algs.
+    # Enable bias if provided
+    has_bias = bias is not None
+    bias_stride = bias.stride(0) if has_bias else 0
+    
+    # Handle strides for C based on broadcast mode
+    if c_scalar or c_row_broadcast or c_col_broadcast:
+        # For broadcast cases, C is 1D - only has stride(0)
+        c_stride_m = c.stride(0) if c_row_broadcast else 0
+        c_stride_n = c.stride(0) if c_col_broadcast else 0
+    else:
+        # C is 2D - has both strides
+        c_stride_m = c.stride(0)
+        c_stride_n = c.stride(1)
+    
     kk = persistent_matmul[(grids,)](
         a,
         b,
         c,
+        out,
         a_scale if quantized else None,  # A_scale_ptr
         b_scale if quantized else None,  # B_scale_ptr
-        None,  # TODO: Enable bias.
+        bias if has_bias else None,  # bias_ptr
         M,
         N,
         K,
         a.stride(0),
         b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        0,  # TODO: Enable bias stride.
+        c_stride_m,
+        c_stride_n,
+        out.stride(0),
+        out.stride(1),
+        bias_stride,
+        alpha,
+        beta,
         stride_ak=a.stride(1),
         stride_bk=b.stride(0),
         BLOCK_SIZE_M=BLK_M,
@@ -116,7 +141,10 @@ def persistent_matmul_lt(
         NUM_SMS=total_programs,
         NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk_size,
-        BIAS=False,
+        BIAS=has_bias,
+        C_ROW_BROADCAST=c_row_broadcast,
+        C_COL_BROADCAST=c_col_broadcast,
+        C_SCALAR=c_scalar,
         EVEN_K=even_k,
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
@@ -128,17 +156,24 @@ def persistent_matmul_lt(
         kpack=kpack,
     )
 
-    return c
+    return out
 
 def streamk_matmul_lt(
     a: torch.Tensor, 
     b: torch.Tensor, 
-    c: torch.Tensor, 
+    c: torch.Tensor,
+    out: torch.Tensor,
     selector, 
     sk_grid: Optional[int] = None,
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    c_row_broadcast: bool = False,
+    c_col_broadcast: bool = False,
+    c_scalar: bool = False,
     quantized: bool = False,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -190,15 +225,30 @@ def streamk_matmul_lt(
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, grids // num_xcds) 
+    chunk_size = min(chunk_size, grids // num_xcds)
+    
+    # Enable bias if provided
+    has_bias = bias is not None
+    bias_stride = bias.stride(0) if has_bias else 0
 
+    # Handle strides for C based on broadcast mode
+    if c_scalar or c_row_broadcast or c_col_broadcast:
+        # For broadcast cases, C is 1D - only has stride(0)
+        c_stride_m = c.stride(0) if c_row_broadcast else 0
+        c_stride_n = c.stride(0) if c_col_broadcast else 0
+    else:
+        # C is 2D - has both strides
+        c_stride_m = c.stride(0)
+        c_stride_n = c.stride(1)
+    
     kk = streamk_matmul[(grids,)](
         a,
         b,
         c,
+        out,
         a_scale if quantized else None,  # A_scale_ptr
         b_scale if quantized else None,  # B_scale_ptr
-        None,  # TODO: Enable bias.
+        bias if has_bias else None,  # bias_ptr
         P,
         locks,
         M,
@@ -206,9 +256,13 @@ def streamk_matmul_lt(
         K,
         a.stride(0),
         b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        0,  # TODO: Enable bias stride.
+        c_stride_m,
+        c_stride_n,
+        out.stride(0),
+        out.stride(1),
+        bias_stride,
+        alpha,
+        beta,
         stride_ak=a.stride(1),
         stride_bk=b.stride(0),
         BLOCK_SIZE_M=BLK_M,
@@ -219,7 +273,10 @@ def streamk_matmul_lt(
         NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk_size,
         STREAMK_TILES=total_tiles_streamk,
-        BIAS=False,
+        BIAS=has_bias,
+        C_ROW_BROADCAST=c_row_broadcast,
+        C_COL_BROADCAST=c_col_broadcast,
+        C_SCALAR=c_scalar,
         EVEN_K=even_k,
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
@@ -231,7 +288,7 @@ def streamk_matmul_lt(
         kpack=kpack,
     )
 
-    return c
+    return out
 
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
@@ -239,9 +296,9 @@ def matmul_lt(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector)
+        return streamk_matmul_lt(a, b, c, c, selector)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, c, c, selector)
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
@@ -249,9 +306,9 @@ def matmul_a8w8_lt(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return streamk_matmul_lt(a, b, c, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:
-        return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return persistent_matmul_lt(a, b, c, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
 
 def matmul(
     a: torch.Tensor,
@@ -266,9 +323,10 @@ def matmul(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
+        return streamk_matmul_lt(a, b, c, c, selector, sk_grid=sk_grid)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, c, c, selector)
+
 
 def matmul_a8w8(
     a: torch.Tensor,

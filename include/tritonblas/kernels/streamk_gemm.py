@@ -9,6 +9,7 @@ def streamk_matmul(
     A,
     B,
     C,
+    OUT,  # Output pointer (same as C unless C is broadcast)
     A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
@@ -21,7 +22,11 @@ def streamk_matmul(
     stride_bn,
     stride_cm,
     stride_cn,
+    stride_outm,
+    stride_outn,
     stride_bias,
+    alpha,  # Scalar multiplier for A@B
+    beta,   # Scalar multiplier for initial C
     stride_ak: tl.constexpr,
     stride_bk: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -33,6 +38,9 @@ def streamk_matmul(
     CHUNK_SIZE: tl.constexpr,
     STREAMK_TILES: tl.constexpr,
     BIAS: tl.constexpr,
+    C_ROW_BROADCAST: tl.constexpr,  # True if C is a row vector (M,) to broadcast across columns
+    C_COL_BROADCAST: tl.constexpr,  # True if C is a column vector (N,) to broadcast across rows
+    C_SCALAR: tl.constexpr,  # True if C is a scalar to broadcast to all elements
     EVEN_K: tl.constexpr,
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
@@ -140,22 +148,44 @@ def streamk_matmul(
             if QUANTIZED:
                 # For quantized mode: convert bias to float32, add to acc, then convert to output dtype
                 bias_float = bias.to(tl.float32)
-                c = acc + bias_float[:, None]
-                c = c.to(C.type.element_ty)
+                acc = acc + bias_float[:, None]
             else:
-                # For non-quantized mode: convert acc to output dtype, then add bias
-                c = acc.to(C.type.element_ty)
-                c += bias[:, None]
-        else:
-            c = acc.to(C.type.element_ty)
-
+                # For non-quantized mode: add bias directly
+                acc = acc + bias[:, None]
+        
+        # Apply addmm formula: result = beta*C + alpha*acc
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        
+        if beta != 0.0:
+            if C_SCALAR:
+                # C is a scalar - load single value and broadcast to all elements
+                c_scalar = tl.load(C).to(tl.float32)
+                acc = beta * c_scalar + alpha * acc
+            elif C_ROW_BROADCAST:
+                # C is a row vector (M,) - load and broadcast across columns
+                c_vector = tl.load(C + rm * stride_cm, mask=rm < M, other=0.0).to(tl.float32)
+                acc = beta * c_vector[:, None] + alpha * acc
+            elif C_COL_BROADCAST:
+                # C is a column vector (N,) - load and broadcast across rows
+                c_vector = tl.load(C + rn * stride_cn, mask=rn < N, other=0.0).to(tl.float32)
+                acc = beta * c_vector[None, :] + alpha * acc
+            else:
+                # C is a full matrix (M, N) - load tile normally
+                c_offsets = rm[:, None] * stride_cm + rn[None, :] * stride_cn
+                c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+                c_tile = tl.load(C + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
+                acc = beta * c_tile + alpha * acc
+        elif alpha != 1.0:
+            acc = acc * alpha
+        
+        c = acc.to(OUT.type.element_ty)
+        
         mask = (rm[:, None] < M) & (rn[None, :] < N)
-        C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(C_, c, mask=mask)
+        OUT_ = OUT + rm[:, None] * stride_outm + rn[None, :] * stride_outn
+        tl.store(OUT_, c, mask=mask)
 
     if STREAMK_TILES == 0:
         return
@@ -345,32 +375,88 @@ def streamk_matmul(
                     acc10 += bias_bottom_reshaped
                     acc11 += bias_bottom_reshaped
 
+            # Apply addmm formula for Stream-K section: result = beta*C + alpha*acc
+            rm_top = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M // 2)) % M
+            rm_bottom = (pid_m * BLOCK_SIZE_M + tl.arange(BLOCK_SIZE_M // 2, BLOCK_SIZE_M)) % M
+            rn_left = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N // 2)) % N
+            rn_right = (pid_n * BLOCK_SIZE_N + tl.arange(BLOCK_SIZE_N // 2, BLOCK_SIZE_N)) % N
+
+            if beta != 0.0:
+                if C_SCALAR:
+                    # C is a scalar - load single value and broadcast to all quadrants
+                    c_scalar = tl.load(C).to(tl.float32)
+                    acc00 = beta * c_scalar + alpha * acc00
+                    acc01 = beta * c_scalar + alpha * acc01
+                    acc10 = beta * c_scalar + alpha * acc10
+                    acc11 = beta * c_scalar + alpha * acc11
+                elif C_ROW_BROADCAST:
+                    # C is a row vector (M,) - load and broadcast across columns for each quadrant
+                    c_vector_top = tl.load(C + rm_top * stride_cm, mask=rm_top < M, other=0.0).to(tl.float32)
+                    c_vector_bottom = tl.load(C + rm_bottom * stride_cm, mask=rm_bottom < M, other=0.0).to(tl.float32)
+                    
+                    # Broadcast across columns for each quadrant
+                    acc00 = beta * c_vector_top[:, None] + alpha * acc00
+                    acc01 = beta * c_vector_top[:, None] + alpha * acc01
+                    acc10 = beta * c_vector_bottom[:, None] + alpha * acc10
+                    acc11 = beta * c_vector_bottom[:, None] + alpha * acc11
+                elif C_COL_BROADCAST:
+                    # C is a column vector (N,) - load and broadcast across rows for each quadrant
+                    c_vector_left = tl.load(C + rn_left * stride_cn, mask=rn_left < N, other=0.0).to(tl.float32)
+                    c_vector_right = tl.load(C + rn_right * stride_cn, mask=rn_right < N, other=0.0).to(tl.float32)
+                    
+                    # Broadcast across rows for each quadrant
+                    acc00 = beta * c_vector_left[None, :] + alpha * acc00
+                    acc01 = beta * c_vector_right[None, :] + alpha * acc01
+                    acc10 = beta * c_vector_left[None, :] + alpha * acc10
+                    acc11 = beta * c_vector_right[None, :] + alpha * acc11
+                else:
+                    # C is a full matrix (M, N) - load tiles normally for each quadrant
+                    # Quadrant 00 (top-left)
+                    c_offsets_00 = rm_top[:, None] * stride_cm + rn_left[None, :] * stride_cn
+                    c_mask_00 = (rm_top < M)[:, None] & (rn_left < N)[None, :]
+                    c_tile_00 = tl.load(C + c_offsets_00, mask=c_mask_00, other=0.0).to(tl.float32)
+                    acc00 = beta * c_tile_00 + alpha * acc00
+                    
+                    # Quadrant 01 (top-right)
+                    c_offsets_01 = rm_top[:, None] * stride_cm + rn_right[None, :] * stride_cn
+                    c_mask_01 = (rm_top < M)[:, None] & (rn_right < N)[None, :]
+                    c_tile_01 = tl.load(C + c_offsets_01, mask=c_mask_01, other=0.0).to(tl.float32)
+                    acc01 = beta * c_tile_01 + alpha * acc01
+                    
+                    # Quadrant 10 (bottom-left)
+                    c_offsets_10 = rm_bottom[:, None] * stride_cm + rn_left[None, :] * stride_cn
+                    c_mask_10 = (rm_bottom < M)[:, None] & (rn_left < N)[None, :]
+                    c_tile_10 = tl.load(C + c_offsets_10, mask=c_mask_10, other=0.0).to(tl.float32)
+                    acc10 = beta * c_tile_10 + alpha * acc10
+                    
+                    # Quadrant 11 (bottom-right)
+                    c_offsets_11 = rm_bottom[:, None] * stride_cm + rn_right[None, :] * stride_cn
+                    c_mask_11 = (rm_bottom < M)[:, None] & (rn_right < N)[None, :]
+                    c_tile_11 = tl.load(C + c_offsets_11, mask=c_mask_11, other=0.0).to(tl.float32)
+                    acc11 = beta * c_tile_11 + alpha * acc11
+            elif alpha != 1.0:
+                acc00 = acc00 * alpha
+                acc01 = acc01 * alpha
+                acc10 = acc10 * alpha
+                acc11 = acc11 * alpha
+
             # Convert to output dtype
             c00 = acc00.to(C.type.element_ty)
             c01 = acc01.to(C.type.element_ty)
             c10 = acc10.to(C.type.element_ty)
             c11 = acc11.to(C.type.element_ty)
 
-            # Store all 4 quadrants
-            rm_top = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M // 2)) % M
-            rm_bottom = (pid_m * BLOCK_SIZE_M + tl.arange(BLOCK_SIZE_M // 2, BLOCK_SIZE_M)) % M
-            rn_left = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N // 2)) % N
-            rn_right = (pid_n * BLOCK_SIZE_N + tl.arange(BLOCK_SIZE_N // 2, BLOCK_SIZE_N)) % N
-
-            # Store quadrant 00 (top-left)
+            # Store all 4 quadrants to OUT
             mask00 = (rm_top < M)[:, None] & (rn_left < N)[None, :]
-            tl.store(C + rm_top[:, None] * stride_cm + rn_left[None, :] * stride_cn, c00, mask=mask00)
+            tl.store(OUT + rm_top[:, None] * stride_outm + rn_left[None, :] * stride_outn, c00, mask=mask00)
 
-            # Store quadrant 01 (top-right)
             mask01 = (rm_top < M)[:, None] & (rn_right < N)[None, :]
-            tl.store(C + rm_top[:, None] * stride_cm + rn_right[None, :] * stride_cn, c01, mask=mask01)
+            tl.store(OUT + rm_top[:, None] * stride_outm + rn_right[None, :] * stride_outn, c01, mask=mask01)
 
-            # Store quadrant 10 (bottom-left)
             mask10 = (rm_bottom < M)[:, None] & (rn_left < N)[None, :]
-            tl.store(C + rm_bottom[:, None] * stride_cm + rn_left[None, :] * stride_cn, c10, mask=mask10)
+            tl.store(OUT + rm_bottom[:, None] * stride_outm + rn_left[None, :] * stride_outn, c10, mask=mask10)
 
-            # Store quadrant 11 (bottom-right)
             mask11 = (rm_bottom < M)[:, None] & (rn_right < N)[None, :]
-            tl.store(C + rm_bottom[:, None] * stride_cm + rn_right[None, :] * stride_cn, c11, mask=mask11)
+            tl.store(OUT + rm_bottom[:, None] * stride_outm + rn_right[None, :] * stride_outn, c11, mask=mask11)
 
         start_iter = end_iter
