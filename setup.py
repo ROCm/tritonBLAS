@@ -40,6 +40,25 @@ class CustomBuildExt(build_ext):
                 "_origami",
             ]
         )
+        subprocess.check_call(
+            [
+                "git",
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+            ],
+            cwd="_origami",
+        )
+        subprocess.check_call(
+            [
+                "git",
+                "checkout",
+                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+            ],
+            cwd="_origami",
+        )
 
         # Use custom chdir context manager to run sparse-checkout
         with chdir("_origami"):
