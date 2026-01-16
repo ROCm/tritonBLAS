@@ -15,6 +15,7 @@ class OrigamiMatmulSelector:
         torch.int32: "i32",
         torch.bfloat16: "bf16",
         torch.int8: "i8",
+        torch.uint8: "f8",  # Used for MXFP8 (stored as uint8)
         torch.float8_e5m2: "f8",
         torch.float8_e4m3fn: "f8",
     }

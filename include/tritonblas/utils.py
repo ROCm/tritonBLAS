@@ -787,3 +787,202 @@ def dynamic_mxfp4_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     )
 
     return x_fp4, blockscale_e8m0
+
+
+__all__ = [
+    'get_arch',
+    'get_fp8_dtypes',
+    'get_tl_to_torch_types',
+    'str_to_dtype',
+    'MatmulInputs',
+    'matmul_input_gen',
+    'quantize_tensor_per_channel',
+    'generate_matmul_inputs',
+    'mxfp4_to_f32',
+    'e8m0_to_f32',
+    'dynamic_mxfp4_quant',
+    'mxfp8_to_f32',
+    'dynamic_mxfp8_quant',
+]
+
+
+# ============================================================================
+# FP8 Utilities (MXFP8)
+# ============================================================================
+# Based on FP4 utilities, adapted for FP8 e5m2 format
+
+
+def mxfp8_to_f32(x: torch.Tensor) -> torch.Tensor:
+    """
+    Convert FP8 e5m2 data to FP32.
+    
+    FP8 e5m2 format (8 bits per value):
+    - 1 sign bit
+    - 5 exponent bits (biased by 15)
+    - 2 mantissa bits
+    
+    This function handles the standard FP8 e5m2 format by converting
+    uint8 representation to the appropriate FP8 dtype, then to FP32.
+    
+    Args:
+        x: FP8 tensor stored as uint8 (1 value per byte)
+        
+    Returns:
+        FP32 tensor
+    """
+    # Get the appropriate FP8 dtype for this architecture
+    e5m2_dtype, _ = get_fp8_dtypes()
+    
+    # If input is already in FP8 format, convert to float32
+    if x.dtype == e5m2_dtype:
+        return x.to(torch.float32)
+    
+    # Convert uint8 representation to FP8 dtype, then to float32
+    # This uses PyTorch's native FP8 conversion which handles the format correctly
+    if x.dtype == torch.uint8:
+        x_fp8 = x.view(e5m2_dtype)
+        return x_fp8.to(torch.float32)
+    
+    raise ValueError(f"Unsupported input dtype for mxfp8_to_f32: {x.dtype}")
+
+
+@triton.jit
+def _dynamic_mxfp8_quant_kernel(
+    x_ptr,
+    x_fp8_ptr,
+    bs_ptr,
+    stride_x_m,
+    stride_x_n,
+    stride_x_fp8_m,
+    stride_x_fp8_n,
+    stride_bs_m,
+    stride_bs_n,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    MXFP8_QUANT_BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Triton kernel for quantizing FP32/FP16/BF16 to FP8 e5m2 format.
+    
+    Each row is divided into blocks of MXFP8_QUANT_BLOCK_SIZE elements.
+    Each block gets one e8m0 scale computed from the max absolute value.
+    """
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    # Load input block
+    x_offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    x_offs_n = pid_n * MXFP8_QUANT_BLOCK_SIZE + tl.arange(0, MXFP8_QUANT_BLOCK_SIZE)
+    x_offs = x_offs_m[:, None] * stride_x_m + x_offs_n[None, :] * stride_x_n
+    x_mask = (x_offs_m < M)[:, None] & (x_offs_n < N)[None, :]
+    x = tl.load(x_ptr + x_offs, mask=x_mask).to(tl.float32)
+
+    # Calculate scale per row (max absolute value)
+    amax = tl.max(tl.abs(x), axis=1, keep_dims=True)
+    
+    # Convert to e8m0 format
+    # Round up to nearest power of 2 for better numerical stability
+    amax = amax.to(tl.int32, bitcast=True)
+    amax = (amax + 0x200000).to(tl.uint32, bitcast=True) & 0xFF800000
+    amax = amax.to(tl.float32, bitcast=True)
+    
+    # Compute unbiased exponent for FP8 e5m2
+    # Max FP8 e5m2 value is 57344.0 = 2^15 * 1.75
+    scale_e8m0_unbiased = tl.log2(amax).floor() - 15
+    scale_e8m0_unbiased = tl.clamp(scale_e8m0_unbiased, min=-127, max=127)
+    
+    # Quantization scale
+    quant_scale = tl.exp2(-scale_e8m0_unbiased)
+    
+    # Quantize to FP8 range
+    qx = x * quant_scale
+    
+    # Store e8m0 scale (add bias of 127)
+    bs_e8m0 = scale_e8m0_unbiased.to(tl.uint8) + 127
+
+    # Convert quantized FP32 to FP8 e5m2
+    qx = qx.to(tl.uint32, bitcast=True)
+    
+    # Extract sign, exponent, mantissa
+    s = qx & 0x80000000
+    e = (qx >> 23) & 0xFF
+    m = qx & 0x7FFFFF
+
+    E8_BIAS: tl.constexpr = 127
+    E5_BIAS: tl.constexpr = 15
+
+    # Handle denormal numbers
+    adjusted_exponents = tl.core.sub(E8_BIAS, e + 1, sanitize_overflow=False)
+    m = tl.where(e < E8_BIAS, (0x400000 | (m >> 1)) >> adjusted_exponents, m)
+
+    # Adjust exponent bias from FP32 (127) to FP8 e5m2 (15)
+    e = tl.maximum(e, E8_BIAS - E5_BIAS) - (E8_BIAS - E5_BIAS)
+
+    # Combine and saturate to 8 bits (1 sign + 5 exp + 2 mantissa)
+    # Round nearest with tie breaking up
+    e5m2_tmp = tl.minimum((((e << 2) | (m >> 21)) + 1) >> 1, 0x7F)
+    e5m2_value = ((s >> 24) | e5m2_tmp).to(tl.uint8)
+
+    # Store FP8 output (no packing needed, 1 value per byte)
+    out_offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    out_offs_n = pid_n * MXFP8_QUANT_BLOCK_SIZE + tl.arange(0, MXFP8_QUANT_BLOCK_SIZE)
+    out_offs = out_offs_m[:, None] * stride_x_fp8_m + out_offs_n[None, :] * stride_x_fp8_n
+    out_mask = (out_offs_m < M)[:, None] & (out_offs_n < N)[None, :]
+    tl.store(x_fp8_ptr + out_offs, e5m2_value, mask=out_mask)
+
+    # Store e8m0 scales
+    bs_offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    bs_offs_n = pid_n
+    bs_offs = bs_offs_m[:, None] * stride_bs_m + bs_offs_n[None, :] * stride_bs_n
+    bs_mask = (bs_offs_m < M)[:, None]
+    tl.store(bs_ptr + bs_offs, bs_e8m0, mask=bs_mask)
+
+
+def dynamic_mxfp8_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize a tensor to MX FP8 e5m2 format with e8m0 scales.
+    
+    The input is divided into blocks of 32 elements along the last dimension.
+    Each block gets one e8m0 scale computed from the max absolute value.
+    
+    Args:
+        x: Input tensor (FP32, FP16, or BF16), shape (..., N) where N % 32 == 0
+        
+    Returns:
+        Tuple of:
+        - x_fp8: FP8 data, shape (..., N)
+        - blockscale_e8m0: E8M0 scales, shape (..., N//32)
+    """
+    assert x.ndim == 2, "Input must be 2D tensor"
+    M, N = x.shape
+    assert N % 32 == 0, f"N ({N}) must be divisible by 32"
+
+    # Fixed by MXFP8 spec (same as FP4)
+    MXFP8_QUANT_BLOCK_SIZE = 32
+    BLOCK_SIZE = 128
+
+    # Allocate output tensors
+    x_fp8 = torch.empty((M, N), dtype=torch.uint8, device=x.device)
+    scaleN = triton.cdiv(N, MXFP8_QUANT_BLOCK_SIZE)
+    blockscale_e8m0 = torch.empty((M, scaleN), dtype=torch.uint8, device=x.device)
+
+    # Launch kernel
+    grid = (triton.cdiv(M, BLOCK_SIZE), scaleN)
+    _dynamic_mxfp8_quant_kernel[grid](
+        x,
+        x_fp8,
+        blockscale_e8m0,
+        x.stride(0),
+        x.stride(1),
+        x_fp8.stride(0),
+        x_fp8.stride(1),
+        blockscale_e8m0.stride(0),
+        blockscale_e8m0.stride(1),
+        M=M,
+        N=N,
+        BLOCK_SIZE=BLOCK_SIZE,
+        MXFP8_QUANT_BLOCK_SIZE=MXFP8_QUANT_BLOCK_SIZE,
+    )
+
+    return x_fp8, blockscale_e8m0

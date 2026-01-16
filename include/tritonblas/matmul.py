@@ -5,6 +5,7 @@ import functools
 import time
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.fp8_matmul import fp8_matmul
 from .origami import OrigamiMatmulSelector
 from typing import Dict, Tuple, Optional
 
@@ -128,6 +129,108 @@ def persistent_matmul_lt(
         kpack=kpack,
     )
 
+    return c
+
+
+def matmul_fp8(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    block_m: int = None,
+    block_n: int = None,
+    block_k: int = None,
+    group_size_m: int = 5,
+    num_warps: int = 8,
+    num_stages: int = 2,
+    waves_per_eu=1,
+):
+    """
+    FP8 matrix multiplication: C = A @ B
+    
+    Args:
+        a: Input matrix A in FP8 format (M, K), 1 element per uint8
+        b: Input matrix B in FP8 format (N, K), 1 element per uint8
+        c: Output matrix C (M, N) in bfloat16 or float16
+        a_scales: Scales for A in e8m0 format (M, K // 32)
+        b_scales: Scales for B in e8m0 format (N, K // 32)
+        block_m: Block size for M dimension (default: 128)
+        block_n: Block size for N dimension (default: 128)
+        block_k: Block size for K dimension (default: 128, must be multiple of 32)
+        group_size_m: Group size for M dimension tiling (default: 8)
+        num_warps: Number of warps per thread block (default: 8)
+        num_stages: Number of pipeline stages (default: 2)
+    
+    Returns:
+        Output matrix C
+    """
+
+    # Get actual dimensions (no packing for FP8)
+    M = a.shape[0]
+    K = a.shape[1]
+    N = b.shape[0]  # B has shape (N, K)
+    
+    num_xcds = 8
+
+    # Use hardcoded default block sizes if not provided
+    if block_m is None:
+        block_m = 128
+    if block_n is None:
+        block_n = 128
+    if block_k is None:
+        block_k = 128
+    
+    # Verify dimensions are compatible
+    assert b.shape[1] == K, f"Incompatible Dimensions: A has K={K}, B has K={b.shape[1]}"
+    
+    # Transpose B to match kernel expectations (kernel expects B as K x N)
+    b = b.T
+    
+    # Ensure block_k is appropriate for FP8 (must be multiple of 32)
+    assert block_k % 32 == 0, "BLOCK_K must be multiple of 32 for FP8"
+    
+    total_blocks_M = triton.cdiv(M, block_m)
+    total_blocks_N = triton.cdiv(N, block_n)
+    total_tiles = total_blocks_M * total_blocks_N
+    
+    # Set chunk size to same area as L2 tiles
+    chunk_size = group_size_m * group_size_m
+    chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
+    
+    grid = (total_tiles,)
+    
+    fp8_matmul[grid](
+        a,
+        b,
+        c,
+        a_scales,
+        b_scales,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        a_scales.stride(0),
+        a_scales.stride(1),
+        b_scales.stride(0),
+        b_scales.stride(1),
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+        GROUP_SIZE_M=group_size_m,
+        NUM_SMS=total_tiles,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu
+    )
+    
     return c
 
 def streamk_matmul_lt(
