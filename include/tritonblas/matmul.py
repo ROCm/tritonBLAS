@@ -52,6 +52,7 @@ def persistent_matmul_lt(
     b: torch.Tensor,
     c: torch.Tensor,
     selector,
+    bias: Optional[torch.Tensor] = None,
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
@@ -98,7 +99,7 @@ def persistent_matmul_lt(
         c,
         a_scale if quantized else None,  # A_scale_ptr
         b_scale if quantized else None,  # B_scale_ptr
-        None,  # TODO: Enable bias.
+        bias if bias is not None else None,
         M,
         N,
         K,
@@ -106,7 +107,7 @@ def persistent_matmul_lt(
         b.stride(1),
         c.stride(0),
         c.stride(1),
-        0,  # TODO: Enable bias stride.
+        bias.stride(0) if bias is not None else 0,
         stride_ak=a.stride(1),
         stride_bk=b.stride(0),
         BLOCK_SIZE_M=BLK_M,
@@ -116,7 +117,7 @@ def persistent_matmul_lt(
         NUM_SMS=total_programs,
         NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk_size,
-        BIAS=False,
+        BIAS=bias is not None,
         EVEN_K=even_k,
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
@@ -135,6 +136,7 @@ def streamk_matmul_lt(
     b: torch.Tensor, 
     c: torch.Tensor, 
     selector, 
+    bias: Optional[torch.Tensor] = None,
     sk_grid: Optional[int] = None,
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
@@ -198,7 +200,7 @@ def streamk_matmul_lt(
         c,
         a_scale if quantized else None,  # A_scale_ptr
         b_scale if quantized else None,  # B_scale_ptr
-        None,  # TODO: Enable bias.
+        bias if bias is not None else None,
         P,
         locks,
         M,
@@ -208,7 +210,7 @@ def streamk_matmul_lt(
         b.stride(1),
         c.stride(0),
         c.stride(1),
-        0,  # TODO: Enable bias stride.
+        bias.stride(0) if bias is not None else None,
         stride_ak=a.stride(1),
         stride_bk=b.stride(0),
         BLOCK_SIZE_M=BLK_M,
@@ -219,7 +221,7 @@ def streamk_matmul_lt(
         NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk_size,
         STREAMK_TILES=total_tiles_streamk,
-        BIAS=False,
+        BIAS=bias is not None,
         EVEN_K=even_k,
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
@@ -256,7 +258,7 @@ def matmul_a8w8_lt(
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
-    c: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
     enable_streamk=False,
     sk_grid=None,
 ):
@@ -264,11 +266,14 @@ def matmul(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
+    if out is None:
+        out = a.new_empty(M, N)
+
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
+        return streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, out, selector)
 
 def matmul_a8w8(
     a: torch.Tensor,
@@ -396,3 +401,27 @@ def matmul_fp4(
     )
     
     return c
+
+
+def addmm(
+    bias: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+    enable_streamk: Optional[bool] = False,
+    sk_grid: Optional[int] = None
+) -> torch.Tensor:
+    assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+
+    if out is None:
+        out = a.new_empty(M, N)
+
+    if enable_streamk:
+        return streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid)
+    else:
+        return persistent_matmul_lt(a, b, out, selector, bias=bias)
+
