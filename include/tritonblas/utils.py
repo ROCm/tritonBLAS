@@ -801,8 +801,8 @@ __all__ = [
     'mxfp4_to_f32',
     'e8m0_to_f32',
     'dynamic_mxfp4_quant',
-    'mxfp8_to_f32',
-    'dynamic_mxfp8_quant',
+    'mx8_to_f32',
+    'dynamic_mx8_quant',
 ]
 
 
@@ -812,7 +812,7 @@ __all__ = [
 # Based on FP4 utilities, adapted for FP8 e5m2 format
 
 
-def mxfp8_to_f32(x: torch.Tensor) -> torch.Tensor:
+def mx8_to_f32(x: torch.Tensor) -> torch.Tensor:
     """
     Convert FP8 e5m2 data to FP32.
     
@@ -843,11 +843,11 @@ def mxfp8_to_f32(x: torch.Tensor) -> torch.Tensor:
         x_fp8 = x.view(e5m2_dtype)
         return x_fp8.to(torch.float32)
     
-    raise ValueError(f"Unsupported input dtype for mxfp8_to_f32: {x.dtype}")
+    raise ValueError(f"Unsupported input dtype for mx8_to_f32: {x.dtype}")
 
 
 @triton.jit
-def _dynamic_mxfp8_quant_kernel(
+def _dynamic_mx8_quant_kernel(
     x_ptr,
     x_fp8_ptr,
     bs_ptr,
@@ -939,7 +939,7 @@ def _dynamic_mxfp8_quant_kernel(
     tl.store(bs_ptr + bs_offs, bs_e8m0, mask=bs_mask)
 
 
-def dynamic_mxfp8_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def dynamic_mx8_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize a tensor to MX FP8 e5m2 format with e8m0 scales.
     
@@ -969,7 +969,7 @@ def dynamic_mxfp8_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
     # Launch kernel
     grid = (triton.cdiv(M, BLOCK_SIZE), scaleN)
-    _dynamic_mxfp8_quant_kernel[grid](
+    _dynamic_mx8_quant_kernel[grid](
         x,
         x_fp8,
         blockscale_e8m0,

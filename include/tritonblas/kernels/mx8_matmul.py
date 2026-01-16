@@ -11,7 +11,7 @@ from .stages.indexing.pid_transforms import chiplet_transform_chunked, chiplet_t
     }
 )
 @triton.jit
-def fp8_matmul(
+def mx8_matmul(
     A,
     B,
     C,
@@ -40,7 +40,7 @@ def fp8_matmul(
     EVEN_K: tl.constexpr,
 ):
     """
-    Kernel for computing the matmul C = A x B with FP8 inputs.
+    Kernel for computing the matmul C = A x B with MX8 inputs.
     A and B inputs are in the microscale fp8 (mxfp8) e5m2 format.
     A_scales and B_scales are in e8m0 format.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)

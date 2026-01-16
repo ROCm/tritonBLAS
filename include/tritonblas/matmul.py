@@ -5,7 +5,7 @@ import functools
 import time
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
-from .kernels.fp8_matmul import fp8_matmul
+from .kernels.mx8_matmul import mx8_matmul
 from .origami import OrigamiMatmulSelector
 from typing import Dict, Tuple, Optional
 
@@ -132,7 +132,7 @@ def persistent_matmul_lt(
     return c
 
 
-def matmul_fp8(
+def matmul_mx8(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
@@ -141,17 +141,16 @@ def matmul_fp8(
     block_m: int = None,
     block_n: int = None,
     block_k: int = None,
-    group_size_m: int = 5,
+    group_size_m: int = 8,
     num_warps: int = 8,
     num_stages: int = 2,
-    waves_per_eu=1,
 ):
     """
-    FP8 matrix multiplication: C = A @ B
+    MX8 matrix multiplication: C = A @ B
     
     Args:
-        a: Input matrix A in FP8 format (M, K), 1 element per uint8
-        b: Input matrix B in FP8 format (N, K), 1 element per uint8
+        a: Input matrix A in MX8 format (M, K), 1 element per uint8
+        b: Input matrix B in MX8 format (N, K), 1 element per uint8
         c: Output matrix C (M, N) in bfloat16 or float16
         a_scales: Scales for A in e8m0 format (M, K // 32)
         b_scales: Scales for B in e8m0 format (N, K // 32)
@@ -166,7 +165,7 @@ def matmul_fp8(
         Output matrix C
     """
 
-    # Get actual dimensions (no packing for FP8)
+    # Get actual dimensions (no packing for MX8)
     M = a.shape[0]
     K = a.shape[1]
     N = b.shape[0]  # B has shape (N, K)
@@ -187,8 +186,8 @@ def matmul_fp8(
     # Transpose B to match kernel expectations (kernel expects B as K x N)
     b = b.T
     
-    # Ensure block_k is appropriate for FP8 (must be multiple of 32)
-    assert block_k % 32 == 0, "BLOCK_K must be multiple of 32 for FP8"
+    # Ensure block_k is appropriate for MX8 (must be multiple of 32)
+    assert block_k % 32 == 0, "BLOCK_K must be multiple of 32 for MX8"
     
     total_blocks_M = triton.cdiv(M, block_m)
     total_blocks_N = triton.cdiv(N, block_n)
@@ -200,7 +199,7 @@ def matmul_fp8(
     
     grid = (total_tiles,)
     
-    fp8_matmul[grid](
+    mx8_matmul[grid](
         a,
         b,
         c,
@@ -228,7 +227,6 @@ def matmul_fp8(
         CHUNK_SIZE=chunk_size,
         num_stages=num_stages,
         num_warps=num_warps,
-        waves_per_eu=waves_per_eu
     )
     
     return c
