@@ -27,19 +27,37 @@ class CustomBuildExt(build_ext):
         # Clone hipBLASLt repo
         print("Cloning hipBLASLt...")
         subprocess.check_call(
-            """
-            git clone \
-                --depth 1 \
-                --filter=blob:none \
-                --sparse \
-                --branch develop \
-                https://github.com/ROCm/rocm-libraries.git _origami \
-            && cd _origami \
-            && git fetch --depth 1 origin 4fc354a18fbed563d66f347a699f77b9ce52043a \
-            && git checkout 4fc354a18fbed563d66f347a699f77b9ce52043a
-            """,
-            shell=True,
-            executable="/bin/bash",
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--filter=blob:none",
+                "--sparse",
+                "--branch",
+                "develop",
+                "https://github.com/ROCm/rocm-libraries.git",
+                "_origami",
+            ]
+        )
+        subprocess.check_call(
+            [
+                "git",
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+            ],
+            cwd="_origami",
+        )
+        subprocess.check_call(
+            [
+                "git",
+                "checkout",
+                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+            ],
+            cwd="_origami",
         )
 
         # Use custom chdir context manager to run sparse-checkout
