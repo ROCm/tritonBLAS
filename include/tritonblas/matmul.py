@@ -1,12 +1,15 @@
-import torch
-import triton
-import random
 import functools
+import random
 import time
+from typing import Any, Dict, Optional, Tuple
+
+import torch
+from torch.library import triton_op, wrap_triton
+import triton
+
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
-from typing import Dict, Tuple, Optional
 
 _tensor_cache = {}
 current_device_index = torch.cuda.current_device()
@@ -93,7 +96,8 @@ def persistent_matmul_lt(
     chunk_size = min(chunk_size, total_programs // num_xcds)
 
     # TODO: Support other matmul algs.
-    kk = persistent_matmul[(grids,)](
+    #kk = persistent_matmul[(grids,)](
+    kk = wrap_triton(persistent_matmul)[(grids,)](
         a,
         b,
         c,
@@ -194,7 +198,8 @@ def streamk_matmul_lt(
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, grids // num_xcds) 
 
-    kk = streamk_matmul[(grids,)](
+    #kk = streamk_matmul[(grids,)](
+    kk = wrap_triton(streamk_matmul)[(grids,)](
         a,
         b,
         c,
@@ -266,6 +271,7 @@ def matmul(
     M, K = a.shape
     _, N = b.shape
 
+    # Allocate an output tensor iff one is not provided from inputs
     if out is None:
         out = a.new_empty(M, N)
 
@@ -403,6 +409,7 @@ def matmul_fp4(
     return c
 
 
+@triton_op("tritonblas::addmm", mutates_args={"out"})
 def addmm(
     bias: torch.Tensor,
     a: torch.Tensor,
@@ -417,6 +424,7 @@ def addmm(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
 
+    # Allocate an output tensor iff one is not provided from inputs
     if out is None:
         out = a.new_empty(M, N)
 
@@ -424,4 +432,46 @@ def addmm(
         return streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid)
     else:
         return persistent_matmul_lt(a, b, out, selector, bias=bias)
+
+
+def _setup_context_addmm_backwards(
+    ctx: Any,
+    inputs: tuple[Any, ...],
+    output: Any
+):
+    bias, a, b, out, enable_streamk, sk_grid = inputs
+    ctx.save_for_backwards(a, b)
+    ctx.enable_streamk = enable_streamk
+    ctx.sk_grid = sk_grid
+
+
+def _addmm_backwards(
+    ctx: Any,
+    grad_output: torch.Tensor
+):
+    a, b = ctx.saved_tensors
+    enable_streamk = ctx.enable_streamk
+    sk_grid = ctx.sk_grid
+
+    # Need to make grad_output contiguous?
+
+    # grad_a = grad_output @ b^T
+    b_t = b.T.contiguous()
+    grad_a = matmul(grad_output, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid)
+
+    # grad_b = a^T @ grad_output
+    a_t = a.T.contiguous()
+    grad_b = matmul(a_t, grad_output, enable_streamk=enable_streamk, sk_grid=sk_grid)
+
+    # grad_bias = sum(grad_output)
+    grad_bias = grad_output.sum(dim=0)
+
+    # tuple[bias, a, b, out, enable_streamk, sk_grid]
+    #   First 3 must be in the order that matches addmm()'s forward args
+    #   Last 3 are not part of the gradient and so are None
+    return grad_bias, grad_a, grad_b, None, None, None
+
+
+addmm.register_autograd(_addmm_backwards,
+                        setup_context=_setup_context_addmm_backwards)
 
