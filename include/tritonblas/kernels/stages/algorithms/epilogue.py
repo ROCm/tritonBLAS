@@ -99,7 +99,7 @@ def tanh(acc):
     """
     Apply Tanh activation using numerically stable formula.
     For x > 0: tanh(x) = (1 - exp(-2x)) / (1 + exp(-2x))
-    For x < 0: tanh(x) = -(1 - exp(2x)) / (1 + exp(2x))
+    For x < 0: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
     
     Args:
         acc: Accumulator tensor [BLOCK_SIZE_M, BLOCK_SIZE_N]
