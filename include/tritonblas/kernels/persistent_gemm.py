@@ -37,6 +37,7 @@ def persistent_matmul(
     EVEN_K: tl.constexpr,
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
+    epilogue_fn=None,  # Epilogue function to apply (default: None)
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
 ):
@@ -105,6 +106,10 @@ def persistent_matmul(
             bias_vector = tl.load(bias_ptr + row_indices * stride_bias, mask=row_indices < M, other=0.0) #Load Bias vector
             # Check if we're using quantized mode based on whether scales were applied
             acc = add_vector(acc, bias_vector, QUANTIZED=(A_scale_ptr is not None)) #Add bias vector to output accumulator
+        
+        # Apply epilogue function to accumulator if provided
+        if epilogue_fn is not None:
+            acc = epilogue_fn(acc)
         
         # Convert to output dtype
         result = convert_dtype(acc, C.type.element_ty) #Quantize output accumulator to output datatype

@@ -33,6 +33,17 @@ from .unary import (
     convert_dtype,
 )
 from .gemm_loop import gemm_loop
+from .epilogue import (
+    relu,
+    gelu,
+    gelu_tanh,
+    sigmoid,
+    silu,
+    tanh,
+    leaky_relu,
+    identity,
+    apply_epilogue,
+)
 
 __all__ = [
     # Binary operations
@@ -43,4 +54,14 @@ __all__ = [
     'convert_dtype',
     # Composition
     'gemm_loop',
+    # Epilogue operations
+    'relu',
+    'gelu',
+    'gelu_tanh',
+    'sigmoid',
+    'silu',
+    'tanh',
+    'leaky_relu',
+    'identity',
+    'apply_epilogue',
 ]
