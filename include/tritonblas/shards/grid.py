@@ -11,13 +11,28 @@ from triton.language.core import _aggregate as aggregate
 
 
 @triton.jit
+def chiplet_transform(
+    pid,
+    num_workgroups: tl.constexpr,
+    num_xcds: tl.constexpr,
+):
+    """Transform PID for basic chiplet-aware mapping."""
+    xcd = pid % num_xcds
+    pos_in_xcd = pid // num_xcds
+    min_per_xcd = num_workgroups // num_xcds
+    extra_sms = num_workgroups % num_xcds
+    offset = xcd * min_per_xcd + tl.minimum(xcd, extra_sms)
+    return offset + pos_in_xcd
+
+
+@triton.jit
 def chiplet_transform_chunked(
     pid,
     num_workgroups: tl.constexpr,
     num_xcds: tl.constexpr,
     chunk_size: tl.constexpr,
 ):
-    """Transform PID for chiplet-aware mapping."""
+    """Transform PID for chunked chiplet-aware mapping."""
     if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
         return pid
     local_pid = pid // num_xcds

@@ -2,7 +2,7 @@ import triton
 import triton.language as tl
 import torch
 
-from tritonblas.shards import Grid, Tile, GemmContext, tile_ptr
+from tritonblas.shards import ScheduleContext, Tile, GemmContext, tile_ptr, InputTensorA, InputTensorB
 
 
 @triton.jit()
@@ -41,11 +41,10 @@ def persistent_matmul(
     Persistent GEMM kernel using the shards API.
     
     Shards used:
-    - Grid: 2D grid iteration with chiplet-aware mapping
+    - ScheduleContext: Unified scheduling with tile_range()/get_tile()
+    - MatrixView: Bundle ptr, strides, dims into a single object
     - Tile: 2D tile coordinates and shape
-    - tile_ptr: Device function for computing tile pointers
-    - GemmContext: GEMM accumulation context with execute()
-    - ScaleView: Quantization scale application
+    - GemmContext: GEMM accumulation context with gemm()/k_complete()
     """
     # Stride guards
     tl.assume(stride_am > 0)
@@ -54,61 +53,58 @@ def persistent_matmul(
     tl.assume(stride_bk > 0)
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
-
+    tl.static_print(("hi"))
     # Determine accumulator dtype based on output type
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
     
-    # ============================================================
-    # Create shards
-    # ============================================================
     
-    # Grid with chiplet-aware mapping
-    grid = Grid(
-        M, N,
-        BLOCK_SIZE_M, BLOCK_SIZE_N,
+    tensorA = InputTensorA(
+        A, stride_am, stride_ak, M, K
+    )
+    
+    tensorB = InputTensorB(
+        B, stride_bk, stride_bn, K, N)
+    
+    # ============================================================
+    # Create schedule context - hides all loop index complexity
+    # ============================================================
+    sched = ScheduleContext(
+        M, N, K,
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
         GROUP_SIZE_M, NUM_SMS,
         num_xcds=NUM_XCDS,
         chunk_size=CHUNK_SIZE,
     )
     
-
+    # GEMM Context (created once, reused for all tiles)
+    ctx = GemmContext(
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
+        acc_dtype=acc_dtype,
+        allow_tf32=ALLOW_TF32,
+        even_k=EVEN_K,
+        quantized=QUANTIZED,
+        cache_modifier_a=CACHE_MODIFIER_A,
+        cache_modifier_b=CACHE_MODIFIER_B,
+    )
+    
     # ============================================================
     # Persistent loop: process multiple tiles per workgroup
     # ============================================================
-    start_tile, total_tiles = grid.get_tile_range()
-    for tile_id in range(start_tile, total_tiles, grid.stride):
-        pid_m, pid_n = grid.tile_idx_to_coord(tile_id)
+    start_tile, total_tiles, stride = sched.tile_range()
+    for tile_id in range(start_tile, total_tiles, stride):
+        #Get output tile coordinate from scheduler
+        pid_m, pid_n = sched.get_tile(tile_id)
         
-        # Output tile
+        # Output tile descriptor
         out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         
-        # GEMM Context to wrap consts.
-        ctx = GemmContext(
-            BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-            acc_dtype=acc_dtype,
-            allow_tf32=ALLOW_TF32,
-            even_k=EVEN_K,
-            quantized=QUANTIZED,
-            cache_modifier_a=CACHE_MODIFIER_A,
-            cache_modifier_b=CACHE_MODIFIER_B,
-        )
-        
         # ============================================================
-        # Compute matrix multiplication of tile over full K dimension
-        # This performs:
-        #                                             next k_idx
-        #                    ┌─────────────────────────────────────────────────────────┐
-        #                    ▼                                                         │
-        # ┌──────────┐     ┌────────────────┐  iterate   ┌─────────────────────┐     ┌──────────────────┐
-        # │ acc init │ ──> │ for each k_idx │ ---------->│ load A_tile, B_tile │ ->  │ acc  += dot(a, b)│
-        # └──────────┘     └────────────────┘            └─────────────────────┘     └──────────────────┘
+        # Compute matrix multiplication using k_complete() API
+        # Takes separate ptr, stride, dim parameters
         # ============================================================
         acc = ctx.k_complete(
-            # Matrix A [M, K] non consts
-            A, stride_am, stride_ak, M, K,
-            # Matrix B [K, N] non consts
-            B, stride_bk, stride_bn, N,
-            # Output tile ctx
+            tensorA,
+            tensorB,
             out_tile,
         )
         
@@ -128,7 +124,7 @@ def persistent_matmul(
         result = acc.to(C.type.element_ty)
         
         # ============================================================
-        # Store result to output matrix using tile_ptr device function
+        # Store result using tile_ptr device function
         # ============================================================
         c_ptrs, c_mask = tile_ptr(C, stride_cm, stride_cn, M, N, out_tile)
         tl.store(c_ptrs, result, mask=c_mask)

@@ -155,18 +155,24 @@ class GemmContext:
         pid_m = out_tile.pid_m
         pid_n = out_tile.pid_n
         
-        # Input tiles at k offset
-        a_tile = Tile(pid_m, k_idx, self.block_m, self.block_k)
-        b_tile = Tile(k_idx, pid_n, self.block_k, self.block_n)
+        # Row and column indices for output tile
+        rm = pid_m * self.block_m + tl.arange(0, self.block_m)
+        rn = pid_n * self.block_n + tl.arange(0, self.block_n)
+        rm = tl.max_contiguous(tl.multiple_of(rm % M, self.block_m), self.block_m)
+        rn = tl.max_contiguous(tl.multiple_of(rn % N, self.block_n), self.block_n)
         
-        # Get pointers and masks using tile_ptr device function
-        a_ptrs, a_mask = tile_ptr(A, stride_am, stride_ak, M, K, a_tile)
-        b_ptrs, b_mask = tile_ptr(B, stride_bk, stride_bn, K, N, b_tile)
+        # K indices for this iteration
+        rk = k_idx * self.block_k + tl.arange(0, self.block_k)
+        
+        # Compute pointers for A [M, K] and B [K, N]
+        a_ptrs = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
+        b_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
         
         # Load tiles
         if boundary:
-            a = tl.load(a_ptrs, mask=a_mask, other=0.0, cache_modifier=self.cache_modifier_a)
-            b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=self.cache_modifier_b)
+            # For K boundary, only mask the K dimension
+            a = tl.load(a_ptrs, mask=rk[None, :] < K, other=0.0, cache_modifier=self.cache_modifier_a)
+            b = tl.load(b_ptrs, mask=rk[:, None] < K, other=0.0, cache_modifier=self.cache_modifier_b)
         else:
             a = tl.load(a_ptrs, cache_modifier=self.cache_modifier_a)
             b = tl.load(b_ptrs, cache_modifier=self.cache_modifier_b)
@@ -183,16 +189,18 @@ class GemmContext:
     def k_complete(
         self,
         # Matrix A parameters [M, K]
-        A,
-        stride_am,
-        stride_ak,
-        M,
-        K,
+        # A,
+        # stride_am,
+        # stride_ak,
+        # M,
+        # K,
+        tensorA,
+        tensorB,
         # Matrix B parameters [K, N]
-        B,
-        stride_bk,
-        stride_bn,
-        N,
+        # B,
+        # stride_bk,
+        # stride_bn,
+        # N,
         # Output tile
         out_tile: Tile,
     ):
@@ -219,6 +227,18 @@ class GemmContext:
             acc = ctx.k_complete(A, stride_am, stride_ak, M, K,
                                  B, stride_bk, stride_bn, N, out_tile)
         """
+        #Unwrap tensor descriptor
+        #TODO just call the descriptor when we use it.
+        A = tensorA.ptr
+        stride_am = tensorA.stride_am
+        stride_ak = tensorA.stride_ak
+        M = tensorA.M
+        K = tensorA.K
+        B = tensorB.ptr
+        stride_bk = tensorB.stride_bk
+        stride_bn = tensorB.stride_bn
+        N = tensorB.N
+        
         # Initialize accumulator
         acc = self.init_accumulator()
         
