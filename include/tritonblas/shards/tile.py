@@ -78,3 +78,52 @@ class Tile:
         rn = tl.max_contiguous(tl.multiple_of(rn % N, self.block_n), self.block_n)
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         return rm, rn, mask
+    
+    @triton.jit
+    def scale(self, acc, A_scale_ptr, B_scale_ptr, M, N, stride_a=1, stride_b=1):
+        """
+        Apply quantization scales to accumulator.
+        
+        Args:
+            acc: Accumulator tensor [BLOCK_M, BLOCK_N]
+            A_scale_ptr: Pointer to A scales (per-row)
+            B_scale_ptr: Pointer to B scales (per-column)
+            M, N: Matrix dimensions for bounds checking
+            stride_a: Stride for A scales (default: 1)
+            stride_b: Stride for B scales (default: 1)
+        
+        Returns:
+            Scaled accumulator as float32
+        
+        Example:
+            acc = tile.scale(acc, A_scale_ptr, B_scale_ptr, M, N)
+        """
+        rm, rn = self.indices()
+        a_scales = tl.load(A_scale_ptr + rm * stride_a, mask=rm < M, other=1.0)
+        b_scales = tl.load(B_scale_ptr + rn * stride_b, mask=rn < N, other=1.0)
+        acc = acc.to(tl.float32)
+        acc = acc * a_scales[:, None]
+        acc = acc * b_scales[None, :]
+        return acc
+    
+    @triton.jit
+    def bias(self, acc, bias_ptr, M, stride_bias=1):
+        """
+        Add bias vector to accumulator.
+        
+        Args:
+            acc: Accumulator tensor [BLOCK_M, BLOCK_N]
+            bias_ptr: Pointer to bias vector
+            M: Matrix dimension for bounds checking
+            stride_bias: Stride for bias vector (default: 1)
+        
+        Returns:
+            Accumulator with bias added
+        
+        Example:
+            acc = tile.bias(acc, bias_ptr, M)
+        """
+        rm, _ = self.indices()
+        bias_vector = tl.load(bias_ptr + rm * stride_bias, mask=rm < M, other=0.0)
+        acc = acc + bias_vector[:, None]
+        return acc

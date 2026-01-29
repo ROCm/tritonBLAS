@@ -10,34 +10,36 @@ import triton.language as tl
 from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
-from .tensor_view import TensorView
+from .tensor_view import tile_ptr
 
 
 @aggregate
 class GemmContext:
     """
-    GEMM accumulator context.
+    GEMM accumulator context with all configuration options.
     
-    Example usage:
+    Provides two execution modes:
+    - k_step(): Single BLOCK_K iteration (one dot product)
+    - k_complete(): Full K loop
+    
+    Example usage (k_complete - simple):
+        ctx = GemmContext(BLOCK_M, BLOCK_N, BLOCK_K, even_k=EVEN_K)
+        acc = ctx.k_complete(
+            A, stride_am, stride_ak, M, K,
+            B, stride_bk, stride_bn, N,
+            out_tile
+        )
+    
+    Example usage (k_step - manual loop for advanced control):
         ctx = GemmContext(BLOCK_M, BLOCK_N, BLOCK_K)
+        acc = ctx.init_accumulator()
         
-        # Manual control:
-        for k in range(0, K, BLOCK_K):
-            a_tile = Tile(pid_m, k // BLOCK_K, BLOCK_M, BLOCK_K)
-            b_tile = Tile(k // BLOCK_K, pid_n, BLOCK_K, BLOCK_N)
-            
-            a_ptrs, a_mask = A_view.tile_ptr(a_tile)
-            b_ptrs, b_mask = B_view.tile_ptr(b_tile)
-            
-            a = tl.load(a_ptrs, mask=a_mask, other=0.0)
-            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
-            
-            ctx.dot_accumulate(a, b)
-        
-        acc = ctx.get_accumulator()
-        
-        # OR one-liner:
-        acc = ctx.execute(A_view, B_view, out_tile)
+        for k_idx in range(num_k_tiles):
+            acc = ctx.k_step(
+                A, stride_am, stride_ak, M, K,
+                B, stride_bk, stride_bn, N,
+                out_tile, k_idx, acc
+            )
     """
     
     block_m: tl.constexpr
@@ -45,7 +47,10 @@ class GemmContext:
     block_k: tl.constexpr
     acc_dtype: tl.constexpr
     allow_tf32: tl.constexpr
-    acc: tl.tensor  # Accumulator [BLOCK_M, BLOCK_N]
+    even_k: tl.constexpr
+    quantized: tl.constexpr
+    cache_modifier_a: tl.constexpr
+    cache_modifier_b: tl.constexpr
     
     @triton.constexpr_function
     def __init__(
@@ -55,6 +60,10 @@ class GemmContext:
         block_k,
         acc_dtype=tl.float32,
         allow_tf32=True,
+        even_k=True,
+        quantized=False,
+        cache_modifier_a=".cg",
+        cache_modifier_b=".cg",
     ):
         """
         Create a GEMM context.
@@ -65,111 +74,177 @@ class GemmContext:
             block_k: Block size K (constexpr)
             acc_dtype: Accumulator dtype (default: float32)
             allow_tf32: Allow TF32 for matmul (default: True)
+            even_k: Whether K is evenly divisible by BLOCK_K (default: True)
+            quantized: Use int32 accumulation for quantized inputs (default: False)
+            cache_modifier_a: Cache modifier for A loads (default: ".cg")
+            cache_modifier_b: Cache modifier for B loads (default: ".cg")
         """
         self.block_m = tl.constexpr(block_m)
         self.block_n = tl.constexpr(block_n)
         self.block_k = tl.constexpr(block_k)
         self.acc_dtype = tl.constexpr(acc_dtype)
         self.allow_tf32 = tl.constexpr(allow_tf32)
-        self.acc = tl.zeros((block_m, block_n), dtype=acc_dtype)
+        self.even_k = tl.constexpr(even_k)
+        self.quantized = tl.constexpr(quantized)
+        self.cache_modifier_a = tl.constexpr(cache_modifier_a)
+        self.cache_modifier_b = tl.constexpr(cache_modifier_b)
     
     @triton.jit
-    def dot_accumulate(self, a, b):
+    def init_accumulator(self):
         """
-        Accumulate a @ b into the context.
-        
-        Args:
-            a: Input tile A [BLOCK_M, BLOCK_K]
-            b: Input tile B [BLOCK_K, BLOCK_N]
-        """
-        self.acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
-    
-    @triton.jit
-    def dot_accumulate_int(self, a, b):
-        """
-        Accumulate a @ b for integer inputs (quantized).
-        
-        Args:
-            a: Input tile A [BLOCK_M, BLOCK_K]
-            b: Input tile B [BLOCK_K, BLOCK_N]
-        """
-        self.acc += tl.dot(a, b, out_dtype=tl.int32)
-    
-    @triton.jit
-    def get_accumulator(self):
-        """
-        Get the accumulated result.
+        Initialize and return a zero accumulator.
         
         Returns:
-            Accumulator tensor [BLOCK_M, BLOCK_N]
+            Accumulator tensor [BLOCK_M, BLOCK_N] initialized to zeros
+        
+        Example:
+            acc = ctx.init_accumulator()
         """
-        return self.acc
+        return tl.zeros((self.block_m, self.block_n), dtype=self.acc_dtype)
     
     @triton.jit
-    def execute(
+    def k_step(
         self,
-        A_view: TensorView,
-        B_view: TensorView,
+        # Matrix A parameters [M, K]
+        A,
+        stride_am,
+        stride_ak,
+        M,
+        K,
+        # Matrix B parameters [K, N]
+        B,
+        stride_bk,
+        stride_bn,
+        N,
+        # Tile info
         out_tile: Tile,
-        EVEN_K: tl.constexpr = True,
+        k_idx,
+        # Accumulator
+        acc,
+        # Whether this is a boundary iteration (needs masking)
+        boundary: tl.constexpr = False,
     ):
         """
-        Execute the full GEMM loop and return the accumulator.
+        Execute a single K step (one BLOCK_K iteration).
         
         Args:
-            A_view: TensorView for matrix A [M, K] - K is dim_minor
-            B_view: TensorView for matrix B [K, N] - K is dim_major
+            A: Pointer to matrix A [M, K]
+            stride_am: Stride for A in M dimension (runtime)
+            stride_ak: Stride for A in K dimension (constexpr)
+            M: Number of rows in A
+            K: Number of columns in A / rows in B
+            B: Pointer to matrix B [K, N]
+            stride_bk: Stride for B in K dimension (constexpr)
+            stride_bn: Stride for B in N dimension (runtime)
+            N: Number of columns in B
             out_tile: Output Tile with (pid_m, pid_n, BLOCK_M, BLOCK_N)
-            EVEN_K: Whether K is evenly divisible by BLOCK_K
+            k_idx: Current K tile index
+            acc: Accumulator to add to
+            boundary: Whether this is a boundary iteration needing masking
+        
+        Returns:
+            Updated accumulator tensor [BLOCK_M, BLOCK_N]
+        
+        Example:
+            acc = ctx.init_accumulator()
+            for k_idx in range(num_k_tiles):
+                acc = ctx.k_step(A, stride_am, stride_ak, M, K,
+                                 B, stride_bk, stride_bn, N,
+                                 out_tile, k_idx, acc)
+        """
+        pid_m = out_tile.pid_m
+        pid_n = out_tile.pid_n
+        
+        # Input tiles at k offset
+        a_tile = Tile(pid_m, k_idx, self.block_m, self.block_k)
+        b_tile = Tile(k_idx, pid_n, self.block_k, self.block_n)
+        
+        # Get pointers and masks using tile_ptr device function
+        a_ptrs, a_mask = tile_ptr(A, stride_am, stride_ak, M, K, a_tile)
+        b_ptrs, b_mask = tile_ptr(B, stride_bk, stride_bn, K, N, b_tile)
+        
+        # Load tiles
+        if boundary:
+            a = tl.load(a_ptrs, mask=a_mask, other=0.0, cache_modifier=self.cache_modifier_a)
+            b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=self.cache_modifier_b)
+        else:
+            a = tl.load(a_ptrs, cache_modifier=self.cache_modifier_a)
+            b = tl.load(b_ptrs, cache_modifier=self.cache_modifier_b)
+        
+        # Accumulate
+        if self.quantized:
+            acc += tl.dot(a, b, out_dtype=tl.int32)
+        else:
+            acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
+        
+        return acc
+    
+    @triton.jit
+    def k_complete(
+        self,
+        # Matrix A parameters [M, K]
+        A,
+        stride_am,
+        stride_ak,
+        M,
+        K,
+        # Matrix B parameters [K, N]
+        B,
+        stride_bk,
+        stride_bn,
+        N,
+        # Output tile
+        out_tile: Tile,
+    ):
+        """
+        Execute the full GEMM K loop and return the accumulator.
+        
+        Args:
+            A: Pointer to matrix A [M, K]
+            stride_am: Stride for A in M dimension (runtime)
+            stride_ak: Stride for A in K dimension (constexpr)
+            M: Number of rows in A
+            K: Number of columns in A / rows in B
+            B: Pointer to matrix B [K, N]
+            stride_bk: Stride for B in K dimension (constexpr)
+            stride_bn: Stride for B in N dimension (runtime)
+            N: Number of columns in B
+            out_tile: Output Tile with (pid_m, pid_n, BLOCK_M, BLOCK_N)
         
         Returns:
             Accumulator tensor [BLOCK_M, BLOCK_N]
         
         Example:
-            ctx = GemmContext(BLOCK_M, BLOCK_N, BLOCK_K)
-            acc = ctx.execute(A_view, B_view, out_tile)
+            ctx = GemmContext(BLOCK_M, BLOCK_N, BLOCK_K, even_k=True)
+            acc = ctx.k_complete(A, stride_am, stride_ak, M, K,
+                                 B, stride_bk, stride_bn, N, out_tile)
         """
-        pid_m = out_tile.pid_m
-        pid_n = out_tile.pid_n
-        
-        # K is in A_view.dim_minor (A is [M, K])
-        K = A_view.dim_minor
+        # Initialize accumulator
+        acc = self.init_accumulator()
         
         # Compute K loop bounds
         num_k_tiles = tl.cdiv(K, self.block_k)
-        if not EVEN_K:
+        if not self.even_k:
             num_k_tiles -= 1
         tl.assume(num_k_tiles > 0)
         
         # Main K loop
         for k_idx in range(num_k_tiles):
-            # Input tiles at k offset
-            a_tile = Tile(pid_m, k_idx, self.block_m, self.block_k)
-            b_tile = Tile(k_idx, pid_n, self.block_k, self.block_n)
-            
-            # Get pointers and masks
-            a_ptrs, a_mask = A_view.tile_ptr(a_tile)
-            b_ptrs, b_mask = B_view.tile_ptr(b_tile)
-            
-            # Load tiles
-            a = tl.load(a_ptrs, cache_modifier=".cg")
-            b = tl.load(b_ptrs, cache_modifier=".cg")
-            
-            # Accumulate
-            self.dot_accumulate(a, b)
+            acc = self.k_step(
+                A, stride_am, stride_ak, M, K,
+                B, stride_bk, stride_bn, N,
+                out_tile, k_idx, acc,
+                boundary=False,
+            )
         
         # Handle K tail if needed
-        if not EVEN_K:
+        if not self.even_k:
             k_idx = num_k_tiles
-            a_tile = Tile(pid_m, k_idx, self.block_m, self.block_k)
-            b_tile = Tile(k_idx, pid_n, self.block_k, self.block_n)
-            
-            a_ptrs, a_mask = A_view.tile_ptr(a_tile)
-            b_ptrs, b_mask = B_view.tile_ptr(b_tile)
-            
-            a = tl.load(a_ptrs, mask=a_mask, other=0.0)
-            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
-            
-            self.dot_accumulate(a, b)
+            acc = self.k_step(
+                A, stride_am, stride_ak, M, K,
+                B, stride_bk, stride_bn, N,
+                out_tile, k_idx, acc,
+                boundary=True,
+            )
         
-        return self.acc
+        return acc
