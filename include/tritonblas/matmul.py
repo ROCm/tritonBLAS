@@ -261,26 +261,118 @@ def matmul_a8w8_lt(
     else:
         return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
 
-def matmul(
+
+@triton_op("tritonblas::_matmul", mutates_args={})
+def _matmul(
     a: torch.Tensor,
     b: torch.Tensor,
-    out: Optional[torch.Tensor] = None,
-    enable_streamk=False,
-    sk_grid=None,
-):
-    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    enable_streamk: Optional[bool] = False,
+    sk_grid: Optional[int] = None
+) -> torch.Tensor:
+    assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
 
-    # Allocate an output tensor iff one is not provided from inputs
-    if out is None:
-        out = a.new_empty(M, N)
+    # Allocate an output tensor
+    out = a.new_empty(M, N)
 
+    # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
     else:
         return persistent_matmul_lt(a, b, out, selector)
+
+
+def _setup_context_matmul_backwards(
+    ctx: Any,
+    inputs: tuple[Any, ...],
+    output: Any
+):
+    a, b, enable_streamk, sk_grid = inputs
+    ctx.save_for_backward(a, b)
+    ctx.enable_streamk = enable_streamk
+    ctx.sk_grid = sk_grid
+
+
+def _matmul_backwards(
+    ctx: Any,
+    grad_output: torch.Tensor
+):
+    a, b = ctx.saved_tensors
+    enable_streamk = ctx.enable_streamk
+    sk_grid = ctx.sk_grid
+
+    # Make grad_output contiguous
+    grad_output_cont = grad_output.contiguous()
+
+    # grad_a = grad_output @ b^T
+    b_t = b.T.contiguous()
+    grad_a = matmul(grad_output_cont, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid)
+
+    # grad_b = a^T @ grad_output
+    a_t = a.T.contiguous()
+    grad_b = matmul(a_t, grad_output_cont, enable_streamk=enable_streamk, sk_grid=sk_grid)
+
+    # tuple[a, b, enable_streamk, sk_grid]
+    #   First 2 must be in the order that matches matmul()'s forward args
+    #   Last 2 are not part of the gradient and so are None
+    return grad_a, grad_b, None, None
+
+
+_matmul.register_autograd(_matmul_backwards,
+                          setup_context=_setup_context_matmul_backwards)
+
+
+@triton_op("tritonblas::_matmul_out", mutates_args={'out'})
+def _matmul_out(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+    enable_streamk: Optional[bool] = False,
+    sk_grid: Optional[int] = None
+) -> None:
+    assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    # Query Origami for solution
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+
+    if enable_streamk:
+        streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
+    else:
+        persistent_matmul_lt(a, b, out, selector)
+
+    # Custom torch ops cannot return a value which is an alias of an input.  So
+    # even though torch returns a pointer to the out arg when used, we can't.
+    return None
+
+
+def matmul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+    enable_streamk: Optional[bool] = False,
+    sk_grid: Optional[int] = None
+) -> Optional[torch.Tensor]:
+    # If no out tensor provided - we do the allocation - we support autograd
+    if out is None:
+        return _matmul(a, b, enable_streamk, sk_grid)
+
+    # If out tensor provided - in-place - we do NOT support autograd
+    # Check for autograd conditions (global and per-tensor)
+    if torch.is_grad_enabled() and (
+        a.requires_grad
+        or b.requires_grad
+        or out.requires_grad
+    ):
+        raise RuntimeError(
+            "tritonblas.matmul(): functions with out=... arguments don't support "
+            "automatic differentiation, but one of the arguments requires grad."
+        )
+    return _matmul_out(a, b, out, enable_streamk, sk_grid)
+
 
 def matmul_a8w8(
     a: torch.Tensor,
