@@ -2,7 +2,7 @@ import triton
 import triton.language as tl
 import torch
 
-from tritonblas.shards import ScheduleContext, Tile, GemmContext, tile_ptr, InputTensorA, InputTensorB
+from tritonblas.shards import ScheduleContext, Tile, GemmContext, tile_ptr, InputView
 
 
 @triton.jit()
@@ -53,17 +53,14 @@ def persistent_matmul(
     tl.assume(stride_bk > 0)
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
-    tl.static_print(("hi"))
     # Determine accumulator dtype based on output type
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
     
-    
-    tensorA = InputTensorA(
-        A, stride_am, stride_ak, M, K
-    )
-    
-    tensorB = InputTensorB(
-        B, stride_bk, stride_bn, K, N)
+    # ============================================================
+    # Create matrix view aggregates - bundle ptr, strides, dims
+    # ============================================================
+    tensorA = InputView(A, stride_ak, stride_am, M, K)
+    tensorB = InputView(B, stride_bk, stride_bn, K, N)
     
     # ============================================================
     # Create schedule context - hides all loop index complexity
@@ -100,13 +97,9 @@ def persistent_matmul(
         
         # ============================================================
         # Compute matrix multiplication using k_complete() API
-        # Takes separate ptr, stride, dim parameters
+        # Takes A_View and B_View aggregates
         # ============================================================
-        acc = ctx.k_complete(
-            tensorA,
-            tensorB,
-            out_tile,
-        )
+        acc = ctx.k_complete(tensorA, tensorB, out_tile)
         
         # ============================================================
         # Apply quantization scales and bias using tile methods

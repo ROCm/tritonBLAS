@@ -2,223 +2,213 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Matrix view device functions for tritonblas shards.
+Matrix view aggregates for tritonblas shards.
 
-Due to Triton's strict type system for aggregates (requiring exact type matches),
-we use device functions instead of aggregate classes for matrix views.
-Device functions work with any combination of tensor/constexpr/int types.
+Provides typed matrix view classes with load/store methods:
+- InputView: Generic input matrix with load() method
+- OutputView: Generic output matrix with store() method
+
+Usage:
+    A = InputView(A_ptr, stride_am, stride_ak, M, K)  # A [M, K]
+    B = InputView(B_ptr, stride_bk, stride_bn, K, N)  # B [K, N]
+    C = OutputView(C_ptr, stride_cm, stride_cn, M, N) # C [M, N]
+    
+    a_tile = Tile(pid_m, k_idx, BLOCK_M, BLOCK_K)
+    b_tile = Tile(k_idx, pid_n, BLOCK_K, BLOCK_N)
+    out_tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
+    
+    a = A.load(a_tile)
+    b = B.load(b_tile)
+    C.store(result, out_tile)
 """
 
 import triton
 import triton.language as tl
+from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
 
 
-# =============================================================================
-# Device functions for matrix tile operations
-# These work with ANY stride types (tensor, constexpr, or int)
-# =============================================================================
+@aggregate
+class InputView:
+    """
+    Generic input tensor descriptor with load() method.
+    
+    Can be used for any 2D input matrix (A, B, etc.).
+    Uses constexpr stride_row for vectorization efficiency.
+    
+    Fields:
+    - ptr: Pointer to matrix data
+    - stride_row: Stride in row dimension (constexpr for vectorization)
+    - stride_col: Stride in column dimension (runtime tensor)
+    - rows, cols: Matrix dimensions
+    
+    Example:
+        A = InputView(A_ptr, stride_am, stride_ak, M, K)
+        B = InputView(B_ptr, stride_bk, stride_bn, K, N)
+        
+        a_tile = Tile(pid_m, k_idx, BLOCK_M, BLOCK_K)
+        data = A.load(a_tile)
+    """
+    ptr: tl.tensor
+    stride_reduction_dim: tl.constexpr
+    stride_free_dim: tl.tensor
+    rows: tl.tensor
+    cols: tl.tensor
+    
+    @triton.constexpr_function
+    def __init__(self, ptr, stride_reduction_dim, stride_free_dim, rows, cols):
+        """
+        Create InputView.
+        
+        Args:
+            ptr: Base pointer to matrix
+            stride_reduction_dim: Stride in reduction dimension (constexpr)
+            stride_free_dim: Stride in free dimension (runtime)
+            rows: Number of rows
+            cols: Number of columns
+        """
+        self.ptr = ptr
+        self.stride_reduction_dim = tl.constexpr(stride_reduction_dim)
+        self.stride_free_dim = stride_free_dim
+        self.rows = rows
+        self.cols = cols
+    
+    @triton.jit
+    def tile_ptrs(self, tile: Tile):
+        """
+        Get pointer array and mask for a tile.
+        
+        Args:
+            tile: Tile with (pid_row, pid_col, BLOCK_ROW, BLOCK_COL)
+        
+        Returns:
+            ptrs, mask: Pointer array and bounds mask
+        """
+        r_row, r_col, mask = tile.layout(self.rows, self.cols)
+        ptrs = self.ptr + r_row[:, None] * self.stride_row + r_col[None, :] * self.stride_col
+        return ptrs, mask
+    
+    @triton.jit
+    def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = ".cg"):
+        """
+        Load a tile from this matrix.
+        
+        Args:
+            tile: Tile with coordinates and shape
+            boundary: Whether to apply boundary masking
+            cache_modifier: Cache modifier for load
+        
+        Returns:
+            Loaded tile data
+        """
+        ptrs, mask = self.tile_ptrs(tile)
+        if boundary:
+            return tl.load(ptrs, mask=mask, other=0.0, cache_modifier=cache_modifier)
+        else:
+            return tl.load(ptrs, cache_modifier=cache_modifier)
 
 
-@triton.jit
-def a_tile_ptrs(
-    ptr,
-    stride_m,
-    stride_k,
-    M,
-    K,
-    tile: Tile,
-):
+@aggregate
+class OutputView:
     """
-    Get pointer array and mask for a tile of matrix A [M, K].
+    Generic output tensor descriptor with store() method.
     
-    Works with any stride types (tensor, constexpr, or int).
+    Can be used for any 2D output matrix.
+    Uses runtime strides for both dimensions (supports any layout).
     
-    Args:
-        ptr: Base pointer to matrix A
-        stride_m: Stride in M dimension (any type)
-        stride_k: Stride in K dimension (any type)
-        M: Number of rows
-        K: Number of columns
-        tile: Tile with (pid_m, pid_k, BLOCK_M, BLOCK_K)
+    Fields:
+    - ptr: Pointer to matrix data
+    - stride_row: Stride in row dimension (runtime tensor)
+    - stride_col: Stride in column dimension (runtime tensor)
+    - rows, cols: Matrix dimensions
     
-    Returns:
-        ptrs, mask: Pointer array [BLOCK_M, BLOCK_K] and bounds mask
+    Example:
+        C = OutputView(C_ptr, stride_cm, stride_cn, M, N)
+        out_tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
+        C.store(result, out_tile)
     """
-    rm, rk, mask = tile.layout(M, K)
-    ptrs = ptr + rm[:, None] * stride_m + rk[None, :] * stride_k
-    return ptrs, mask
-
-
-@triton.jit
-def a_load_tile(
-    ptr,
-    stride_m,
-    stride_k,
-    M,
-    K,
-    tile: Tile,
-    boundary: tl.constexpr = False,
-    cache_modifier: tl.constexpr = ".cg",
-):
-    """
-    Load a tile from matrix A [M, K].
+    ptr: tl.tensor
+    stride_row: tl.tensor
+    stride_col: tl.tensor
+    rows: tl.tensor
+    cols: tl.tensor
     
-    Args:
-        ptr: Base pointer to matrix A
-        stride_m: Stride in M dimension
-        stride_k: Stride in K dimension
-        M: Number of rows
-        K: Number of columns
-        tile: Tile with (pid_m, pid_k, BLOCK_M, BLOCK_K)
-        boundary: Whether to apply boundary masking
-        cache_modifier: Cache modifier for load
+    @triton.constexpr_function
+    def __init__(self, ptr, stride_row, stride_col, rows, cols):
+        """
+        Create OutputView.
+        
+        Args:
+            ptr: Base pointer to matrix
+            stride_row: Stride in row dimension (runtime)
+            stride_col: Stride in column dimension (runtime)
+            rows: Number of rows
+            cols: Number of columns
+        """
+        self.ptr = ptr
+        self.stride_row = stride_row
+        self.stride_col = stride_col
+        self.rows = rows
+        self.cols = cols
     
-    Returns:
-        Loaded tile data [BLOCK_M, BLOCK_K]
-    """
-    ptrs, mask = a_tile_ptrs(ptr, stride_m, stride_k, M, K, tile)
-    if boundary:
-        return tl.load(ptrs, mask=mask, other=0.0, cache_modifier=cache_modifier)
-    else:
-        return tl.load(ptrs, cache_modifier=cache_modifier)
-
-
-@triton.jit
-def b_tile_ptrs(
-    ptr,
-    stride_k,
-    stride_n,
-    K,
-    N,
-    tile: Tile,
-):
-    """
-    Get pointer array and mask for a tile of matrix B [K, N].
+    @triton.jit
+    def tile_ptrs(self, tile: Tile):
+        """
+        Get pointer array and mask for a tile.
+        
+        Args:
+            tile: Tile with (pid_row, pid_col, BLOCK_ROW, BLOCK_COL)
+        
+        Returns:
+            ptrs, mask: Pointer array and bounds mask
+        """
+        r_row, r_col, mask = tile.layout(self.rows, self.cols)
+        ptrs = self.ptr + r_row[:, None] * self.stride_row + r_col[None, :] * self.stride_col
+        return ptrs, mask
     
-    Works with any stride types (tensor, constexpr, or int).
+    @triton.jit
+    def store(self, data, tile: Tile, mask=None):
+        """
+        Store data to a tile in this matrix.
+        
+        Args:
+            data: Data to store
+            tile: Tile with coordinates and shape
+            mask: Optional mask (if None, computes from bounds)
+        """
+        ptrs, bounds_mask = self.tile_ptrs(tile)
+        if mask is None:
+            mask = bounds_mask
+        tl.store(ptrs, data, mask=mask)
     
-    Args:
-        ptr: Base pointer to matrix B
-        stride_k: Stride in K dimension (any type)
-        stride_n: Stride in N dimension (any type)
-        K: Number of rows
-        N: Number of columns
-        tile: Tile with (pid_k, pid_n, BLOCK_K, BLOCK_N)
-    
-    Returns:
-        ptrs, mask: Pointer array [BLOCK_K, BLOCK_N] and bounds mask
-    """
-    rk, rn, mask = tile.layout(K, N)
-    ptrs = ptr + rk[:, None] * stride_k + rn[None, :] * stride_n
-    return ptrs, mask
-
-
-@triton.jit
-def b_load_tile(
-    ptr,
-    stride_k,
-    stride_n,
-    K,
-    N,
-    tile: Tile,
-    boundary: tl.constexpr = False,
-    cache_modifier: tl.constexpr = ".cg",
-):
-    """
-    Load a tile from matrix B [K, N].
-    
-    Args:
-        ptr: Base pointer to matrix B
-        stride_k: Stride in K dimension
-        stride_n: Stride in N dimension
-        K: Number of rows
-        N: Number of columns
-        tile: Tile with (pid_k, pid_n, BLOCK_K, BLOCK_N)
-        boundary: Whether to apply boundary masking
-        cache_modifier: Cache modifier for load
-    
-    Returns:
-        Loaded tile data [BLOCK_K, BLOCK_N]
-    """
-    ptrs, mask = b_tile_ptrs(ptr, stride_k, stride_n, K, N, tile)
-    if boundary:
-        return tl.load(ptrs, mask=mask, other=0.0, cache_modifier=cache_modifier)
-    else:
-        return tl.load(ptrs, cache_modifier=cache_modifier)
-
-
-@triton.jit
-def c_tile_ptrs(
-    ptr,
-    stride_m,
-    stride_n,
-    M,
-    N,
-    tile: Tile,
-):
-    """
-    Get pointer array and mask for a tile of matrix C [M, N].
-    
-    Works with any stride types (tensor, constexpr, or int).
-    
-    Args:
-        ptr: Base pointer to matrix C
-        stride_m: Stride in M dimension (any type)
-        stride_n: Stride in N dimension (any type)
-        M: Number of rows
-        N: Number of columns
-        tile: Tile with (pid_m, pid_n, BLOCK_M, BLOCK_N)
-    
-    Returns:
-        ptrs, mask: Pointer array [BLOCK_M, BLOCK_N] and bounds mask
-    """
-    rm, rn, mask = tile.layout(M, N)
-    ptrs = ptr + rm[:, None] * stride_m + rn[None, :] * stride_n
-    return ptrs, mask
-
-
-@triton.jit
-def c_store_tile(
-    ptr,
-    stride_m,
-    stride_n,
-    M,
-    N,
-    data,
-    tile: Tile,
-    mask=None,
-):
-    """
-    Store data to a tile in matrix C [M, N].
-    
-    Args:
-        ptr: Base pointer to matrix C
-        stride_m: Stride in M dimension
-        stride_n: Stride in N dimension
-        M: Number of rows
-        N: Number of columns
-        data: Data to store [BLOCK_M, BLOCK_N]
-        tile: Tile with coordinates and shape
-        mask: Optional mask (if None, computes from bounds)
-    """
-    ptrs, bounds_mask = c_tile_ptrs(ptr, stride_m, stride_n, M, N, tile)
-    if mask is None:
-        mask = bounds_mask
-    tl.store(ptrs, data, mask=mask)
+    @triton.jit
+    def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = ".cg"):
+        """
+        Load a tile from this matrix (for read-modify-write patterns).
+        
+        Args:
+            tile: Tile with coordinates and shape
+            boundary: Whether to apply boundary masking
+            cache_modifier: Cache modifier for load
+        
+        Returns:
+            Loaded tile data
+        """
+        ptrs, mask = self.tile_ptrs(tile)
+        if boundary:
+            return tl.load(ptrs, mask=mask, other=0.0, cache_modifier=cache_modifier)
+        else:
+            return tl.load(ptrs, cache_modifier=cache_modifier)
 
 
 # =============================================================================
 # Legacy aliases for backward compatibility
 # =============================================================================
 
-# MatrixView is just an alias for tile_ptr from tensor_view.py
-# Import it to provide compatibility
-from .tensor_view import tile_ptr as MatrixView
-
-# Placeholder classes that can't work due to strict typing
-A_View = None
-B_View = None
-C_View = None
-GemmMatrices = None
+A_View = InputView
+B_View = InputView
+C_View = OutputView
+MatrixView = OutputView
+InputTensorA = InputView
+InputTensorB = InputView

@@ -11,6 +11,7 @@ from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
 from .tensor_view import tile_ptr
+from .matrix_view import InputView
 
 
 @aggregate
@@ -105,38 +106,19 @@ class GemmContext:
     @triton.jit
     def k_step(
         self,
-        # Matrix A parameters [M, K]
-        A,
-        stride_am,
-        stride_ak,
-        M,
-        K,
-        # Matrix B parameters [K, N]
-        B,
-        stride_bk,
-        stride_bn,
-        N,
-        # Tile info
+        A: InputView,
+        B: InputView,
         out_tile: Tile,
         k_idx,
-        # Accumulator
         acc,
-        # Whether this is a boundary iteration (needs masking)
         boundary: tl.constexpr = False,
     ):
         """
         Execute a single K step (one BLOCK_K iteration).
         
         Args:
-            A: Pointer to matrix A [M, K]
-            stride_am: Stride for A in M dimension (runtime)
-            stride_ak: Stride for A in K dimension (constexpr)
-            M: Number of rows in A
-            K: Number of columns in A / rows in B
-            B: Pointer to matrix B [K, N]
-            stride_bk: Stride for B in K dimension (constexpr)
-            stride_bn: Stride for B in N dimension (runtime)
-            N: Number of columns in B
+            A: InputView with ptr, stride_m, stride_k, M, K
+            B: InputView with ptr, stride_k, stride_n, K, N
             out_tile: Output Tile with (pid_m, pid_n, BLOCK_M, BLOCK_N)
             k_idx: Current K tile index
             acc: Accumulator to add to
@@ -146,11 +128,11 @@ class GemmContext:
             Updated accumulator tensor [BLOCK_M, BLOCK_N]
         
         Example:
+            A = InputView(A_ptr, stride_am, stride_ak, M, K)
+            B = InputView(B_ptr, stride_bk, stride_bn, K, N)
             acc = ctx.init_accumulator()
             for k_idx in range(num_k_tiles):
-                acc = ctx.k_step(A, stride_am, stride_ak, M, K,
-                                 B, stride_bk, stride_bn, N,
-                                 out_tile, k_idx, acc)
+                acc = ctx.k_step(A, B, out_tile, k_idx, acc)
         """
         pid_m = out_tile.pid_m
         pid_n = out_tile.pid_n
@@ -158,21 +140,23 @@ class GemmContext:
         # Row and column indices for output tile
         rm = pid_m * self.block_m + tl.arange(0, self.block_m)
         rn = pid_n * self.block_n + tl.arange(0, self.block_n)
-        rm = tl.max_contiguous(tl.multiple_of(rm % M, self.block_m), self.block_m)
-        rn = tl.max_contiguous(tl.multiple_of(rn % N, self.block_n), self.block_n)
+        rm = tl.max_contiguous(tl.multiple_of(rm % A.rows, self.block_m), self.block_m)
+        rn = tl.max_contiguous(tl.multiple_of(rn % B.cols, self.block_n), self.block_n)
         
         # K indices for this iteration
         rk = k_idx * self.block_k + tl.arange(0, self.block_k)
         
         # Compute pointers for A [M, K] and B [K, N]
-        a_ptrs = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-        b_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+        # A: stride_row=stride_m, stride_col=stride_k
+        # B: stride_row=stride_k, stride_col=stride_n
+        a_ptrs = A.ptr + rm[:, None] * A.stride_free_dim + rk[None, :] * A.stride_reduction_dim
+        b_ptrs = B.ptr + rk[:, None] * B.stride_reduction_dim + rn[None, :] * B.stride_free_dim
         
         # Load tiles
         if boundary:
             # For K boundary, only mask the K dimension
-            a = tl.load(a_ptrs, mask=rk[None, :] < K, other=0.0, cache_modifier=self.cache_modifier_a)
-            b = tl.load(b_ptrs, mask=rk[:, None] < K, other=0.0, cache_modifier=self.cache_modifier_b)
+            a = tl.load(a_ptrs, mask=rk[None, :] < A.cols, other=0.0, cache_modifier=self.cache_modifier_a)
+            b = tl.load(b_ptrs, mask=rk[:, None] < B.rows, other=0.0, cache_modifier=self.cache_modifier_b)
         else:
             a = tl.load(a_ptrs, cache_modifier=self.cache_modifier_a)
             b = tl.load(b_ptrs, cache_modifier=self.cache_modifier_b)
@@ -188,83 +172,43 @@ class GemmContext:
     @triton.jit
     def k_complete(
         self,
-        # Matrix A parameters [M, K]
-        # A,
-        # stride_am,
-        # stride_ak,
-        # M,
-        # K,
-        tensorA,
-        tensorB,
-        # Matrix B parameters [K, N]
-        # B,
-        # stride_bk,
-        # stride_bn,
-        # N,
-        # Output tile
+        A: InputView,
+        B: InputView,
         out_tile: Tile,
     ):
         """
         Execute the full GEMM K loop and return the accumulator.
         
         Args:
-            A: Pointer to matrix A [M, K]
-            stride_am: Stride for A in M dimension (runtime)
-            stride_ak: Stride for A in K dimension (constexpr)
-            M: Number of rows in A
-            K: Number of columns in A / rows in B
-            B: Pointer to matrix B [K, N]
-            stride_bk: Stride for B in K dimension (constexpr)
-            stride_bn: Stride for B in N dimension (runtime)
-            N: Number of columns in B
+            A: InputView with ptr, stride_row, stride_col, rows, cols (for A: rows=M, cols=K)
+            B: InputView with ptr, stride_row, stride_col, rows, cols (for B: rows=K, cols=N)
             out_tile: Output Tile with (pid_m, pid_n, BLOCK_M, BLOCK_N)
         
         Returns:
             Accumulator tensor [BLOCK_M, BLOCK_N]
         
         Example:
+            A = InputView(A_ptr, stride_am, stride_ak, M, K)
+            B = InputView(B_ptr, stride_bk, stride_bn, K, N)
             ctx = GemmContext(BLOCK_M, BLOCK_N, BLOCK_K, even_k=True)
-            acc = ctx.k_complete(A, stride_am, stride_ak, M, K,
-                                 B, stride_bk, stride_bn, N, out_tile)
+            acc = ctx.k_complete(A, B, out_tile)
         """
-        #Unwrap tensor descriptor
-        #TODO just call the descriptor when we use it.
-        A = tensorA.ptr
-        stride_am = tensorA.stride_am
-        stride_ak = tensorA.stride_ak
-        M = tensorA.M
-        K = tensorA.K
-        B = tensorB.ptr
-        stride_bk = tensorB.stride_bk
-        stride_bn = tensorB.stride_bn
-        N = tensorB.N
-        
         # Initialize accumulator
         acc = self.init_accumulator()
         
-        # Compute K loop bounds
-        num_k_tiles = tl.cdiv(K, self.block_k)
+        # Compute K loop bounds (K dimension is A.cols or B.rows)
+        num_k_tiles = tl.cdiv(A.cols, self.block_k)
         if not self.even_k:
             num_k_tiles -= 1
         tl.assume(num_k_tiles > 0)
         
         # Main K loop
         for k_idx in range(num_k_tiles):
-            acc = self.k_step(
-                A, stride_am, stride_ak, M, K,
-                B, stride_bk, stride_bn, N,
-                out_tile, k_idx, acc,
-                boundary=False,
-            )
+            acc = self.k_step(A, B, out_tile, k_idx, acc, boundary=False)
         
         # Handle K tail if needed
         if not self.even_k:
             k_idx = num_k_tiles
-            acc = self.k_step(
-                A, stride_am, stride_ak, M, K,
-                B, stride_bk, stride_bn, N,
-                out_tile, k_idx, acc,
-                boundary=True,
-            )
+            acc = self.k_step(A, B, out_tile, k_idx, acc, boundary=True)
         
         return acc
