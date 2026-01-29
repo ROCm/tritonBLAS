@@ -15,12 +15,14 @@ Operations that work on a single tile (usually the accumulator):
 - convert_dtype: Convert to output dtype
 
 Example usage:
-    from tritonblas.shards.algorithms.binary import multiply_accumulate
-    from tritonblas.shards.algorithms.unary import add_bias, convert_dtype
+    from tritonblas.kernels.stages.algorithms.binary import multiply_accumulate
+    from tritonblas.kernels.stages.algorithms.unary import convert_dtype
+    
+    # Or use the new aggregate-based shards API:
+    from tritonblas.shards import TileContext, MatrixView, GemmConfig
     
     # In your kernel:
     acc = multiply_accumulate(acc, a, b, QUANTIZED, ALLOW_TF32)
-    acc = add_bias(acc, bias_ptr, rm, M, stride_bias, QUANTIZED)
     result = convert_dtype(acc, output_dtype)
 """
 
