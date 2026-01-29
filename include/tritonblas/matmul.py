@@ -409,12 +409,11 @@ def matmul_fp4(
     return c
 
 
-@triton_op("tritonblas::addmm", mutates_args={"out"})
-def addmm(
+@triton_op("tritonblas::_addmm", mutates_args={})
+def _addmm(
     bias: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
-    out: Optional[torch.Tensor] = None,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None
 ) -> torch.Tensor:
@@ -422,11 +421,11 @@ def addmm(
     M, K = a.shape
     _, N = b.shape
 
+    # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
 
-    # Allocate an output tensor iff one is not provided from inputs
-    if out is None:
-        out = a.new_empty(M, N)
+    # Allocate an output tensor
+    out = a.new_empty(M, N)
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid)
@@ -439,8 +438,8 @@ def _setup_context_addmm_backwards(
     inputs: tuple[Any, ...],
     output: Any
 ):
-    bias, a, b, out, enable_streamk, sk_grid = inputs
-    ctx.save_for_backwards(a, b)
+    bias, a, b, enable_streamk, sk_grid = inputs
+    ctx.save_for_backward(a, b)
     ctx.enable_streamk = enable_streamk
     ctx.sk_grid = sk_grid
 
@@ -453,25 +452,79 @@ def _addmm_backwards(
     enable_streamk = ctx.enable_streamk
     sk_grid = ctx.sk_grid
 
-    # Need to make grad_output contiguous?
+    # Make grad_output contiguous
+    grad_output_cont = grad_output.contiguous()
 
     # grad_a = grad_output @ b^T
     b_t = b.T.contiguous()
-    grad_a = matmul(grad_output, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid)
+    grad_a = matmul(grad_output_cont, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid)
 
     # grad_b = a^T @ grad_output
     a_t = a.T.contiguous()
-    grad_b = matmul(a_t, grad_output, enable_streamk=enable_streamk, sk_grid=sk_grid)
+    grad_b = matmul(a_t, grad_output_cont, enable_streamk=enable_streamk, sk_grid=sk_grid)
 
     # grad_bias = sum(grad_output)
     grad_bias = grad_output.sum(dim=0)
 
-    # tuple[bias, a, b, out, enable_streamk, sk_grid]
+    # tuple[bias, a, b, enable_streamk, sk_grid]
     #   First 3 must be in the order that matches addmm()'s forward args
-    #   Last 3 are not part of the gradient and so are None
-    return grad_bias, grad_a, grad_b, None, None, None
+    #   Last 2 are not part of the gradient and so are None
+    return grad_bias, grad_a, grad_b, None, None
 
 
-addmm.register_autograd(_addmm_backwards,
-                        setup_context=_setup_context_addmm_backwards)
+_addmm.register_autograd(_addmm_backwards,
+                         setup_context=_setup_context_addmm_backwards)
+
+
+@triton_op("tritonblas::_addmm_out", mutates_args={'out'})
+def _addmm_out(
+    bias: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+    enable_streamk: Optional[bool] = False,
+    sk_grid: Optional[int] = None
+) -> None:
+    assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    # Query Origami for solution
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+
+    if enable_streamk:
+        streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid)
+    else:
+        persistent_matmul_lt(a, b, out, selector, bias=bias)
+
+    # Custom torch ops cannot return a value which is an alias of an input.  So
+    # even though torch returns a pointer to the out arg when used, we can't.
+    return None
+
+
+def addmm(
+    bias: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+    enable_streamk: Optional[bool] = False,
+    sk_grid: Optional[int] = None
+) -> Optional[torch.Tensor]:
+    # If no out tensor provided - we do the allocation - we support autograd
+    if out is None:
+        return _addmm(bias, a, b, enable_streamk, sk_grid)
+
+    # If out tensor provided - in-place - we do NOT support autograd
+    # Check for autograd conditions (global and per-tensor)
+    if torch.is_grad_enabled() and (
+        bias.requires_grad
+        or a.requires_grad
+        or b.requires_grad
+        or out.requires_grad
+    ):
+        raise RuntimeError(
+            "tritonblas.addmm(): functions with out=... arguments don't support "
+            "automatic differentiation, but one of the arguments requires grad."
+        )
+    return _addmm_out(bias, a, b, out, enable_streamk, sk_grid)
 
