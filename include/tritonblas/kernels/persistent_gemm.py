@@ -38,7 +38,7 @@ def persistent_matmul(
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
-    ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    ALLOW_TF32: tl.constexpr = True,
 ):
     # Stride guards
     tl.assume(stride_am > 0)
@@ -102,7 +102,7 @@ def persistent_matmul(
         
         # Add bias if provided
         if BIAS:
-            bias_vector = tl.load(bias_ptr + row_indices * stride_bias, mask=row_indices < M, other=0.0) #Load Bias vector
+            bias_vector = tl.load(bias_ptr + col_indices * stride_bias, mask=col_indices < N, other=0.0) #Load Bias vector
             # Check if we're using quantized mode based on whether scales were applied
             acc = add_vector(acc, bias_vector, QUANTIZED=(A_scale_ptr is not None)) #Add bias vector to output accumulator
         

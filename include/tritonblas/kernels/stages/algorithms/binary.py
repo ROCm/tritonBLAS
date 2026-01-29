@@ -72,6 +72,6 @@ def add_vector(acc, bias_vector, QUANTIZED: tl.constexpr):
         Accumulator with bias added
     """
     if QUANTIZED:
-        return acc + bias_vector[:, None].to(tl.float32)
+        return acc + bias_vector[None, :].to(tl.float32)
     else:
-        return acc + bias_vector[:, None]
+        return acc + bias_vector[None, :]

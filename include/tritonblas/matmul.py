@@ -131,6 +131,7 @@ def persistent_matmul_lt(
         waves_per_eu=waves_per_eu,
         matrix_instr_nonkdim=mfmaInstrSize,
         kpack=kpack,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
     )
 
     return c

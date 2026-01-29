@@ -82,7 +82,7 @@ def gemm_loop(
     loop_k = tl.cdiv(K, BLOCK_SIZE_K)
     if not EVEN_K:
         loop_k -= 1
-    tl.assume(loop_k > 0)
+    tl.assume(loop_k >= 0)
     
     # Main loop over K dimension
     for k_iter in range(loop_k):
