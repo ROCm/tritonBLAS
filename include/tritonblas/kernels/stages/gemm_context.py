@@ -10,7 +10,6 @@ import triton.language as tl
 from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
-from .tensor_view import tile_ptr
 from .matrix_view import InputView
 from .gemm_config import GemmConfig
 

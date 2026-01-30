@@ -2,7 +2,7 @@ import triton
 import triton.language as tl
 import torch
 
-from tritonblas.shards import (
+from tritonblas.kernels.stages import (
     ScheduleContext, 
     Tile, 
     GemmContext, 
