@@ -3,6 +3,9 @@
 
 """
 GemmContext aggregate for tritonblas shards.
+
+Provides the K-loop execution context for GEMM operations, managing
+the accumulator and iteration over the reduction dimension.
 """
 
 import triton
@@ -23,22 +26,27 @@ class GemmContext:
     - k_step(): Single BLOCK_K iteration (one dot product)
     - k_complete(): Full K loop
     
+    TILE CREATION CONVENTION:
+    -------------------------
+    For A [M, K] and B [K, N]:
+    - A tiles: (pid_m, k_idx) with shape (BLOCK_M, BLOCK_K)
+    - B tiles: (k_idx, pid_n) with shape (BLOCK_K, BLOCK_N)
+    
+    The InputView handles the pointer arithmetic based on its stored layout.
+    
     Example usage (k_complete - simple):
-        # InputView takes: (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
-        # For A [M, K]: K is reduction, M is free
-        # For B [K, N]: K is reduction, N is free
-        tensorA = InputView(A, stride_ak, stride_am, M, K)
-        tensorB = InputView(B, stride_bk, stride_bn, K, N)
+        tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
+        tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
         
-        config = GemmConfig(block_m=128, block_n=256, block_k=64, num_sms=NUM_SMS, even_k=EVEN_K)
+        config = GemmConfig(block_m=128, block_n=256, block_k=64, ...)
         ctx = GemmContext(config)
         acc = ctx.k_complete(tensorA, tensorB, out_tile)
     
     Example usage (k_step - manual loop for advanced control):
-        tensorA = InputView(A, stride_ak, stride_am, M, K)
-        tensorB = InputView(B, stride_bk, stride_bn, K, N)
+        tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
+        tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
         
-        config = GemmConfig(block_m=128, block_n=256, block_k=64, num_sms=NUM_SMS)
+        config = GemmConfig(...)
         ctx = GemmContext(config)
         acc = ctx.init_accumulator()
         
@@ -90,11 +98,12 @@ class GemmContext:
         """
         Execute a single K step (one BLOCK_K iteration).
         
+        Creates tiles for A and B at the given K index and loads them using
+        the InputView's tile_ptrs method (which handles layout internally).
+        
         Args:
-            A: InputView with (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
-               For A [M, K]: rows=M, cols=K, stride_reduction_dim=stride_ak, stride_free_dim=stride_am
-            B: InputView with (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
-               For B [K, N]: rows=K, cols=N, stride_reduction_dim=stride_bk, stride_free_dim=stride_bn
+            A: InputView for matrix A [M, K] with strides already stored
+            B: InputView for matrix B [K, N] with strides already stored
             out_tile: Output Tile with (pid_m, pid_n, BLOCK_M, BLOCK_N)
             k_idx: Current K tile index
             acc: Accumulator to add to
@@ -104,8 +113,8 @@ class GemmContext:
             Updated accumulator tensor [BLOCK_M, BLOCK_N]
         
         Example:
-            A = InputView(A_ptr, stride_ak, stride_am, M, K)
-            B = InputView(B_ptr, stride_bk, stride_bn, K, N)
+            A = make_tensor_view(A_ptr, M, K, stride_am, stride_ak)
+            B = make_tensor_view(B_ptr, K, N, stride_bk, stride_bn)
             acc = ctx.init_accumulator()
             for k_idx in range(num_k_tiles):
                 acc = ctx.k_step(A, B, out_tile, k_idx, acc)
@@ -113,19 +122,25 @@ class GemmContext:
         pid_m = out_tile.pid_m
         pid_n = out_tile.pid_n
         
-        # Create tiles for A and B at this K iteration
+        # ═══════════════════════════════════════════════════════════════════
+        # TILE CREATION: Create tiles for A and B at this K iteration
+        # ═══════════════════════════════════════════════════════════════════
         # A [M, K]: tile at (pid_m, k_idx) with shape (BLOCK_M, BLOCK_K)
         # B [K, N]: tile at (k_idx, pid_n) with shape (BLOCK_K, BLOCK_N)
         a_tile = Tile(pid_m, k_idx, self.config.block_m, self.config.block_k)
         b_tile = Tile(k_idx, pid_n, self.config.block_k, self.config.block_n)
         
-        # Get pointers using tile_ptrs with transpose flag
-        # A: transpose=False (row=free, col=reduction)
-        # B: transpose=True (row=reduction, col=free)
-        a_ptrs, a_mask = A.tile_ptrs(a_tile, transpose=False)
-        b_ptrs, b_mask = B.tile_ptrs(b_tile, transpose=True)
+        # ═══════════════════════════════════════════════════════════════════
+        # POINTER COMPUTATION: InputView handles layout internally
+        # ═══════════════════════════════════════════════════════════════════
+        # The InputView's tile_ptrs method uses its stored stride_row and
+        # stride_col to compute correct pointers for any layout.
+        a_ptrs, a_mask = A.tile_ptrs(a_tile)
+        b_ptrs, b_mask = B.tile_ptrs(b_tile)
         
-        # Load tiles
+        # ═══════════════════════════════════════════════════════════════════
+        # LOAD TILES
+        # ═══════════════════════════════════════════════════════════════════
         if boundary:
             # Use masks for K boundary
             a = tl.load(a_ptrs, mask=a_mask, other=0.0, cache_modifier=self.config.cache_modifier_a)
@@ -134,7 +149,9 @@ class GemmContext:
             a = tl.load(a_ptrs, cache_modifier=self.config.cache_modifier_a)
             b = tl.load(b_ptrs, cache_modifier=self.config.cache_modifier_b)
         
-        # Accumulate
+        # ═══════════════════════════════════════════════════════════════════
+        # ACCUMULATE
+        # ═══════════════════════════════════════════════════════════════════
         if self.config.quantized:
             acc += tl.dot(a, b, out_dtype=tl.int32)
         else:
@@ -152,20 +169,21 @@ class GemmContext:
         """
         Execute the full GEMM K loop and return the accumulator.
         
+        Iterates over all K tiles, loading from A and B using their stored
+        layout information, and accumulates the dot products.
+        
         Args:
-            A: InputView with (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
-               For A [M, K]: rows=M, cols=K, stride_reduction_dim=stride_ak, stride_free_dim=stride_am
-            B: InputView with (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
-               For B [K, N]: rows=K, cols=N, stride_reduction_dim=stride_bk, stride_free_dim=stride_bn
+            A: InputView for matrix A [M, K] with strides already stored
+            B: InputView for matrix B [K, N] with strides already stored
             out_tile: Output Tile with (pid_m, pid_n, BLOCK_M, BLOCK_N)
         
         Returns:
             Accumulator tensor [BLOCK_M, BLOCK_N]
         
         Example:
-            A = InputView(A_ptr, stride_ak, stride_am, M, K)
-            B = InputView(B_ptr, stride_bk, stride_bn, K, N)
-            config = GemmConfig(block_m=128, block_n=256, block_k=64, num_sms=NUM_SMS, even_k=True)
+            A = make_tensor_view(A_ptr, M, K, stride_am, stride_ak)
+            B = make_tensor_view(B_ptr, K, N, stride_bk, stride_bn)
+            config = GemmConfig(block_m=128, block_n=256, block_k=64, ...)
             ctx = GemmContext(config)
             acc = ctx.k_complete(A, B, out_tile)
         """

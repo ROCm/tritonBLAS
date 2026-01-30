@@ -72,11 +72,29 @@ class Tile:
         
         Returns:
             rm, rn, mask: Row indices, column indices, bounds mask
+        
+        Note:
+            The mask is computed from RAW indices before modulo wrapping.
+            This is critical for correct boundary handling - e.g., when K
+            doesn't divide evenly by BLOCK_K, the boundary tile needs proper
+            masking to avoid reading garbage data.
         """
         rm, rn = self.indices()
+        # ═══════════════════════════════════════════════════════════════════
+        # MASK COMPUTATION: Use raw indices BEFORE modulo wrapping
+        # ═══════════════════════════════════════════════════════════════════
+        # The mask must be computed from the original indices to correctly
+        # identify out-of-bounds elements. After modulo, all indices would
+        # be < M and < N, making the mask useless.
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # INDEX WRAPPING: Apply modulo for pointer computation
+        # ═══════════════════════════════════════════════════════════════════
+        # The modulo + max_contiguous optimization helps with memory access
+        # patterns, but must come AFTER mask computation.
         rm = tl.max_contiguous(tl.multiple_of(rm % M, self.block_m), self.block_m)
         rn = tl.max_contiguous(tl.multiple_of(rn % N, self.block_n), self.block_n)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
         return rm, rn, mask
     
     @triton.jit

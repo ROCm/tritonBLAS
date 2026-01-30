@@ -1,3 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+"""
+Persistent GEMM kernel using tritonblas aggregates.
+
+This kernel uses InputView and OutputView aggregates that store matrix layout
+information, enabling clean separation between pointer computation and GEMM logic.
+"""
+
 import triton
 import triton.language as tl
 import torch
@@ -6,9 +16,9 @@ from tritonblas.kernels.stages import (
     ScheduleContext, 
     Tile, 
     GemmContext, 
-    InputView, 
-    OutputView,
     GemmConfig,
+    make_input_view,
+    make_output_view,
 )
 
 
@@ -24,12 +34,12 @@ def persistent_matmul(
     N,
     K,
     stride_am,
+    stride_ak,
+    stride_bk,
     stride_bn,
     stride_cm,
     stride_cn,
     stride_bias,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
     # Performance parameters (used to construct GemmConfig on device)
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -48,15 +58,17 @@ def persistent_matmul(
     """
     Persistent GEMM kernel using GemmConfig aggregate.
     
-    GemmConfig is constructed on-device from the constexpr parameters,
-    then passed to ScheduleContext and GemmContext constructors.
+    Matrix views are created using factory functions that handle any memory layout.
+    Just describe your matrices and their strides - no layout flags needed.
     
-    GemmConfig bundles all GEMM parameters:
-    - block_m, block_n, block_k
-    - num_sms, num_xcds
-    - group_size_m, chunk_size
-    - cache_modifier_a, cache_modifier_b
-    - acc_dtype, allow_tf32, even_k, quantized
+    STRIDE PARAMETERS:
+    ------------------
+    - stride_am: A's stride when moving one M row down
+    - stride_ak: A's stride in K dimension
+    - stride_bk: B's stride in K dimension
+    - stride_bn: B's stride when moving one N column right
+    - stride_cm: C's stride when moving one M row down
+    - stride_cn: C's stride in N dimension
     """
     # Stride guards
     tl.assume(stride_am > 0)
@@ -69,19 +81,17 @@ def persistent_matmul(
     # Determine accumulator dtype based on output type
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
     
-    # ============================================================
-    # Create matrix views
-    # InputView takes: (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
-    # For A [M, K]: K is reduction, M is free
-    # For B [K, N]: K is reduction, N is free
-    # ============================================================
-    tensorA = InputView(A, stride_ak, stride_am, M, K)
-    tensorB = InputView(B, stride_bk, stride_bn, K, N)
-    tensorC = OutputView(C, stride_cm, stride_cn, M, N)
+    # ════════════════════════════════════════════════════════════════════════
+    # CREATE MATRIX VIEWS
+    # ════════════════════════════════════════════════════════════════════════
+    # Factory functions handle stride type coercion automatically
+    tensorA = make_input_view(A, M, K, stride_am, stride_ak)
+    tensorB = make_input_view(B, K, N, stride_bk, stride_bn)
+    tensorC = make_output_view(C, M, N, stride_cm, stride_cn)
     
-    # ============================================================
-    # Construct GemmConfig aggregate on device with ALL parameters
-    # ============================================================
+    # ════════════════════════════════════════════════════════════════════════
+    # CONSTRUCT GEMM CONFIG
+    # ════════════════════════════════════════════════════════════════════════
     config = GemmConfig(
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
         NUM_SMS, NUM_XCDS,
@@ -90,24 +100,23 @@ def persistent_matmul(
         acc_dtype, ALLOW_TF32, EVEN_K, QUANTIZED,
     )
     
-    # ============================================================
-    # Create schedule context to give user control over outer loop scheduling
-    # ============================================================
+    # ════════════════════════════════════════════════════════════════════════
+    # CREATE SCHEDULE AND GEMM CONTEXTS
+    # ════════════════════════════════════════════════════════════════════════
     sched = ScheduleContext(M, N, K, config)
-    # ============================================================
-    # Create GEMM context to handle the K-loop iteration and accumulation
-    # ============================================================
     ctx = GemmContext(config)
     
-    # ============================================================
-    # Persistent loop: process multiple tiles per workgroup
-    # ============================================================
+    # ════════════════════════════════════════════════════════════════════════
+    # PERSISTENT LOOP: Process multiple tiles per workgroup
+    # ════════════════════════════════════════════════════════════════════════
     start_tile, total_tiles, stride = sched.persistent_tile_range()
     for tile_id in range(start_tile, total_tiles, stride):
         pid_m, pid_n = sched.get_tile(tile_id)
         out_tile = Tile(pid_m, pid_n, config.block_m, config.block_n)
         
-        # Compute GEMM for this tile
+        # ════════════════════════════════════════════════════════════════════
+        # COMPUTE GEMM: K-loop handled by GemmContext
+        # ════════════════════════════════════════════════════════════════════
         acc = ctx.k_complete(tensorA, tensorB, out_tile)
         
         # Apply quantization scales if provided
@@ -118,7 +127,9 @@ def persistent_matmul(
         if BIAS:
             acc = out_tile.bias(acc, bias_ptr, M, stride_bias)
         
-        # Convert to output dtype and store
+        # ════════════════════════════════════════════════════════════════════
+        # STORE RESULT
+        # ════════════════════════════════════════════════════════════════════
         result = acc.to(C.type.element_ty)
         c_ptrs, c_mask = tensorC.tile_ptrs(out_tile)
         tl.store(c_ptrs, result, mask=c_mask)

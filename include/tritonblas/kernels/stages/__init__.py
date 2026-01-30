@@ -6,25 +6,26 @@ Key abstractions:
 - ScheduleContext: Unified scheduling with persistent_tile_range()/get_tile()
 - GemmContext: Accumulator context with k_complete() method
 - InputView, OutputView: Matrix views with tile_ptrs() for memory access
+- make_tensor_view, make_output_view: Factory functions to create views
 - Tile: 2D tile with coordinates (pid_m, pid_n) and shape (block_m, block_n)
 
 Example usage:
     from tritonblas.kernels.stages import (
         GemmConfig, ScheduleContext, GemmContext, 
-        Tile, InputView, OutputView
+        Tile, make_tensor_view, make_output_view
     )
 
     @triton.jit
-    def kernel(A, B, C, M, N, K, stride_am, stride_bn, stride_cm, stride_cn, 
-               stride_ak: tl.constexpr, stride_bk: tl.constexpr,
+    def kernel(A, B, C, M, N, K, 
+               stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
                BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
                GROUP_SIZE_M: tl.constexpr, NUM_SMS: tl.constexpr, NUM_XCDS: tl.constexpr,
                EVEN_K: tl.constexpr, ...):
         
-        # Create matrix views
-        tensorA = InputView(A, stride_ak, stride_am, M, K)
-        tensorB = InputView(B, stride_bk, stride_bn, K, N)
-        tensorC = OutputView(C, stride_cm, stride_cn, M, N)
+        # Create matrix views - just describe your matrices
+        tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
+        tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
+        tensorC = make_output_view(C, M, N, stride_cm, stride_cn)
         
         # Construct GemmConfig on device with ALL parameters
         config = GemmConfig(
@@ -53,7 +54,7 @@ from .tile import Tile
 from .gemm_context import GemmContext
 from .gemm_config import GemmConfig
 from .schedule import ScheduleContext
-from .matrix_view import InputView, OutputView
+from .matrix_view import InputView, OutputView, make_input_view, make_tensor_view, make_output_view
 
 # Grid utilities (used by streamk_gemm, fp4_matmul, persistent_gemm_monolithic)
 from .grid import chiplet_transform, chiplet_transform_chunked
@@ -66,6 +67,10 @@ __all__ = [
     'ScheduleContext',
     'InputView',
     'OutputView',
+    # Factory functions
+    'make_input_view',
+    'make_tensor_view',
+    'make_output_view',
     # Grid utilities
     'chiplet_transform',
     'chiplet_transform_chunked',
