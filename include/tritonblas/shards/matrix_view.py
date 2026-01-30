@@ -8,17 +8,21 @@ Provides typed matrix view classes with load/store methods:
 - InputView: Generic input matrix with load() method
 - OutputView: Generic output matrix with store() method
 
+InputView takes strides in order: (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
+- The reduction dimension stride is constexpr for vectorization
+- The free dimension stride is runtime
+
 Usage:
-    A = InputView(A_ptr, stride_am, stride_ak, M, K)  # A [M, K]
-    B = InputView(B_ptr, stride_bk, stride_bn, K, N)  # B [K, N]
-    C = OutputView(C_ptr, stride_cm, stride_cn, M, N) # C [M, N]
+    # For A [M, K]: K is reduction, M is free
+    A = InputView(A_ptr, stride_ak, stride_am, M, K)
     
-    a_tile = Tile(pid_m, k_idx, BLOCK_M, BLOCK_K)
-    b_tile = Tile(k_idx, pid_n, BLOCK_K, BLOCK_N)
+    # For B [K, N]: K is reduction, N is free  
+    B = InputView(B_ptr, stride_bk, stride_bn, K, N)
+    
+    # Output uses row/col strides (both runtime)
+    C = OutputView(C_ptr, stride_cm, stride_cn, M, N)
+    
     out_tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
-    
-    a = A.load(a_tile)
-    b = B.load(b_tile)
     C.store(result, out_tile)
 """
 
@@ -35,20 +39,22 @@ class InputView:
     Generic input tensor descriptor with load() method.
     
     Can be used for any 2D input matrix (A, B, etc.).
-    Uses constexpr stride_row for vectorization efficiency.
+    Uses constexpr stride for the reduction dimension for vectorization efficiency.
+    
+    Constructor: InputView(ptr, stride_reduction_dim, stride_free_dim, rows, cols)
     
     Fields:
     - ptr: Pointer to matrix data
-    - stride_row: Stride in row dimension (constexpr for vectorization)
-    - stride_col: Stride in column dimension (runtime tensor)
+    - stride_reduction_dim: Stride in reduction dimension (constexpr for vectorization)
+    - stride_free_dim: Stride in free dimension (runtime tensor)
     - rows, cols: Matrix dimensions
     
     Example:
-        A = InputView(A_ptr, stride_am, stride_ak, M, K)
-        B = InputView(B_ptr, stride_bk, stride_bn, K, N)
+        # For A [M, K]: K is reduction, M is free
+        A = InputView(A_ptr, stride_ak, stride_am, M, K)
         
-        a_tile = Tile(pid_m, k_idx, BLOCK_M, BLOCK_K)
-        data = A.load(a_tile)
+        # For B [K, N]: K is reduction, N is free
+        B = InputView(B_ptr, stride_bk, stride_bn, K, N)
     """
     ptr: tl.tensor
     stride_reduction_dim: tl.constexpr
@@ -75,34 +81,47 @@ class InputView:
         self.cols = cols
     
     @triton.jit
-    def tile_ptrs(self, tile: Tile):
+    def tile_ptrs(self, tile: Tile, transpose: tl.constexpr = False):
         """
         Get pointer array and mask for a tile.
         
+        For GEMM input matrices:
+        - A [M, K]: rows=M (free), cols=K (reduction) -> transpose=False
+          - ptrs = ptr + row * stride_free_dim + col * stride_reduction_dim
+        - B [K, N]: rows=K (reduction), cols=N (free) -> transpose=True
+          - ptrs = ptr + row * stride_reduction_dim + col * stride_free_dim
+        
         Args:
             tile: Tile with (pid_row, pid_col, BLOCK_ROW, BLOCK_COL)
+            transpose: If True, swap stride application (for B-style access)
         
         Returns:
             ptrs, mask: Pointer array and bounds mask
         """
         r_row, r_col, mask = tile.layout(self.rows, self.cols)
-        ptrs = self.ptr + r_row[:, None] * self.stride_row + r_col[None, :] * self.stride_col
+        if transpose:
+            # B-style: row uses reduction_dim, col uses free_dim
+            ptrs = self.ptr + r_row[:, None] * self.stride_reduction_dim + r_col[None, :] * self.stride_free_dim
+        else:
+            # A-style: row uses free_dim, col uses reduction_dim
+            ptrs = self.ptr + r_row[:, None] * self.stride_free_dim + r_col[None, :] * self.stride_reduction_dim
         return ptrs, mask
     
     @triton.jit
-    def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = ".cg"):
+    def load(self, tile: Tile, boundary: tl.constexpr = False, transpose: tl.constexpr = False, cache_modifier: tl.constexpr = ".cg"):
         """
         Load a tile from this matrix.
         
         Args:
             tile: Tile with coordinates and shape
             boundary: Whether to apply boundary masking
+            transpose: If True, swap stride application (for B-style access)
             cache_modifier: Cache modifier for load
         
         Returns:
             Loaded tile data
         """
-        ptrs, mask = self.tile_ptrs(tile)
+        ptrs, mask = self.tile_ptrs(tile, transpose=transpose)
         if boundary:
             return tl.load(ptrs, mask=mask, other=0.0, cache_modifier=cache_modifier)
         else:
@@ -130,7 +149,7 @@ class OutputView:
     """
     ptr: tl.tensor
     stride_row: tl.tensor
-    stride_col: tl.tensor
+    stride_col: tl.constexpr
     rows: tl.tensor
     cols: tl.tensor
     
@@ -148,7 +167,7 @@ class OutputView:
         """
         self.ptr = ptr
         self.stride_row = stride_row
-        self.stride_col = stride_col
+        self.stride_col = tl.constexpr(stride_col)
         self.rows = rows
         self.cols = cols
     

@@ -12,6 +12,7 @@ from triton.language.core import _aggregate as aggregate
 from .tile import Tile
 from .tensor_view import tile_ptr
 from .matrix_view import InputView
+from .gemm_config import GemmConfig
 
 
 @aggregate
@@ -24,71 +25,45 @@ class GemmContext:
     - k_complete(): Full K loop
     
     Example usage (k_complete - simple):
-        ctx = GemmContext(BLOCK_M, BLOCK_N, BLOCK_K, even_k=EVEN_K)
-        acc = ctx.k_complete(
-            A, stride_am, stride_ak, M, K,
-            B, stride_bk, stride_bn, N,
-            out_tile
-        )
+        # InputView takes: (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
+        # For A [M, K]: K is reduction, M is free
+        # For B [K, N]: K is reduction, N is free
+        tensorA = InputView(A, stride_ak, stride_am, M, K)
+        tensorB = InputView(B, stride_bk, stride_bn, K, N)
+        
+        config = GemmConfig(block_m=128, block_n=256, block_k=64, num_sms=NUM_SMS, even_k=EVEN_K)
+        ctx = GemmContext(config)
+        acc = ctx.k_complete(tensorA, tensorB, out_tile)
     
     Example usage (k_step - manual loop for advanced control):
-        ctx = GemmContext(BLOCK_M, BLOCK_N, BLOCK_K)
+        tensorA = InputView(A, stride_ak, stride_am, M, K)
+        tensorB = InputView(B, stride_bk, stride_bn, K, N)
+        
+        config = GemmConfig(block_m=128, block_n=256, block_k=64, num_sms=NUM_SMS)
+        ctx = GemmContext(config)
         acc = ctx.init_accumulator()
         
         for k_idx in range(num_k_tiles):
-            acc = ctx.k_step(
-                A, stride_am, stride_ak, M, K,
-                B, stride_bk, stride_bn, N,
-                out_tile, k_idx, acc
-            )
+            acc = ctx.k_step(tensorA, tensorB, out_tile, k_idx, acc)
     """
     
-    block_m: tl.constexpr
-    block_n: tl.constexpr
-    block_k: tl.constexpr
-    acc_dtype: tl.constexpr
-    allow_tf32: tl.constexpr
-    even_k: tl.constexpr
-    quantized: tl.constexpr
-    cache_modifier_a: tl.constexpr
-    cache_modifier_b: tl.constexpr
+    # Store the config (contains all parameters)
+    config: GemmConfig
     
     @triton.constexpr_function
-    def __init__(
-        self,
-        block_m,
-        block_n,
-        block_k,
-        acc_dtype=tl.float32,
-        allow_tf32=True,
-        even_k=True,
-        quantized=False,
-        cache_modifier_a=".cg",
-        cache_modifier_b=".cg",
-    ):
+    def __init__(self, config: GemmConfig):
         """
-        Create a GEMM context.
+        Create a GEMM context from a GemmConfig.
+        
+        All parameters come from the config:
+        - block_m, block_n, block_k
+        - cache_modifier_a, cache_modifier_b
+        - acc_dtype, allow_tf32, even_k, quantized
         
         Args:
-            block_m: Block size M (constexpr)
-            block_n: Block size N (constexpr)
-            block_k: Block size K (constexpr)
-            acc_dtype: Accumulator dtype (default: float32)
-            allow_tf32: Allow TF32 for matmul (default: True)
-            even_k: Whether K is evenly divisible by BLOCK_K (default: True)
-            quantized: Use int32 accumulation for quantized inputs (default: False)
-            cache_modifier_a: Cache modifier for A loads (default: ".cg")
-            cache_modifier_b: Cache modifier for B loads (default: ".cg")
+            config: GemmConfig with all GEMM parameters
         """
-        self.block_m = tl.constexpr(block_m)
-        self.block_n = tl.constexpr(block_n)
-        self.block_k = tl.constexpr(block_k)
-        self.acc_dtype = tl.constexpr(acc_dtype)
-        self.allow_tf32 = tl.constexpr(allow_tf32)
-        self.even_k = tl.constexpr(even_k)
-        self.quantized = tl.constexpr(quantized)
-        self.cache_modifier_a = tl.constexpr(cache_modifier_a)
-        self.cache_modifier_b = tl.constexpr(cache_modifier_b)
+        self.config = config
     
     @triton.jit
     def init_accumulator(self):
@@ -101,7 +76,7 @@ class GemmContext:
         Example:
             acc = ctx.init_accumulator()
         """
-        return tl.zeros((self.block_m, self.block_n), dtype=self.acc_dtype)
+        return tl.zeros((self.config.block_m, self.config.block_n), dtype=self.config.acc_dtype)
     
     @triton.jit
     def k_step(
@@ -117,8 +92,10 @@ class GemmContext:
         Execute a single K step (one BLOCK_K iteration).
         
         Args:
-            A: InputView with ptr, stride_m, stride_k, M, K
-            B: InputView with ptr, stride_k, stride_n, K, N
+            A: InputView with (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
+               For A [M, K]: rows=M, cols=K, stride_reduction_dim=stride_ak, stride_free_dim=stride_am
+            B: InputView with (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
+               For B [K, N]: rows=K, cols=N, stride_reduction_dim=stride_bk, stride_free_dim=stride_bn
             out_tile: Output Tile with (pid_m, pid_n, BLOCK_M, BLOCK_N)
             k_idx: Current K tile index
             acc: Accumulator to add to
@@ -128,7 +105,7 @@ class GemmContext:
             Updated accumulator tensor [BLOCK_M, BLOCK_N]
         
         Example:
-            A = InputView(A_ptr, stride_am, stride_ak, M, K)
+            A = InputView(A_ptr, stride_ak, stride_am, M, K)
             B = InputView(B_ptr, stride_bk, stride_bn, K, N)
             acc = ctx.init_accumulator()
             for k_idx in range(num_k_tiles):
@@ -137,35 +114,32 @@ class GemmContext:
         pid_m = out_tile.pid_m
         pid_n = out_tile.pid_n
         
-        # Row and column indices for output tile
-        rm = pid_m * self.block_m + tl.arange(0, self.block_m)
-        rn = pid_n * self.block_n + tl.arange(0, self.block_n)
-        rm = tl.max_contiguous(tl.multiple_of(rm % A.rows, self.block_m), self.block_m)
-        rn = tl.max_contiguous(tl.multiple_of(rn % B.cols, self.block_n), self.block_n)
+        # Create tiles for A and B at this K iteration
+        # A [M, K]: tile at (pid_m, k_idx) with shape (BLOCK_M, BLOCK_K)
+        # B [K, N]: tile at (k_idx, pid_n) with shape (BLOCK_K, BLOCK_N)
+        a_tile = Tile(pid_m, k_idx, self.config.block_m, self.config.block_k)
+        b_tile = Tile(k_idx, pid_n, self.config.block_k, self.config.block_n)
         
-        # K indices for this iteration
-        rk = k_idx * self.block_k + tl.arange(0, self.block_k)
-        
-        # Compute pointers for A [M, K] and B [K, N]
-        # A: stride_row=stride_m, stride_col=stride_k
-        # B: stride_row=stride_k, stride_col=stride_n
-        a_ptrs = A.ptr + rm[:, None] * A.stride_free_dim + rk[None, :] * A.stride_reduction_dim
-        b_ptrs = B.ptr + rk[:, None] * B.stride_reduction_dim + rn[None, :] * B.stride_free_dim
+        # Get pointers using tile_ptrs with transpose flag
+        # A: transpose=False (row=free, col=reduction)
+        # B: transpose=True (row=reduction, col=free)
+        a_ptrs, a_mask = A.tile_ptrs(a_tile, transpose=False)
+        b_ptrs, b_mask = B.tile_ptrs(b_tile, transpose=True)
         
         # Load tiles
         if boundary:
-            # For K boundary, only mask the K dimension
-            a = tl.load(a_ptrs, mask=rk[None, :] < A.cols, other=0.0, cache_modifier=self.cache_modifier_a)
-            b = tl.load(b_ptrs, mask=rk[:, None] < B.rows, other=0.0, cache_modifier=self.cache_modifier_b)
+            # Use masks for K boundary
+            a = tl.load(a_ptrs, mask=a_mask, other=0.0, cache_modifier=self.config.cache_modifier_a)
+            b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=self.config.cache_modifier_b)
         else:
-            a = tl.load(a_ptrs, cache_modifier=self.cache_modifier_a)
-            b = tl.load(b_ptrs, cache_modifier=self.cache_modifier_b)
+            a = tl.load(a_ptrs, cache_modifier=self.config.cache_modifier_a)
+            b = tl.load(b_ptrs, cache_modifier=self.config.cache_modifier_b)
         
         # Accumulate
-        if self.quantized:
+        if self.config.quantized:
             acc += tl.dot(a, b, out_dtype=tl.int32)
         else:
-            acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
+            acc += tl.dot(a, b, allow_tf32=self.config.allow_tf32)
         
         return acc
     
@@ -180,25 +154,28 @@ class GemmContext:
         Execute the full GEMM K loop and return the accumulator.
         
         Args:
-            A: InputView with ptr, stride_row, stride_col, rows, cols (for A: rows=M, cols=K)
-            B: InputView with ptr, stride_row, stride_col, rows, cols (for B: rows=K, cols=N)
+            A: InputView with (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
+               For A [M, K]: rows=M, cols=K, stride_reduction_dim=stride_ak, stride_free_dim=stride_am
+            B: InputView with (ptr, stride_reduction_dim, stride_free_dim, rows, cols)
+               For B [K, N]: rows=K, cols=N, stride_reduction_dim=stride_bk, stride_free_dim=stride_bn
             out_tile: Output Tile with (pid_m, pid_n, BLOCK_M, BLOCK_N)
         
         Returns:
             Accumulator tensor [BLOCK_M, BLOCK_N]
         
         Example:
-            A = InputView(A_ptr, stride_am, stride_ak, M, K)
+            A = InputView(A_ptr, stride_ak, stride_am, M, K)
             B = InputView(B_ptr, stride_bk, stride_bn, K, N)
-            ctx = GemmContext(BLOCK_M, BLOCK_N, BLOCK_K, even_k=True)
+            config = GemmConfig(block_m=128, block_n=256, block_k=64, num_sms=NUM_SMS, even_k=True)
+            ctx = GemmContext(config)
             acc = ctx.k_complete(A, B, out_tile)
         """
         # Initialize accumulator
         acc = self.init_accumulator()
         
         # Compute K loop bounds (K dimension is A.cols or B.rows)
-        num_k_tiles = tl.cdiv(A.cols, self.block_k)
-        if not self.even_k:
+        num_k_tiles = tl.cdiv(A.cols, self.config.block_k)
+        if not self.config.even_k:
             num_k_tiles -= 1
         tl.assume(num_k_tiles > 0)
         
@@ -207,7 +184,7 @@ class GemmContext:
             acc = self.k_step(A, B, out_tile, k_idx, acc, boundary=False)
         
         # Handle K tail if needed
-        if not self.even_k:
+        if not self.config.even_k:
             k_idx = num_k_tiles
             acc = self.k_step(A, B, out_tile, k_idx, acc, boundary=True)
         
