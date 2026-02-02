@@ -110,7 +110,7 @@ class OrigamiMatmulSelector:
         else:
             self._grid = self._hardware.N_CU
 
-        self._xcc_workgroup_mapping, self._workgroup_mapping = (
+        _mapping_mode, self._xcc_workgroup_mapping, self._workgroup_mapping = (
             origami.select_workgroup_mapping(
                 self._problem, self._hardware, self._result.config, self._grid
             )
