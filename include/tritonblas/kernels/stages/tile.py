@@ -17,15 +17,25 @@ class Tile:
     
     Stores runtime coordinates (pid_m, pid_n) and compile-time block sizes.
     
-    Example usage:
-        # Output tile
+    Use ScheduleContext methods to create tiles:
+        # From linear tile_id
+        out_tile = sched.get_tile_from_idx(tile_id)
+        
+        # From 2D coordinates
+        out_tile = sched.get_tile_from_coord(pid_m, pid_n)
+        
+        # Direct construction is also supported
         out_tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
+    
+    Example usage:
+        # Output tile from scheduler
+        out_tile = sched.get_tile_from_idx(tile_id)
         
         # Input A tile at k offset
-        a_tile = Tile(pid_m, k // BLOCK_K, BLOCK_M, BLOCK_K)
+        a_tile = sched.get_tile_from_coord(pid_m, k // BLOCK_K)
         
         # Input B tile at k offset  
-        b_tile = Tile(k // BLOCK_K, pid_n, BLOCK_K, BLOCK_N)
+        b_tile = sched.get_tile_from_coord(k // BLOCK_K, pid_n)
     """
     
     pid_m: tl.tensor  # Tile coordinate in M dimension

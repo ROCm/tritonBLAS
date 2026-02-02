@@ -5,7 +5,8 @@
 GemmContext aggregate for tritonblas shards.
 
 Provides the K-loop execution context for GEMM operations, managing
-the accumulator and iteration over the reduction dimension.
+the accumulator and iteration over the reduction dimension. Also bundles
+all GEMM configuration parameters (block sizes, scheduling, computation options).
 """
 
 import triton
@@ -14,17 +15,23 @@ from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
 from .matrix_view import InputView
-from .gemm_config import GemmConfig
 
 
 @aggregate
 class GemmContext:
     """
-    GEMM accumulator context with all configuration options.
+    GEMM context with all configuration parameters and accumulator management.
+    
+    Bundles together all compile-time GEMM parameters:
+    - Block sizes (M, N, K)
+    - Hardware configuration (NUM_SMS, NUM_XCDS)
+    - Scheduling parameters (GROUP_SIZE_M, CHUNK_SIZE)
+    - Cache modifiers
+    - Computation options (acc_dtype, allow_tf32, even_k, quantized)
     
     Provides two execution modes:
-    - k_step(): Single BLOCK_K iteration (one dot product)
-    - k_complete(): Full K loop
+    - reduce_tile(): Single BLOCK_K iteration (one dot product)
+    - reduce_axis(): Full K loop
     
     TILE CREATION CONVENTION:
     -------------------------
@@ -34,43 +41,93 @@ class GemmContext:
     
     The InputView handles the pointer arithmetic based on its stored layout.
     
-    Example usage (k_complete - simple):
+    Example usage:
         tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
         tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
         
-        config = GemmConfig(block_m=128, block_n=256, block_k=64, ...)
-        ctx = GemmContext(config)
-        acc = ctx.k_complete(tensorA, tensorB, out_tile)
-    
-    Example usage (k_step - manual loop for advanced control):
-        tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
-        tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
+        ctx = GemmContext(
+            block_m=128, block_n=256, block_k=64,
+            num_sms=NUM_SMS, num_xcds=NUM_XCDS,
+            group_size_m=8, even_k=EVEN_K,
+        )
         
-        config = GemmConfig(...)
-        ctx = GemmContext(config)
-        acc = ctx.init_accumulator()
+        # Use in ScheduleContext
+        sched = ScheduleContext(M, N, K, ctx)
         
-        for k_idx in range(num_k_tiles):
-            acc = ctx.k_step(tensorA, tensorB, out_tile, k_idx, acc)
+        acc = ctx.reduce_axis(tensorA, tensorB, out_tile)
     """
     
-    # Store the config (contains all parameters)
-    config: GemmConfig
+    # Block sizes
+    block_m: tl.constexpr
+    block_n: tl.constexpr
+    block_k: tl.constexpr
+    
+    # Hardware config
+    num_sms: tl.constexpr
+    num_xcds: tl.constexpr
+    
+    # Scheduling
+    group_size_m: tl.constexpr
+    chunk_size: tl.constexpr
+    
+    # Cache modifiers
+    cache_modifier_a: tl.constexpr
+    cache_modifier_b: tl.constexpr
+    
+    # Computation options
+    acc_dtype: tl.constexpr
+    allow_tf32: tl.constexpr
+    even_k: tl.constexpr
+    quantized: tl.constexpr
     
     @triton.constexpr_function
-    def __init__(self, config: GemmConfig):
+    def __init__(
+        self,
+        block_m,
+        block_n,
+        block_k,
+        num_sms,
+        num_xcds=1,
+        group_size_m=8,
+        chunk_size=1,
+        cache_modifier_a=".cg",
+        cache_modifier_b=".cg",
+        acc_dtype=tl.float32,
+        allow_tf32=True,
+        even_k=True,
+        quantized=False,
+    ):
         """
-        Create a GEMM context from a GemmConfig.
-        
-        All parameters come from the config:
-        - block_m, block_n, block_k
-        - cache_modifier_a, cache_modifier_b
-        - acc_dtype, allow_tf32, even_k, quantized
+        Create a GEMM context with all configuration parameters.
         
         Args:
-            config: GemmConfig with all GEMM parameters
+            block_m: Block size M (constexpr)
+            block_n: Block size N (constexpr)
+            block_k: Block size K (constexpr)
+            num_sms: Number of SMs/CUs (constexpr)
+            num_xcds: Number of XCDs for chiplet transform (default: 1)
+            group_size_m: Group size for tile scheduling (default: 8)
+            chunk_size: Chunk size for chiplet scheduling (default: 1)
+            cache_modifier_a: Cache modifier for A loads (default: ".cg")
+            cache_modifier_b: Cache modifier for B loads (default: ".cg")
+            acc_dtype: Accumulator dtype (default: tl.float32)
+            allow_tf32: Allow TF32 for matmul (default: True)
+            even_k: Whether K is evenly divisible by BLOCK_K (default: True)
+            quantized: Use int32 accumulation for quantized inputs (default: False)
         """
-        self.config = config
+        self.block_m = tl.constexpr(block_m)
+        self.block_n = tl.constexpr(block_n)
+        self.block_k = tl.constexpr(block_k)
+        self.num_sms = tl.constexpr(num_sms)
+        self.num_xcds = tl.constexpr(num_xcds)
+        self.group_size_m = tl.constexpr(group_size_m)
+        self.chunk_size = tl.constexpr(chunk_size)
+        self.cache_modifier_a = tl.constexpr(cache_modifier_a)
+        self.cache_modifier_b = tl.constexpr(cache_modifier_b)
+        self.acc_dtype = tl.constexpr(acc_dtype)
+        self.allow_tf32 = tl.constexpr(allow_tf32)
+        self.even_k = tl.constexpr(even_k)
+        self.quantized = tl.constexpr(quantized)
     
     @triton.jit
     def init_accumulator(self):
@@ -83,10 +140,10 @@ class GemmContext:
         Example:
             acc = ctx.init_accumulator()
         """
-        return tl.zeros((self.config.block_m, self.config.block_n), dtype=self.config.acc_dtype)
+        return tl.zeros((self.block_m, self.block_n), dtype=self.acc_dtype)
     
     @triton.jit
-    def k_step(
+    def reduce_tile(
         self,
         A: InputView,
         B: InputView,
@@ -117,7 +174,7 @@ class GemmContext:
             B = make_tensor_view(B_ptr, K, N, stride_bk, stride_bn)
             acc = ctx.init_accumulator()
             for k_idx in range(num_k_tiles):
-                acc = ctx.k_step(A, B, out_tile, k_idx, acc)
+                acc = ctx.reduce_tile(A, B, out_tile, k_idx, acc)
         """
         pid_m = out_tile.pid_m
         pid_n = out_tile.pid_n
@@ -127,8 +184,8 @@ class GemmContext:
         # ═══════════════════════════════════════════════════════════════════
         # A [M, K]: tile at (pid_m, k_idx) with shape (BLOCK_M, BLOCK_K)
         # B [K, N]: tile at (k_idx, pid_n) with shape (BLOCK_K, BLOCK_N)
-        a_tile = Tile(pid_m, k_idx, self.config.block_m, self.config.block_k)
-        b_tile = Tile(k_idx, pid_n, self.config.block_k, self.config.block_n)
+        a_tile = Tile(pid_m, k_idx, self.block_m, self.block_k)
+        b_tile = Tile(k_idx, pid_n, self.block_k, self.block_n)
         
         # ═══════════════════════════════════════════════════════════════════
         # POINTER COMPUTATION: InputView handles layout internally
@@ -143,24 +200,24 @@ class GemmContext:
         # ═══════════════════════════════════════════════════════════════════
         if boundary:
             # Use masks for K boundary
-            a = tl.load(a_ptrs, mask=a_mask, other=0.0, cache_modifier=self.config.cache_modifier_a)
-            b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=self.config.cache_modifier_b)
+            a = tl.load(a_ptrs, mask=a_mask, other=0.0, cache_modifier=self.cache_modifier_a)
+            b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=self.cache_modifier_b)
         else:
-            a = tl.load(a_ptrs, cache_modifier=self.config.cache_modifier_a)
-            b = tl.load(b_ptrs, cache_modifier=self.config.cache_modifier_b)
+            a = tl.load(a_ptrs, cache_modifier=self.cache_modifier_a)
+            b = tl.load(b_ptrs, cache_modifier=self.cache_modifier_b)
         
         # ═══════════════════════════════════════════════════════════════════
         # ACCUMULATE
         # ═══════════════════════════════════════════════════════════════════
-        if self.config.quantized:
+        if self.quantized:
             acc += tl.dot(a, b, out_dtype=tl.int32)
         else:
-            acc += tl.dot(a, b, allow_tf32=self.config.allow_tf32)
+            acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
         
         return acc
     
     @triton.jit
-    def k_complete(
+    def reduce_axis(
         self,
         A: InputView,
         B: InputView,
@@ -183,26 +240,25 @@ class GemmContext:
         Example:
             A = make_tensor_view(A_ptr, M, K, stride_am, stride_ak)
             B = make_tensor_view(B_ptr, K, N, stride_bk, stride_bn)
-            config = GemmConfig(block_m=128, block_n=256, block_k=64, ...)
-            ctx = GemmContext(config)
-            acc = ctx.k_complete(A, B, out_tile)
+            ctx = GemmContext(block_m=128, block_n=256, block_k=64, ...)
+            acc = ctx.reduce_axis(A, B, out_tile)
         """
         # Initialize accumulator
         acc = self.init_accumulator()
         
         # Compute K loop bounds (K dimension is A.cols or B.rows)
-        num_k_tiles = tl.cdiv(A.cols, self.config.block_k)
-        if not self.config.even_k:
+        num_k_tiles = tl.cdiv(A.cols, self.block_k)
+        if not self.even_k:
             num_k_tiles -= 1
         tl.assume(num_k_tiles > 0)
         
         # Main K loop
         for k_idx in range(num_k_tiles):
-            acc = self.k_step(A, B, out_tile, k_idx, acc, boundary=False)
+            acc = self.reduce_tile(A, B, out_tile, k_idx, acc, boundary=False)
         
         # Handle K tail if needed
-        if not self.config.even_k:
+        if not self.even_k:
             k_idx = num_k_tiles
-            acc = self.k_step(A, B, out_tile, k_idx, acc, boundary=True)
+            acc = self.reduce_tile(A, B, out_tile, k_idx, acc, boundary=True)
         
         return acc
