@@ -1,39 +1,42 @@
 import triton
 import triton.language as tl
 
+
 @triton.jit()
 def chiplet_transform(
     pid,
     num_workgroups: tl.constexpr,
     num_xcds: tl.constexpr
 ):
-    xcd = pid % num_xcds 
-    pos_in_xcd = pid // num_xcds 
-    min_per_xcd = num_workgroups // num_xcds 
-    extra_sms = num_workgroups % num_xcds 
+    xcd = pid % num_xcds
+    pos_in_xcd = pid // num_xcds
+    min_per_xcd = num_workgroups // num_xcds
+    extra_sms = num_workgroups % num_xcds
     offset = xcd * min_per_xcd + min(xcd, extra_sms)
     return offset + pos_in_xcd
 
+
 @triton.jit()
 def chiplet_transform_chunked(
-    pid, 
-    num_workgroups: tl.constexpr, 
-    num_xcds: tl.constexpr, 
+    pid,
+    num_workgroups: tl.constexpr,
+    num_xcds: tl.constexpr,
     chunk_size: tl.constexpr
 ):
     if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
         # Outside of the contiguous chunked region, leave unchanged.
         return pid
-    
-    local_pid = pid // num_xcds 
+
+    local_pid = pid // num_xcds
     # Calculate chunk index and position within chunk
-    chunk_idx = local_pid // chunk_size 
-    pos_in_chunk = local_pid % chunk_size 
+    chunk_idx = local_pid // chunk_size
+    pos_in_chunk = local_pid % chunk_size
 
     # Calculate new PID
-    xcd = pid % num_xcds 
+    xcd = pid % num_xcds
     new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
     return new_pid
+
 
 @triton.jit
 def remap_xcd_chunked(
