@@ -9,6 +9,8 @@ import triton
 import triton.language as tl
 from triton.language.core import _aggregate as aggregate
 
+import mosaic
+
 
 @triton.jit
 def chiplet_transform(
@@ -122,14 +124,7 @@ class Grid:
         """Convert linear tile ID to (pid_m, pid_n) coordinates."""
         num_pid_m = tl.cdiv(self.M, self.block_m)
         num_pid_n = tl.cdiv(self.N, self.block_n)
-        num_pid_in_group = self.group_size_m * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * self.group_size_m
-        group_size_m = tl.minimum(num_pid_m - first_pid_m, self.group_size_m)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
+        pid_m, pid_n = mosaic.wgm_transform(tile_id, num_pid_m, num_pid_n, self.group_size_m)
         return pid_m, pid_n
 
 

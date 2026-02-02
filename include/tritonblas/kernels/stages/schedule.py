@@ -17,6 +17,7 @@ from .grid import chiplet_transform_chunked
 from .gemm_context import GemmContext
 from .tile import Tile
 
+import mosaic
 
 @aggregate
 class ScheduleContext:
@@ -105,7 +106,7 @@ class ScheduleContext:
         # Get transformed program ID
         pid = tl.program_id(0)
         if self.ctx.num_xcds != 1:
-            pid = chiplet_transform_chunked(pid, self.ctx.num_sms, self.ctx.num_xcds, self.ctx.chunk_size)
+            pid = mosaic.chiplet_transform_chunked(pid, self.ctx.num_sms, self.ctx.num_xcds, self.ctx.chunk_size)
         
         return pid, total_tiles, self.ctx.num_sms
     
@@ -122,13 +123,8 @@ class ScheduleContext:
         """
         num_pid_m = tl.cdiv(self.M, self.ctx.block_m)
         num_pid_n = tl.cdiv(self.N, self.ctx.block_n)
-        
-        num_pid_in_group = self.ctx.group_size_m * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * self.ctx.group_size_m
-        group_size_m = tl.minimum(num_pid_m - first_pid_m, self.ctx.group_size_m)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        pid_m, pid_n = mosaic.wgm_transform(tile_id, num_pid_m, num_pid_n, self.ctx.group_size_m)
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
         return Tile(pid_m, pid_n, self.ctx.block_m, self.ctx.block_n)
