@@ -102,13 +102,13 @@ def persistent_matmul_lt(
         M,
         N,
         K,
-        a.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        0,  # TODO: Enable bias stride.
-        stride_ak=a.stride(1),
-        stride_bk=b.stride(0),
+        a.stride(0),  # stride_am
+        a.stride(1),  # stride_ak
+        b.stride(0),  # stride_bk
+        b.stride(1),  # stride_bn
+        c.stride(0),  # stride_cm
+        c.stride(1),  # stride_cn
+        0,  # stride_bias (TODO: Enable bias stride)
         BLOCK_SIZE_M=BLK_M,
         BLOCK_SIZE_N=BLK_N,
         BLOCK_SIZE_K=BLK_K,
