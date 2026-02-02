@@ -24,8 +24,8 @@ def persistent_matmul(
     stride_cm,
     stride_cn,
     stride_bias,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
+    stride_ak,
+    stride_bk,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -39,6 +39,7 @@ def persistent_matmul(
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = True,
+    VECTORIZED_LOAD_SIZE: tl.constexpr = 16, #FIXME: Temporary workaround for torch.compile - remove once upstream is fixed
 ):
     # Stride guards
     tl.assume(stride_am > 0)
@@ -88,6 +89,7 @@ def persistent_matmul(
             BLOCK_SIZE_K, #Block Size in K dimension
             CACHE_MODIFIER_A, CACHE_MODIFIER_B, #Cache modifiers to control locality
             QUANTIZED, ALLOW_TF32, EVEN_K, #Extra compile time constants
+            VECTORIZED_LOAD_SIZE, #FIXME: Temporary workaround for torch.compile - remove once upstream is fixed
         )
         
         # ============================================================

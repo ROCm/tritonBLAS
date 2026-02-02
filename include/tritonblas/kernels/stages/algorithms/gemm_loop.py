@@ -30,6 +30,7 @@ def gemm_loop(
     QUANTIZED: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
     EVEN_K: tl.constexpr,
+    VECTORIZED_LOAD_SIZE: tl.constexpr = 16, #FIXME: Temporary workaround for torch.compile - remove once upstream is fixed
 ):
     """
     Execute the main GEMM loop over the K dimension.
@@ -89,8 +90,9 @@ def gemm_loop(
         k0 = k_iter * BLOCK_SIZE_K
         
         # Load - Address math + global → CU load
-        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=False, is_row_major=True)
-        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=False, is_row_major=False)
+        # FIXME: VECTORIZED_LOAD_SIZE is temporary workaround for torch.compile - remove once upstream is fixed
+        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=False, is_row_major=True, VECTORIZED_LOAD_SIZE=VECTORIZED_LOAD_SIZE)
+        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=False, is_row_major=False, VECTORIZED_LOAD_SIZE=VECTORIZED_LOAD_SIZE)
         
         # Compute - Math only
         acc = multiply_accumulate(acc, a, b, QUANTIZED, ALLOW_TF32)
@@ -100,8 +102,9 @@ def gemm_loop(
         k0 = loop_k * BLOCK_SIZE_K
         
         # Load with masking
-        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=True, is_row_major=True)
-        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=True, is_row_major=False)
+        # FIXME: VECTORIZED_LOAD_SIZE is temporary workaround for torch.compile - remove once upstream is fixed
+        a = load(A, row_indices, k0, stride_am, stride_ak, BLOCK_SIZE_K, K, CACHE_MODIFIER_A, mask_k=True, is_row_major=True, VECTORIZED_LOAD_SIZE=VECTORIZED_LOAD_SIZE)
+        b = load(B, col_indices, k0, stride_bn, stride_bk, BLOCK_SIZE_K, K, CACHE_MODIFIER_B, mask_k=True, is_row_major=False, VECTORIZED_LOAD_SIZE=VECTORIZED_LOAD_SIZE)
         
         # Compute
         acc = multiply_accumulate(acc, a, b, QUANTIZED, ALLOW_TF32)

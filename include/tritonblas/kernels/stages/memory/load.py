@@ -16,6 +16,7 @@ def load(
     CACHE_MODIFIER: tl.constexpr,
     mask_k: tl.constexpr = False,
     is_row_major: tl.constexpr = True,
+    VECTORIZED_LOAD_SIZE: tl.constexpr = 16,  # FIXME: Temporary workaround for torch.compile - remove once upstream is fixed
 ):
     """
     Load a single tile from global memory.
@@ -39,6 +40,8 @@ def load(
     """
     # Compute K indices
     rk = k0 + tl.arange(0, BLOCK_SIZE_K)
+
+    # vec_load_size: tl.constexpr = VECTORIZED_LOAD_SIZE
     
     # Compute addresses based on layout
     if is_row_major:
@@ -46,9 +49,9 @@ def load(
         ptrs = matrix_ptr + indices[:, None] * stride_major + rk[None, :] * stride_k
         # Apply alignment hints
         if stride_k == 1:
-            ptrs = tl.multiple_of(ptrs, (1, 16))
+            ptrs = tl.multiple_of(ptrs, (1, VECTORIZED_LOAD_SIZE))
         else:
-            ptrs = tl.multiple_of(ptrs, (16, 1))
+            ptrs = tl.multiple_of(ptrs, (VECTORIZED_LOAD_SIZE, 1))
         # Load with optional K masking
         if mask_k:
             tile = tl.load(ptrs, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER)
@@ -59,9 +62,9 @@ def load(
         ptrs = matrix_ptr + rk[:, None] * stride_k + indices[None, :] * stride_major
         # Apply alignment hints
         if stride_k == 1:
-            ptrs = tl.multiple_of(ptrs, (16, 1))
+            ptrs = tl.multiple_of(ptrs, (VECTORIZED_LOAD_SIZE, 1))
         else:
-            ptrs = tl.multiple_of(ptrs, (1, 16))
+            ptrs = tl.multiple_of(ptrs, (1, VECTORIZED_LOAD_SIZE))
         # Load with optional K masking
         if mask_k:
             tile = tl.load(ptrs, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER)
