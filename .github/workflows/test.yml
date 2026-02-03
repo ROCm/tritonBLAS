@@ -58,13 +58,13 @@ jobs:
         run: |
           export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
           # Skip matmul tests that use torch.matmul as reference - hipBLASLt library missing in container for gfx942
-          pytest tests/ -v --tb=short --color=yes --ignore=tests/test_matmul_a8w8_lt.py --ignore=tests/test_matmul_lt.py --ignore=tests/test_matmul.py --ignore=tests/test_matmul_fp4.py -m "not performance"
+          pytest tests/ -v --tb=short --color=yes --ignore=tests/test_matmul_a8w8_lt.py --ignore=tests/test_matmul_fp4.py -m "not performance"
         
       - name: Generate test report
         if: always()
         run: |
           # Skip matmul tests that use torch.matmul as reference - hipBLASLt library missing in container for gfx942
-          pytest tests/ -v --tb=short --junit-xml=test-results.xml --ignore=tests/test_matmul_a8w8_lt.py --ignore=tests/test_matmul_lt.py --ignore=tests/test_matmul.py --ignore=tests/test_matmul_fp4.py
+          pytest tests/ -v --tb=short --junit-xml=test-results.xml --ignore=tests/test_matmul_a8w8_lt.py --ignore=tests/test_matmul_fp4.py
         continue-on-error: true
       - name: Upload test results
         if: always()
