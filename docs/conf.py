@@ -107,6 +107,7 @@ sys.modules["triton.language.core"]._aggregate = lambda cls: cls  # Preserve cla
 # Mock triton modules with docstring-preserving jit decorator
 class TritonMock:
     jit = PreserveDocstringMock()
+    constexpr_function = PreserveDocstringMock()
     language = triton_language_mock
     autotune = PreserveDocstringMock()
     Config = MagicMock()

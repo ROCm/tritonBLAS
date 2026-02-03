@@ -1,32 +1,36 @@
 root: index
 subtrees:
-- entries:
+- caption: Getting Started
+  entries:
   - file: getting-started/installation
     title: Installation
   - file: getting-started/quickstart
     title: Quick Start Guide
   - file: getting-started/examples
     title: Examples
-  title: Getting Started
-- entries:
+- caption: Conceptual
+  entries:
   - file: conceptual/analytical-model
     title: Analytical Model
   - file: conceptual/architecture
     title: Architecture
   - file: conceptual/performance
     title: Performance Recommendations
-  title: Conceptual
-- entries:
+- caption: API Reference
+  entries:
   - file: reference/api
     title: Core API
   - file: reference/configuration
     title: Configuration
   - file: reference/advanced
     title: Advanced Features
-  title: API Reference
-- entries:
+- caption: Stages
+  entries:
+  - file: reference/stages
+    title: Stages API
+- caption: Developer Guide
+  entries:
   - file: CONTRIBUTING
     title: Contributing Guide
   - file: CONTRIBUTORS
     title: Contributors
-  title: Developer Guide
