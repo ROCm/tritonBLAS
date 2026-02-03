@@ -22,8 +22,8 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk, in
     """Test matmul with proper input generation - handles both quantized and non-quantized dtypes"""
 
     inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
-    selector = tritonblas.MatmulHeuristicResult(
-        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype
+    selector = tritonblas.OrigamiMatmulSelector(
+        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device
     )
 
     if inputs.is_quantized:
@@ -148,10 +148,12 @@ def bench_matmul(
         )
 
         # Build a tritonBLAS selector config and launch matmul
-        selector = tritonblas.MatmulHeuristicResult(
-            m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype
+        selector = tritonblas.OrigamiMatmulSelector(
+            m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
+            streamk=enable_streamk
         )
-        config = selector.get_config()
+        ## TODO
+        config = (selector.block_m, selector.block_n, selector.block_k)
 
         # Use appropriate API based on quantization
         if inputs.is_quantized:
@@ -168,7 +170,7 @@ def bench_matmul(
 
         if print_verbose:
             print(
-                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, init={init_type}, perf={perf}(GFLOPs) selected_tile={selector.config[0]}x{selector.config[1]}x{selector.config[2]}"
+                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, init={init_type}, perf={perf}(GFLOPs) selected_tile={selector.block_m}x{selector.block_n}x{selector.block_k}"
             )
 
         metrics = {

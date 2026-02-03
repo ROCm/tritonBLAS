@@ -35,10 +35,29 @@ class CustomBuildExt(build_ext):
                 "--filter=blob:none",
                 "--sparse",
                 "--branch",
-                "users/ibrahimw1/origami-standalone",
-                "https://github.com/ryanswann-amd/rocm-libraries.git",
+                "develop",
+                "https://github.com/ROCm/rocm-libraries.git",
                 "_origami",
             ]
+        )
+        subprocess.check_call(
+            [
+                "git",
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+            ],
+            cwd="_origami",
+        )
+        subprocess.check_call(
+            [
+                "git",
+                "checkout",
+                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+            ],
+            cwd="_origami",
         )
 
         # Use custom chdir context manager to run sparse-checkout
