@@ -23,25 +23,31 @@ class GemmContext:
     GEMM context with all configuration parameters and accumulator management.
     
     Bundles together all compile-time GEMM parameters:
-    - Block sizes (M, N, K)
-    - Hardware configuration (NUM_SMS, NUM_XCDS)
-    - Scheduling parameters (GROUP_SIZE_M, CHUNK_SIZE)
-    - Cache modifiers
-    - Computation options (acc_dtype, allow_tf32, even_k, quantized)
+    
+    * Block sizes (M, N, K)
+    * Hardware configuration (NUM_SMS, NUM_XCDS)
+    * Scheduling parameters (GROUP_SIZE_M, CHUNK_SIZE)
+    * Cache modifiers
+    * Computation options (acc_dtype, allow_tf32, even_k, quantized)
     
     Provides two execution modes:
-    - reduce_tile(): Single BLOCK_K iteration (one dot product)
-    - reduce_axis(): Full K loop
     
-    TILE CREATION CONVENTION:
-    -------------------------
+    * ``reduce_tile()``: Single BLOCK_K iteration (one dot product)
+    * ``reduce_axis()``: Full K loop
+    
+    **Tile Creation Convention**
+    
     For A [M, K] and B [K, N]:
-    - A tiles: (pid_m, k_idx) with shape (BLOCK_M, BLOCK_K)
-    - B tiles: (k_idx, pid_n) with shape (BLOCK_K, BLOCK_N)
     
-    The InputView handles the pointer arithmetic based on its stored layout.
+    * A tiles: (pid_m, k_idx) with shape (BLOCK_M, BLOCK_K)
+    * B tiles: (k_idx, pid_n) with shape (BLOCK_K, BLOCK_N)
     
-    Example usage:
+    The :class:`InputView` handles the pointer arithmetic based on its stored layout.
+    
+    Example
+    -------
+    .. code-block:: python
+    
         tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
         tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
         
@@ -137,7 +143,8 @@ class GemmContext:
         Returns:
             Accumulator tensor [BLOCK_M, BLOCK_N] initialized to zeros
         
-        Example:
+        Example::
+        
             acc = ctx.init_accumulator()
         """
         return tl.zeros((self.block_m, self.block_n), dtype=self.acc_dtype)
@@ -169,7 +176,8 @@ class GemmContext:
         Returns:
             Updated accumulator tensor [BLOCK_M, BLOCK_N]
         
-        Example:
+        Example::
+        
             A = make_tensor_view(A_ptr, M, K, stride_am, stride_ak)
             B = make_tensor_view(B_ptr, K, N, stride_bk, stride_bn)
             acc = ctx.init_accumulator()
@@ -237,7 +245,8 @@ class GemmContext:
         Returns:
             Accumulator tensor [BLOCK_M, BLOCK_N]
         
-        Example:
+        Example::
+        
             A = make_tensor_view(A_ptr, M, K, stride_am, stride_ak)
             B = make_tensor_view(B_ptr, K, N, stride_bk, stride_bn)
             ctx = GemmContext(block_m=128, block_n=256, block_k=64, ...)

@@ -19,7 +19,9 @@ subtrees:
 - caption: API Reference
   entries:
   - file: reference/api
-    title: Core API
+    title: Core API Guide
+  - file: reference/api-autodoc
+    title: Core API Reference
   - file: reference/configuration
     title: Configuration
   - file: reference/advanced
@@ -27,7 +29,9 @@ subtrees:
 - caption: Stages
   entries:
   - file: reference/stages
-    title: Stages API
+    title: Stages Guide
+  - file: reference/stages-autodoc
+    title: Stages Reference
 - caption: Developer Guide
   entries:
   - file: CONTRIBUTING

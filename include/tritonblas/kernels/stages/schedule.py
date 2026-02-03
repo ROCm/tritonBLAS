@@ -24,10 +24,15 @@ class ScheduleContext:
     Unified scheduling context that hides persistent GEMM loop complexity.
     
     Two simple iteration patterns:
-    - Tile loop: for tile_id in range(start, total, stride) with get_tile(tile_id)
-    - Iter loop: for iter_id in range(start, end) with get_iter(iter_id)
     
-    Example usage (persistent GEMM):
+    * **Tile loop**: ``for tile_id in range(start, total, stride)`` with ``get_tile(tile_id)``
+    * **Iter loop**: ``for iter_id in range(start, end)`` with ``get_iter(iter_id)``
+    
+    Example (persistent GEMM)
+    -------------------------
+    
+    .. code-block:: python
+    
         ctx = GemmContext(block_m=128, block_n=256, block_k=64, 
                           num_sms=NUM_SMS, num_xcds=NUM_XCDS)
         sched = ScheduleContext(M, N, K, ctx)
@@ -37,7 +42,11 @@ class ScheduleContext:
             out_tile = sched.get_tile_from_idx(tile_id)
             # Process full tile
     
-    Example usage (Stream-K):
+    Example (Stream-K)
+    ------------------
+    
+    .. code-block:: python
+    
         ctx = GemmContext(block_m=128, block_n=256, block_k=64, num_sms=NUM_SMS)
         sched = ScheduleContext(M, N, K, ctx, streamk_tiles=STREAMK_TILES)
         
@@ -91,8 +100,10 @@ class ScheduleContext:
         Get tile iteration range for this workgroup (persistent GEMM).
         
         Returns:
-            (start, total, stride): Use as range(start, total, stride)
-            
+            (start, total, stride): Use as ``range(start, total, stride)``
+        
+        Example::
+        
             start, total, stride = sched.persistent_tile_range()
             for tile_id in range(start, total, stride):
                 pid_m, pid_n = sched.get_tile(tile_id)

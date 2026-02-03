@@ -1,237 +1,253 @@
 # Architecture
 
-This page describes the architecture and design of tritonBLAS.
+tritonBLAS delivers high-performance matrix multiplication through an elegant, layered architecture that balances simplicity with power.
 
-## Overview
+## At a Glance
 
-tritonBLAS is designed as a lightweight, modular library that provides high-performance matrix multiplication through analytical model-driven kernel selection.
+```{admonition} Design Philosophy
+:class: tip
 
-## Component Architecture
-
-```
-tritonBLAS
-├── Core API Layer
-│   ├── matmul() - Drop-in replacement API
-│   └── matmul_lt() - Peak performance API
-├── Configuration Layer
-│   ├── MatmulHeuristicResult - Configuration selector
-│   └── Analytical Model - Configuration predictor
-├── Kernel Layer
-│   ├── Persistent GEMM kernels
-│   ├── Stream-K GEMM kernels
-│   └── Specialized kernels (FP4, etc.)
-└── Utilities
-    ├── Origami - Tensor manipulation
-    └── Helper functions
+**No autotuning required.** tritonBLAS uses an analytical model to predict optimal configurations instantly, eliminating the overhead and unpredictability of traditional autotuning approaches.
 ```
 
-## Core Components
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Your Application                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│   ┌─────────────────────┐       ┌─────────────────────────────┐     │
+│   │      matmul()       │       │        matmul_lt()          │     │
+│   │   Simple & Quick    │       │   Peak Performance API      │     │
+│   └──────────┬──────────┘       └──────────────┬──────────────┘     │
+│              │                                  │                    │
+│              └──────────────┬───────────────────┘                    │
+│                             ▼                                        │
+│   ┌─────────────────────────────────────────────────────────────┐   │
+│   │                   Analytical Model                           │   │
+│   │          Instant configuration prediction                    │   │
+│   └─────────────────────────────────────────────────────────────┘   │
+│                             │                                        │
+│              ┌──────────────┼──────────────┐                        │
+│              ▼              ▼              ▼                        │
+│   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │
+│   │  Persistent  │  │   Stream-K   │  │ Specialized  │              │
+│   │    GEMM      │  │    GEMM      │  │   Kernels    │              │
+│   └──────────────┘  └──────────────┘  └──────────────┘              │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │   Triton + ROCm  │
+                    │    GPU Runtime   │
+                    └──────────────────┘
+```
 
-### 1. API Layer
+---
 
-The API layer provides two interfaces:
+## The Two APIs
 
-**Drop-in Replacement API (`matmul`)**
-- PyTorch-compatible interface
-- Automatic configuration selection
-- Simplified usage for quick integration
+tritonBLAS offers two paths to high performance:
 
-**Peak Performance API (`matmul_lt`)**
-- Explicit configuration management
-- Optimal for repeated operations
-- Inspired by hipBLASLt/cuBLASLt
+````{grid} 2
+:gutter: 3
 
-### 2. Configuration Layer
+```{grid-item-card} 🚀 matmul()
+:columns: 6
 
-**MatmulHeuristicResult**
-- Encapsulates optimal kernel configuration
-- Contains block sizes, thread counts, memory layout
-- Reusable across multiple operations
+**Drop-in Replacement**
 
-**Analytical Model**
-- Predicts optimal configuration without autotuning
-- Considers matrix dimensions, data types, hardware
-- Provides deterministic, explainable decisions
+Perfect for quick integration. Just swap in `tritonblas.matmul()` and get automatic optimization.
 
-### 3. Kernel Layer
+^^^
 
-**Persistent GEMM Kernels**
-- Main matrix multiplication implementation
-- Optimized for various data types (FP16, BF16, FP32, FP8)
-- Support for different transpose modes
+```python
+tritonblas.matmul(A, B, C)
+```
 
-**Stream-K GEMM Kernels**
-- Alternative algorithm for better load balancing
-- Useful for irregular matrix shapes
-- Optional feature enabled via parameter
++++
+Best for: Prototyping, varied workloads
+```
 
-**Specialized Kernels**
-- FP4 support (experimental)
-- Custom optimizations for specific use cases
+```{grid-item-card} ⚡ matmul_lt()
+:columns: 6
 
-### 4. Utilities
+**Peak Performance**
 
-**Origami**
-- Tensor manipulation and layout transformations
-- Memory-efficient operations
+Maximum throughput with reusable configurations. Inspired by hipBLASLt/cuBLASLt.
 
-**Helper Functions**
-- Data type conversions
-- Validation and error checking
-- Performance utilities
+^^^
+
+```python
+selector = MatmulHeuristicResult(m, n, k, ...)
+tritonblas.matmul_lt(A, B, C, selector)
+```
+
++++
+Best for: Production, repeated operations
+```
+````
+
+---
+
+## How It Works
+
+### Standard Path
+
+When you call `matmul()`, tritonBLAS automatically:
+
+```
+   Your Code          Analytical Model         Optimal Kernel
+       │                    │                       │
+       │   matmul(A, B)     │                       │
+       │ ──────────────────►│                       │
+       │                    │  Analyze M, N, K      │
+       │                    │  + dtypes + hardware  │
+       │                    │                       │
+       │                    │  Select config        │
+       │                    │ ─────────────────────►│
+       │                    │                       │  Execute
+       │◄───────────────────────────────────────────│
+       │         Result C                           │
+```
+
+### Optimized Path
+
+With `matmul_lt()`, you control when configuration happens:
+
+```
+                         ┌──────────────────────────────────────┐
+                         │  MatmulHeuristicResult(m, n, k, ...)  │
+                         │                                       │
+                         │  ► Analyzed once                      │
+                         │  ► Stored in selector                 │
+                         │  ► Reused for all calls               │
+                         └───────────────┬──────────────────────┘
+                                         │
+        ┌──────────────────┬─────────────┼─────────────┬──────────────────┐
+        ▼                  ▼             ▼             ▼                  ▼
+   matmul_lt()        matmul_lt()   matmul_lt()   matmul_lt()        matmul_lt()
+        │                  │             │             │                  │
+        ▼                  ▼             ▼             ▼                  ▼
+   ┌─────────┐        ┌─────────┐   ┌─────────┐   ┌─────────┐        ┌─────────┐
+   │ Result  │        │ Result  │   │ Result  │   │ Result  │        │ Result  │
+   └─────────┘        └─────────┘   └─────────┘   └─────────┘        └─────────┘
+   
+   No recompilation. No reconfiguration. Maximum throughput.
+```
+
+---
+
+## Kernel Architecture
+
+tritonBLAS includes several kernel implementations:
+
+### Persistent GEMM
+
+The workhorse kernel for most workloads:
+
+- **Persistent threads**: Workgroups stay alive to process multiple tiles
+- **Tiled computation**: Optimized block sizes for GPU cache hierarchy  
+- **Multi-XCD aware**: Chiplet-optimized scheduling for MI300X
+
+### Stream-K GEMM
+
+For better load balancing on irregular shapes:
+
+- **Fine-grained work distribution**: Splits work at K-iteration level
+- **Automatic tail handling**: No wasted compute on partial tiles
+- **Enable with**: `enable_streamk=True`
+
+### Specialized Kernels
+
+- **FP4 GEMM**: 4-bit floating point for extreme compression
+- **A8W8 GEMM**: INT8 quantized inference with scale factors
+- **FP8 GEMM**: 8-bit floating point for efficient training
+
+---
+
+## The Stages Module
+
+For kernel developers, tritonBLAS provides composable building blocks:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Your Custom Kernel                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────────────┐    │
+│  │ GemmContext │   │ScheduleCtx │   │ InputView/OutputView │    │
+│  │             │   │             │   │                     │    │
+│  │ Block sizes │   │ Tile loop   │   │ Matrix access       │    │
+│  │ K-loop      │   │ Work dist.  │   │ Pointer math        │    │
+│  │ Accumulator │   │ Stream-K    │   │ Bounds checking     │    │
+│  └─────────────┘   └─────────────┘   └─────────────────────┘    │
+│                                                                  │
+│  ┌─────────────┐   ┌─────────────┐                              │
+│  │  ScaleView  │   │  BiasView   │                              │
+│  │             │   │             │                              │
+│  │ Quantization│   │ Bias add    │                              │
+│  │ scales      │   │ epilogue    │                              │
+│  └─────────────┘   └─────────────┘                              │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+See the [Stages Guide](../reference/stages.md) for details.
+
+---
 
 ## Design Principles
 
-### 1. Simplicity
+```{list-table}
+:header-rows: 1
+:widths: 20 80
 
-- Minimal API surface
-- Clear separation of concerns
-- Easy to understand and use
-
-### 2. Performance
-
-- Analytical model eliminates autotuning overhead
-- Efficient kernel implementations
-- Optimal memory access patterns
-
-### 3. Maintainability
-
-- Modular architecture
-- Well-defined interfaces
-- Extensible design
-
-### 4. Compatibility
-
-- PyTorch integration
-- ROCm/HIP backend
-- Triton-based kernels
-
-## Data Flow
-
-### Standard Workflow
-
-```
-User Code
-    ↓
-matmul(A, B)
-    ↓
-Analytical Model
-    ↓
-Configuration Selection
-    ↓
-Kernel Compilation (JIT)
-    ↓
-Kernel Execution
-    ↓
-Result (C)
+* - Principle
+  - How We Apply It
+* - **Simplicity**
+  - Minimal API surface. Two functions cover 90% of use cases.
+* - **Performance**
+  - Analytical model provides optimal configs without autotuning overhead.
+* - **Predictability**
+  - Same inputs → same config → same performance. Always.
+* - **Extensibility**
+  - Stages module lets you build custom kernels with production-quality building blocks.
 ```
 
-### Optimized Workflow (with Configuration Reuse)
+---
+
+## Tech Stack
 
 ```
-User Code
-    ↓
-MatmulHeuristicResult(m, n, k, dtypes)
-    ↓
-Analytical Model (once)
-    ↓
-Configuration (reusable)
-    ↓
-matmul_lt(A, B, selector) ← Multiple calls
-    ↓
-Kernel Execution (no recompilation)
-    ↓
-Results
+┌──────────────────────────────────────────────┐
+│                 tritonBLAS                    │
+│  ┌────────────────────────────────────────┐  │
+│  │              Python API                 │  │
+│  └────────────────────────────────────────┘  │
+├──────────────────────────────────────────────┤
+│  ┌────────────────────────────────────────┐  │
+│  │           Triton Kernels               │  │
+│  │       (JIT-compiled to GPU code)       │  │
+│  └────────────────────────────────────────┘  │
+├──────────────────────────────────────────────┤
+│  ┌──────────────────┐  ┌──────────────────┐  │
+│  │     PyTorch      │  │      ROCm        │  │
+│  │  Tensor Runtime  │  │   GPU Runtime    │  │
+│  └──────────────────┘  └──────────────────┘  │
+├──────────────────────────────────────────────┤
+│  ┌────────────────────────────────────────┐  │
+│  │           AMD Instinct GPUs            │  │
+│  │         (MI200, MI300 series)          │  │
+│  └────────────────────────────────────────┘  │
+└──────────────────────────────────────────────┘
 ```
 
-## Memory Management
-
-### Tensor Allocation
-
-- Input tensors: User-managed
-- Output tensors: Auto-allocated or user-provided
-- Intermediate buffers: Managed by kernels
-
-### Memory Layout
-
-- Row-major and column-major support
-- Efficient transpose handling
-- Optimized for cache locality
-
-## Kernel Selection
-
-The analytical model selects kernels based on:
-
-1. **Matrix Dimensions**: M, N, K sizes
-2. **Data Types**: Input and output precision
-3. **Hardware**: GPU architecture and capabilities
-4. **Workload**: Regular vs irregular shapes
-
-## Extension Points
-
-tritonBLAS is designed to be extensible:
-
-### Adding New Data Types
-
-1. Implement kernel variants
-2. Update analytical model
-3. Add API support
-
-### Adding New Algorithms
-
-1. Implement kernel (e.g., new GEMM variant)
-2. Integrate with configuration layer
-3. Expose via API if needed
-
-### Custom Optimizations
-
-1. Extend analytical model
-2. Add specialized kernels
-3. Update configuration selection
-
-## Dependencies
-
-### Required
-
-- **PyTorch**: Tensor operations and GPU management
-- **Triton**: Kernel compilation and execution
-- **ROCm/HIP**: GPU runtime
-
-### Optional
-
-- **hipBLASLt**: C++ utilities (auto-fetched)
-
-## Performance Considerations
-
-### Compilation
-
-- JIT compilation on first use
-- Configuration reuse eliminates recompilation
-- Smaller binary size than autotuned approaches
-
-### Execution
-
-- Optimized memory access patterns
-- Efficient use of GPU resources
-- Minimal overhead from configuration selection
-
-### Scalability
-
-- Handles various matrix sizes efficiently
-- Adapts to different GPU architectures
-- Supports batched operations
-
-## Future Architecture
-
-Planned enhancements:
-
-- Multi-GPU support
-- Additional BLAS operations
-- Enhanced analytical models
-- Custom kernel generators
+---
 
 ## Learn More
 
-- [Analytical Model](analytical-model.md): Configuration prediction
-- [Performance](performance.md): Benchmarks and optimization
-- [API Reference](../reference/api.md): Detailed API documentation
+- **[Analytical Model](analytical-model.md)**: How we predict optimal configurations
+- **[Performance](performance.md)**: Benchmarks and optimization tips
+- **[Stages Guide](../reference/stages.md)**: Building custom kernels
+- **[Core API Guide](../reference/api.md)**: Using matmul and matmul_lt
