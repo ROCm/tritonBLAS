@@ -71,5 +71,4 @@ Results show that the model consistently selects near-optimal configurations whi
 ## Learn More
 
 - [Architecture](architecture.md): Library design and components
-- [Performance](performance.md): Benchmarks and optimization
-- [API Reference](../reference/api.md): Using the configuration API
+- [API Reference](../reference/api-autodoc.rst): API documentation

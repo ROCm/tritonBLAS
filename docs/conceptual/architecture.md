@@ -184,7 +184,7 @@ For kernel developers, tritonBLAS provides composable building blocks:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-See the [Stages Guide](../reference/stages.md) for details.
+See the [Stages Reference](../reference/stages-autodoc.rst) for details.
 
 ---
 
@@ -239,6 +239,5 @@ See the [Stages Guide](../reference/stages.md) for details.
 ## Learn More
 
 - **[Analytical Model](analytical-model.md)**: How we predict optimal configurations
-- **[Performance](performance.md)**: Benchmarks and optimization tips
-- **[Stages Guide](../reference/stages.md)**: Building custom kernels
-- **[Core API Guide](../reference/api.md)**: Using matmul and matmul_lt
+- **[Stages Reference](../reference/stages-autodoc.rst)**: Building custom kernels
+- **[Core API Reference](../reference/api-autodoc.rst)**: API documentation
