@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 package-dir = { "" = "include" }
 
 [tool.setuptools.packages.find]
-include = ["tritonblas", "tritonblas.internal"]
+where = ["include"]
 
 [project]
 name = "tritonblas"

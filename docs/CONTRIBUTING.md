@@ -30,21 +30,14 @@ Thank you for your interest in contributing to tritonBLAS! This document provide
 
 ## Development Setup
 
-### Prerequisites
 
-We provide containerized development environments:
+1. **Fork the Repository**: Start by forking the tritonBLAS repository on GitHub to your own account.
 
-#### Using Docker
 
-```bash
-docker compose up -d
-```
-
-### Local Development Setup
-
-1. **Install Dependencies**:
+2. **Clone Your Fork** :
+   Clone the repository:
    ```bash
-   pip install -e ".[dev]"
+   git clone <YOUR_FORK_URL>
    ```
 
 ## Development Workflow
@@ -66,6 +59,7 @@ docker compose up -d
    ruff format .
    
    # Run tests (if available)
+   cd <tritonblas_root>/tests
    pytest
    ```
 

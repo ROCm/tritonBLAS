@@ -23,25 +23,6 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
-def _compute_safe_vectorize_size(a: torch.Tensor) -> int:
-    """
-    Compute a safe VECTORIZED_LOAD_SIZE for torch.compile workaround.
-    
-    FIXME: Temporary workaround for torch.compile Triton bug - remove once upstream is fixed.
-    The bundled Triton version has a bug where tl.multiple_of can generate illegal
-    vectorized loads. This computes a safe alignment value based on M dimension and dtype.
-    
-    Returns the largest power-of-2 X such that (M * dtype_size_bytes) % X == 0.
-    """
-    M = a.shape[0]
-    dtype_size = a.element_size()
-    total_bytes = M * dtype_size
-    
-    # Find largest power of 2 that divides total_bytes using bit manipulation
-    # n & (-n) isolates the lowest set bit, which is the largest power of 2 factor
-    return total_bytes & (-total_bytes)
-
-
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -78,7 +59,6 @@ def persistent_matmul_lt(
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
-    _vectorized_load_size: Optional[int] = None,  # FIXME: torch.compile workaround - remove once upstream fixed
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -114,9 +94,6 @@ def persistent_matmul_lt(
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, total_programs // num_xcds)
-
-    # FIXME: Temporary workaround for torch.compile - remove once upstream is fixed
-    VECTORIZED_LOAD_SIZE = _vectorized_load_size if _vectorized_load_size is not None else 16
 
     # TODO: Support other matmul algs.
     #kk = persistent_matmul[(grids,)](
@@ -155,7 +132,6 @@ def persistent_matmul_lt(
         matrix_instr_nonkdim=mfmaInstrSize,
         kpack=kpack,
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
-        VECTORIZED_LOAD_SIZE=VECTORIZED_LOAD_SIZE, # FIXME: Temporary workaround for torch.compile - remove once upstream is fixed
     )
 
     return c
@@ -170,7 +146,6 @@ def streamk_matmul_lt(
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
-    _vectorized_load_size: Optional[int] = None,  # FIXME: torch.compile workaround - remove once upstream fixed
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -293,7 +268,6 @@ def _matmul(
     b: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
-    _vectorized_load_size: Optional[int] = None,  # FIXME: torch.compile workaround - remove once upstream fixed
 ) -> torch.Tensor:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -305,9 +279,9 @@ def _matmul(
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid, _vectorized_load_size=_vectorized_load_size)
+        return streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
     else:
-        return persistent_matmul_lt(a, b, out, selector, _vectorized_load_size=_vectorized_load_size)
+        return persistent_matmul_lt(a, b, out, selector)
 
 
 def _setup_context_matmul_backwards(
@@ -315,11 +289,10 @@ def _setup_context_matmul_backwards(
     inputs: tuple[Any, ...],
     output: Any
 ):
-    a, b, enable_streamk, sk_grid, _vectorized_load_size = inputs
+    a, b, enable_streamk, sk_grid = inputs
     ctx.save_for_backward(a, b)
     ctx.enable_streamk = enable_streamk
     ctx.sk_grid = sk_grid
-    # Note: _vectorized_load_size is not saved - backward pass will recompute if needed
 
 
 def _matmul_backwards(
@@ -341,10 +314,10 @@ def _matmul_backwards(
     a_t = a.T.contiguous()
     grad_b = matmul(a_t, grad_output_cont, enable_streamk=enable_streamk, sk_grid=sk_grid)
 
-    # tuple[a, b, enable_streamk, sk_grid, _vectorized_load_size]
+    # tuple[a, b, enable_streamk, sk_grid]
     #   First 2 must be in the order that matches matmul()'s forward args
-    #   Last 3 are not part of the gradient and so are None
-    return grad_a, grad_b, None, None, None
+    #   Last 2 are not part of the gradient and so are None
+    return grad_a, grad_b, None, None
 
 
 _matmul.register_autograd(_matmul_backwards,
@@ -358,7 +331,6 @@ def _matmul_out(
     out: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
-    _vectorized_load_size: Optional[int] = None,  # FIXME: torch.compile workaround - remove once upstream fixed
 ) -> None:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -368,9 +340,9 @@ def _matmul_out(
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
 
     if enable_streamk:
-        streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid, _vectorized_load_size=_vectorized_load_size)
+        streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
     else:
-        persistent_matmul_lt(a, b, out, selector, _vectorized_load_size=_vectorized_load_size)
+        persistent_matmul_lt(a, b, out, selector)
 
     # Custom torch ops cannot return a value which is an alias of an input.  So
     # even though torch returns a pointer to the out arg when used, we can't.
@@ -384,15 +356,9 @@ def matmul(
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None
 ) -> Optional[torch.Tensor]:
-    # FIXME: Workaround for torch.compile Triton bug - detect at trace time
-    # This check works here because matmul() is traced by dynamo (not a @triton_op)
-    _vectorized_load_size = None
-    if torch.compiler.is_compiling():
-        _vectorized_load_size = _compute_safe_vectorize_size(a)
-
     # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
-        return _matmul(a, b, enable_streamk, sk_grid, _vectorized_load_size)
+        return _matmul(a, b, enable_streamk, sk_grid)
 
     # If out tensor provided - in-place - we do NOT support autograd
     # Check for autograd conditions (global and per-tensor)
@@ -405,7 +371,7 @@ def matmul(
             "tritonblas.matmul(): functions with out=... arguments don't support "
             "automatic differentiation, but one of the arguments requires grad."
         )
-    return _matmul_out(a, b, out, enable_streamk, sk_grid, _vectorized_load_size)
+    return _matmul_out(a, b, out, enable_streamk, sk_grid)
 
 
 def matmul_a8w8(
@@ -543,7 +509,6 @@ def _addmm(
     b: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
-    _vectorized_load_size: Optional[int] = None,  # FIXME: torch.compile workaround - remove once upstream fixed
 ) -> torch.Tensor:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -556,9 +521,9 @@ def _addmm(
     out = a.new_empty(M, N)
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid, _vectorized_load_size=_vectorized_load_size)
+        return streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid)
     else:
-        return persistent_matmul_lt(a, b, out, selector, bias=bias, _vectorized_load_size=_vectorized_load_size)
+        return persistent_matmul_lt(a, b, out, selector, bias=bias)
 
 
 def _setup_context_addmm_backwards(
@@ -566,11 +531,10 @@ def _setup_context_addmm_backwards(
     inputs: tuple[Any, ...],
     output: Any
 ):
-    bias, a, b, enable_streamk, sk_grid, _vectorized_load_size = inputs
+    bias, a, b, enable_streamk, sk_grid = inputs
     ctx.save_for_backward(a, b)
     ctx.enable_streamk = enable_streamk
     ctx.sk_grid = sk_grid
-    # Note: _vectorized_load_size is not saved - backward pass will recompute if needed
 
 
 def _addmm_backwards(
@@ -595,10 +559,10 @@ def _addmm_backwards(
     # grad_bias = sum(grad_output)
     grad_bias = grad_output.sum(dim=0)
 
-    # tuple[bias, a, b, enable_streamk, sk_grid, _vectorized_load_size]
+    # tuple[bias, a, b, enable_streamk, sk_grid]
     #   First 3 must be in the order that matches addmm()'s forward args
-    #   Last 3 are not part of the gradient and so are None
-    return grad_bias, grad_a, grad_b, None, None, None
+    #   Last 2 are not part of the gradient and so are None
+    return grad_bias, grad_a, grad_b, None, None
 
 
 _addmm.register_autograd(_addmm_backwards,
@@ -613,7 +577,6 @@ def _addmm_out(
     out: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
-    _vectorized_load_size: Optional[int] = None,  # FIXME: torch.compile workaround - remove once upstream fixed
 ) -> None:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -623,9 +586,9 @@ def _addmm_out(
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
 
     if enable_streamk:
-        streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid, _vectorized_load_size=_vectorized_load_size)
+        streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid)
     else:
-        persistent_matmul_lt(a, b, out, selector, bias=bias, _vectorized_load_size=_vectorized_load_size)
+        persistent_matmul_lt(a, b, out, selector, bias=bias)
 
     # Custom torch ops cannot return a value which is an alias of an input.  So
     # even though torch returns a pointer to the out arg when used, we can't.
@@ -640,15 +603,9 @@ def addmm(
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None
 ) -> Optional[torch.Tensor]:
-    # FIXME: Workaround for torch.compile Triton bug - detect at trace time
-    # This check works here because addmm() is traced by dynamo (not a @triton_op)
-    _vectorized_load_size = None
-    if torch.compiler.is_compiling():
-        _vectorized_load_size = _compute_safe_vectorize_size(a)
-
     # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
-        return _addmm(bias, a, b, enable_streamk, sk_grid, _vectorized_load_size)
+        return _addmm(bias, a, b, enable_streamk, sk_grid)
 
     # If out tensor provided - in-place - we do NOT support autograd
     # Check for autograd conditions (global and per-tensor)
@@ -662,5 +619,5 @@ def addmm(
             "tritonblas.addmm(): functions with out=... arguments don't support "
             "automatic differentiation, but one of the arguments requires grad."
         )
-    return _addmm_out(bias, a, b, out, enable_streamk, sk_grid, _vectorized_load_size)
+    return _addmm_out(bias, a, b, out, enable_streamk, sk_grid)
 
