@@ -1,20 +1,26 @@
 """
 Composable stage abstractions for tritonblas GEMM kernels.
 
-Key abstractions:
-- GemmContext: Accumulator context with reduce_axis() plus all config parameters
-- ScheduleContext: Unified scheduling with persistent_tile_range()/get_tile()
-- InputView, OutputView: Matrix views with tile_ptrs() for memory access
-- ScaleView, BiasView: Epilogue views for quantized GEMM (scale and bias)
-- Tile: 2D tile with coordinates (pid_m, pid_n) and shape (block_m, block_n)
+**Key abstractions:**
 
-Factory functions:
-- make_input_view, make_tensor_view: Create InputView for A and B matrices
-- make_output_view: Create OutputView for C matrix with epilogue support
-- make_scale_view: Create ScaleView for quantization scales
-- make_bias_view: Create BiasView for bias addition
+* :class:`GemmContext`: Accumulator context with ``reduce_axis()`` plus all config parameters
+* :class:`ScheduleContext`: Unified scheduling with ``persistent_tile_range()``/``get_tile()``
+* :class:`InputView`, :class:`OutputView`: Matrix views with ``tile_ptrs()`` for memory access
+* :class:`ScaleView`, :class:`BiasView`: Epilogue views for quantized GEMM (scale and bias)
+* :class:`Tile`: 2D tile with coordinates (pid_m, pid_n) and shape (block_m, block_n)
 
-Example usage:
+**Factory functions:**
+
+* :func:`make_input_view`, :func:`make_tensor_view`: Create InputView for A and B matrices
+* :func:`make_output_view`: Create OutputView for C matrix with epilogue support
+* :func:`make_scale_view`: Create ScaleView for quantization scales
+* :func:`make_bias_view`: Create BiasView for bias addition
+
+Example
+-------
+
+.. code-block:: python
+
     from tritonblas.kernels.stages import (
         ScheduleContext, GemmContext, 
         make_tensor_view, make_output_view,

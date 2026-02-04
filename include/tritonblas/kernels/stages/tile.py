@@ -17,7 +17,8 @@ class Tile:
     
     Stores runtime coordinates (pid_m, pid_n) and compile-time block sizes.
     
-    Use ScheduleContext methods to create tiles:
+    Use :class:`ScheduleContext` methods to create tiles::
+    
         # From linear tile_id
         out_tile = sched.get_tile_from_idx(tile_id)
         
@@ -27,7 +28,10 @@ class Tile:
         # Direct construction is also supported
         out_tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
     
-    Example usage:
+    Example
+    -------
+    .. code-block:: python
+    
         # Output tile from scheduler
         out_tile = sched.get_tile_from_idx(tile_id)
         
@@ -123,7 +127,8 @@ class Tile:
         Returns:
             Scaled accumulator as float32
         
-        Example:
+        Example::
+        
             acc = tile.scale(acc, A_scale_ptr, B_scale_ptr, M, N)
         """
         rm, rn = self.indices()
@@ -148,7 +153,8 @@ class Tile:
         Returns:
             Accumulator with bias added
         
-        Example:
+        Example::
+        
             acc = tile.bias(acc, bias_ptr, M)
         """
         rm, _ = self.indices()

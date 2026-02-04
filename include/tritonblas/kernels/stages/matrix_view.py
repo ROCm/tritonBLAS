@@ -4,12 +4,16 @@
 """
 Matrix view aggregates for tritonblas shards.
 
-Provides InputView, OutputView, ScaleView, and BiasView aggregates that 
-encapsulate matrix pointers, dimensions, and strides. The kernel writer 
-just describes their matrices and uses them - no need to worry about 
-layout flags or transpose.
+Provides :class:`InputView`, :class:`OutputView`, :class:`ScaleView`, and 
+:class:`BiasView` aggregates that encapsulate matrix pointers, dimensions, 
+and strides. The kernel writer just describes their matrices and uses them - 
+no need to worry about layout flags or transpose.
 
-Usage:
+Example
+-------
+
+.. code-block:: python
+
     # A [M, K] with strides stride_am, stride_ak
     tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
     
@@ -41,10 +45,10 @@ class InputView:
     Input matrix view for GEMM.
     
     Stores the matrix pointer, dimensions, and both strides.
-    The tile_ptrs() method computes pointers using the general formula
+    The ``tile_ptrs()`` method computes pointers using the general formula
     that works for any memory layout.
     
-    Fields:
+    Attributes:
         ptr: Base pointer to matrix data
         rows: Number of rows
         cols: Number of columns
@@ -115,7 +119,7 @@ class ScaleView:
     Stores pointers to per-row A scales and per-column B scales,
     along with dimensions for bounds checking.
     
-    Fields:
+    Attributes:
         a_scale_ptr: Pointer to A scale vector (per-row, length M)
         b_scale_ptr: Pointer to B scale vector (per-column, length N)
         M: Number of rows (for A scale bounds)
@@ -171,7 +175,7 @@ class BiasView:
     
     Stores pointer to bias vector and dimension for bounds checking.
     
-    Fields:
+    Attributes:
         ptr: Pointer to bias vector (length M, broadcast across columns)
         M: Number of rows (for bounds checking)
         stride: Stride for bias vector (default: 1)
@@ -209,15 +213,20 @@ class OutputView:
     """
     Output matrix view for GEMM.
     
-    Same design as InputView - stores pointer, dimensions, and strides.
-    Provides store() with optional epilogue (scaling, bias, type conversion).
+    Same design as :class:`InputView` - stores pointer, dimensions, and strides.
+    Provides ``store()`` with optional epilogue (scaling, bias, type conversion).
     
-    The store() method can optionally apply:
-    - Quantization scales (from ScaleView)
-    - Bias addition (from BiasView)
-    - Type conversion to output dtype
+    The ``store()`` method can optionally apply:
     
-    Example:
+    * Quantization scales (from :class:`ScaleView`)
+    * Bias addition (from :class:`BiasView`)
+    * Type conversion to output dtype
+    
+    Example
+    -------
+    
+    .. code-block:: python
+    
         tensorC = make_output_view(C, M, N, stride_cm, stride_cn)
         scale_view = make_scale_view(A_scale, B_scale, M, N)
         bias_view = make_bias_view(bias, M, stride_bias)
@@ -264,7 +273,8 @@ class OutputView:
             scale: Optional ScaleView for quantization scaling
             bias: Optional BiasView for bias addition
         
-        Example:
+        Example::
+        
             # Simple store (no epilogue)
             tensorC.store(acc.to(C.type.element_ty), out_tile)
             
@@ -325,7 +335,8 @@ def make_input_view(ptr, rows, cols, stride_row, stride_col) -> InputView:
     Returns:
         InputView with all fields as tensors
     
-    Example:
+    Example::
+    
         # A is [M, K] matrix - strides can be int or tensor
         tensorA = make_input_view(A, M, K, stride_am, stride_ak)
         
@@ -369,7 +380,8 @@ def make_output_view(ptr, rows, cols, stride_row, stride_col) -> OutputView:
     Returns:
         OutputView with all fields as tensors
     
-    Example:
+    Example::
+    
         # C is [M, N] output matrix
         tensorC = make_output_view(C, M, N, stride_cm, stride_cn)
     """
@@ -405,7 +417,8 @@ def make_scale_view(a_scale_ptr, b_scale_ptr, M, N, stride_a=1, stride_b=1) -> S
     Returns:
         ScaleView with all fields as tensors
     
-    Example:
+    Example::
+    
         scale_view = make_scale_view(A_scale_ptr, B_scale_ptr, M, N)
         tensorC.store(acc, out_tile, scale=scale_view)
     """
@@ -431,7 +444,8 @@ def make_bias_view(bias_ptr, M, stride=1) -> BiasView:
     Returns:
         BiasView with all fields as tensors
     
-    Example:
+    Example::
+    
         bias_view = make_bias_view(bias_ptr, M, stride_bias)
         tensorC.store(acc, out_tile, bias=bias_view)
     """
