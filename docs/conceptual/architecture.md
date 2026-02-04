@@ -188,53 +188,6 @@ See the [Stages Reference](../reference/stages-autodoc.rst) for details.
 
 ---
 
-## Design Principles
-
-```{list-table}
-:header-rows: 1
-:widths: 20 80
-
-* - Principle
-  - How We Apply It
-* - **Simplicity**
-  - Minimal API surface. Two functions cover 90% of use cases.
-* - **Performance**
-  - Analytical model provides optimal configs without autotuning overhead.
-* - **Predictability**
-  - Same inputs → same config → same performance. Always.
-* - **Extensibility**
-  - Stages module lets you build custom kernels with production-quality building blocks.
-```
-
----
-
-## Tech Stack
-
-```
-┌──────────────────────────────────────────────┐
-│                 tritonBLAS                   │
-│  ┌────────────────────────────────────────┐  │
-│  │              Python API                │  │
-│  └────────────────────────────────────────┘  │
-├──────────────────────────────────────────────┤
-│  ┌────────────────────────────────────────┐  │
-│  │           Triton Kernels               │  │
-│  │       (JIT-compiled to GPU code)       │  │
-│  └────────────────────────────────────────┘  │
-├──────────────────────────────────────────────┤
-│  ┌──────────────────┐  ┌──────────────────┐  │
-│  │     PyTorch      │  │      ROCm        │  │
-│  │  Tensor Runtime  │  │   GPU Runtime    │  │
-│  └──────────────────┘  └──────────────────┘  │
-├──────────────────────────────────────────────┤
-│  ┌────────────────────────────────────────┐  │
-│  │           AMD Instinct GPUs            │  │
-│  │         (MI200, MI300 series)          │  │
-│  └────────────────────────────────────────┘  │
-└──────────────────────────────────────────────┘
-```
-
----
 
 ## Learn More
 
