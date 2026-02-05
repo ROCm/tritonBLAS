@@ -1,17 +1,24 @@
 """
-Work-stealing persistent GEMM kernel.
+Work-stealing persistent GEMM kernel with per-XCD atomic counters.
 
 Instead of statically partitioning tiles across workgroups (for tile_id in
 range(pid, total_tiles, NUM_SMS)), each WG dynamically grabs the next
-available tile via a global atomic counter.  This naturally load-balances
-when some WGs arrive late to the party.
+available tile via an atomic counter that is local to its XCD.
+
+PIDs are assigned round-robin across XCDs:
+    pid 0 → XCD 0, pid 1 → XCD 1, …, pid 7 → XCD 7, pid 8 → XCD 0, …
+
+The tile space is partitioned into contiguous per-XCD regions:
+    XCD i owns tiles [i * tiles_per_xcd, min((i+1) * tiles_per_xcd, total_tiles))
+
+Each XCD has its own atomic counter (tile_counter[xcd_id]) so CUs only
+contend with the ~38 other CUs on the same die, not all 304 CUs.
 """
 
 import triton
 import triton.language as tl
 import torch
 
-from .stages.indexing.pid_transforms import chiplet_transform_chunked
 
 @triton.jit()
 def ws_persistent_matmul(
@@ -21,7 +28,7 @@ def ws_persistent_matmul(
     A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
-    tile_counter,  # Global atomic counter for work-stealing (int32[1])
+    tile_counter,  # Per-XCD atomic counters (int32[NUM_XCDS])
     M,
     N,
     K,
@@ -38,7 +45,6 @@ def ws_persistent_matmul(
     GROUP_SIZE_M: tl.constexpr,
     NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
     CACHE_MODIFIER_A: tl.constexpr,
@@ -46,9 +52,21 @@ def ws_persistent_matmul(
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
 ):
+    pid = tl.program_id(0)
+
+    # ── Per-XCD work-stealing ──────────────────────────────────────────
+    # PIDs are round-robin across XCDs: 0→XCD0, 1→XCD1, …, 7→XCD7, 8→XCD0…
+    xcd_id = pid % NUM_XCDS
+
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
+
+    # Partition tiles into contiguous per-XCD regions.
+    tiles_per_xcd = tl.cdiv(total_tiles, NUM_XCDS)
+    xcd_base = xcd_id * tiles_per_xcd
+    xcd_end = tl.minimum(xcd_base + tiles_per_xcd, total_tiles)
+    tiles_this_xcd = xcd_end - xcd_base
 
     tl.assume(stride_am > 0)
     tl.assume(stride_ak > 0)
@@ -59,18 +77,14 @@ def ws_persistent_matmul(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    # ── Work-stealing with chiplet swizzle ────────────────────────────────
-    # 1. Grab a raw tile index from a single global atomic counter.
-    # 2. Swizzle it through chiplet_transform_chunked so that consecutive
-    #    tile_ids land on the same XCD → better L2 locality.
-    # 3. The GROUP_SIZE_M decomposition below turns the swizzled tile_id
-    #    into (pid_m, pid_n).
-    tile_id = tl.atomic_add(tile_counter, 1)
-    for _ in range(total_tiles):
-        if tile_id < total_tiles:
-            # Chiplet-aware swizzle
-            if NUM_XCDS != 1:
-                tile_id = chiplet_transform_chunked(tile_id, total_tiles, NUM_XCDS, CHUNK_SIZE)
+    # Per-XCD atomic counter — only CUs on the same die contend.
+    counter_ptr = tile_counter + xcd_id
+    local_tile_idx = tl.atomic_add(counter_ptr, 1)
+
+    for _ in range(tiles_per_xcd):
+        if local_tile_idx < tiles_this_xcd:
+            # Map local index → global tile_id
+            tile_id = xcd_base + local_tile_idx
 
             # GROUP_SIZE_M swizzle → (pid_m, pid_n)
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -170,5 +184,5 @@ def ws_persistent_matmul(
             C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
             tl.store(C_, c, c_mask)
 
-            # Grab next tile
-            tile_id = tl.atomic_add(tile_counter, 1)
+            # Grab next tile from this XCD's counter
+            local_tile_idx = tl.atomic_add(counter_ptr, 1)

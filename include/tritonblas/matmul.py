@@ -12,6 +12,7 @@ _tensor_cache = {}
 
 # TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
 _DEFAULT_MAX_BLOCK_SIZE = 65536
+_DEFAULT_MAX_XCDS = 16  # Covers MI300X (8 XCDs) with headroom for future chips
 
 
 class MatmulConfig:
@@ -25,19 +26,22 @@ class MatmulConfig:
     Attributes:
         num_sms:        Number of SMs / CUs on the device.
         max_block_size: Maximum tile footprint (BLOCK_M * BLOCK_N).
-        tile_counter:   ``int32[1]`` atomic counter for work-stealing.
+        max_xcds:       Maximum number of XCDs (chiplets) supported.
+        tile_counter:   ``int32[max_xcds]`` per-XCD atomic counters for work-stealing.
         locks:          ``uint8[num_sms]`` stream-K lock array.
         P:              ``float32[num_sms, max_block_size]`` stream-K partial buffer.
     """
 
-    def __init__(self, device: str = "cuda", max_block_size: int = _DEFAULT_MAX_BLOCK_SIZE):
+    def __init__(self, device: str = "cuda", max_block_size: int = _DEFAULT_MAX_BLOCK_SIZE,
+                 max_xcds: int = _DEFAULT_MAX_XCDS):
         props = torch.cuda.get_device_properties(device)
         self.device = device
         self.num_sms: int = props.multi_processor_count
         self.max_block_size: int = max_block_size
+        self.max_xcds: int = max_xcds
 
-        # Work-stealing tile counter
-        self.tile_counter = torch.zeros(1, device=device, dtype=torch.int32)
+        # Work-stealing per-XCD tile counters
+        self.tile_counter = torch.zeros(max_xcds, device=device, dtype=torch.int32)
 
         # Stream-K buffers
         self.locks = torch.empty(self.num_sms, device=device, dtype=torch.uint8)
@@ -62,11 +66,12 @@ class MatmulConfig:
     def __repr__(self):
         return (
             f"MatmulConfig(device={self.device!r}, num_sms={self.num_sms}, "
-            f"max_block_size={self.max_block_size})"
+            f"max_block_size={self.max_block_size}, max_xcds={self.max_xcds})"
         )
 
 
-def matmul_preamble(device: str = "cuda", max_block_size: int = _DEFAULT_MAX_BLOCK_SIZE) -> MatmulConfig:
+def matmul_preamble(device: str = "cuda", max_block_size: int = _DEFAULT_MAX_BLOCK_SIZE,
+                    max_xcds: int = _DEFAULT_MAX_XCDS) -> MatmulConfig:
     """
     Allocate all GPU-side buffers needed by the tritonBLAS GEMM kernels.
 
@@ -76,11 +81,12 @@ def matmul_preamble(device: str = "cuda", max_block_size: int = _DEFAULT_MAX_BLO
     Args:
         device:         CUDA device string (default ``"cuda"``).
         max_block_size: Maximum tile footprint (default 65536 = 256*256).
+        max_xcds:       Maximum XCD count for per-XCD counters (default 16).
 
     Returns:
         A :class:`MatmulConfig` ready for kernel launches.
     """
-    return MatmulConfig(device=device, max_block_size=max_block_size)
+    return MatmulConfig(device=device, max_block_size=max_block_size, max_xcds=max_xcds)
 
 
 # Lazy default config -- created on first use so import-time CUDA init is
@@ -168,10 +174,11 @@ def persistent_matmul_lt(
     chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
 
     if work_stealing:
-        # Work-stealing: launch grid = num CUs, tiles assigned dynamically.
+        # Work-stealing: launch grid = num CUs, tiles assigned dynamically
+        # via per-XCD atomic counters.
         grids = cfg.num_sms
 
-        # Reset the tile counter before each launch.
+        # Reset all per-XCD tile counters before each launch.
         cfg.reset_tile_counter()
 
         kk = ws_persistent_matmul[(grids,)](
@@ -181,7 +188,7 @@ def persistent_matmul_lt(
             a_scale if quantized else None,  # A_scale_ptr
             b_scale if quantized else None,  # B_scale_ptr
             None,  # TODO: Enable bias.
-            cfg.tile_counter,  # Work-stealing tile counter
+            cfg.tile_counter,  # Per-XCD tile counters (int32[max_xcds])
             M,
             N,
             K,
@@ -198,7 +205,6 @@ def persistent_matmul_lt(
             GROUP_SIZE_M=gsize_m,
             NUM_SMS=grids,
             NUM_XCDS=num_xcds,
-            CHUNK_SIZE=chunk_size,
             BIAS=False,
             EVEN_K=even_k,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,

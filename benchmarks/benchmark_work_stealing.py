@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Benchmark: work-stealing persistent GEMM vs. static persistent GEMM vs. Stream-K vs. torch.matmul
+Benchmark: per-XCD work-stealing persistent GEMM vs. static persistent GEMM
+           vs. Stream-K vs. torch.matmul
 
 Uses importlib bootstrap to load kernels directly, bypassing the full tritonblas
 import (which requires triton.constexpr_function not available in older builds).
@@ -80,7 +81,10 @@ streamk_matmul = _sk_mod.streamk_matmul
 # ---------------------------------------------------------------------------
 # Launch helpers
 # ---------------------------------------------------------------------------
-def _common_params(A, B, C, BLK_M, BLK_N, BLK_K, GROUP_M, NUM_XCDS):
+NUM_XCDS = 8  # MI300X
+
+
+def _common_params(A, B, C, BLK_M, BLK_N, BLK_K, GROUP_M):
     M, K = A.shape
     _, N = B.shape
     total_blocks_M = triton.cdiv(M, BLK_M)
@@ -92,10 +96,10 @@ def _common_params(A, B, C, BLK_M, BLK_N, BLK_K, GROUP_M, NUM_XCDS):
     return M, K, N, total_tiles, even_k, chunk_size
 
 
-def launch_persistent(A, B, C, BLK_M=128, BLK_N=128, BLK_K=64, GROUP_M=8, NUM_XCDS=8):
+def launch_persistent(A, B, C, BLK_M=128, BLK_N=128, BLK_K=64, GROUP_M=8):
     """Original static-partition persistent GEMM (monolithic)."""
     M, K, N, total_tiles, even_k, chunk_size = _common_params(
-        A, B, C, BLK_M, BLK_N, BLK_K, GROUP_M, NUM_XCDS
+        A, B, C, BLK_M, BLK_N, BLK_K, GROUP_M
     )
     grids = total_tiles
     persistent_matmul[(grids,)](
@@ -114,10 +118,10 @@ def launch_persistent(A, B, C, BLK_M=128, BLK_N=128, BLK_K=64, GROUP_M=8, NUM_XC
 
 
 def launch_work_stealing(A, B, C, tile_counter, num_sms,
-                         BLK_M=128, BLK_N=128, BLK_K=64, GROUP_M=8, NUM_XCDS=8):
-    """Work-stealing persistent GEMM (atomic counter)."""
+                         BLK_M=128, BLK_N=128, BLK_K=64, GROUP_M=8):
+    """Per-XCD work-stealing persistent GEMM."""
     M, K, N, total_tiles, even_k, chunk_size = _common_params(
-        A, B, C, BLK_M, BLK_N, BLK_K, GROUP_M, NUM_XCDS
+        A, B, C, BLK_M, BLK_N, BLK_K, GROUP_M
     )
     grids = num_sms
     tile_counter.zero_()
@@ -130,7 +134,7 @@ def launch_work_stealing(A, B, C, tile_counter, num_sms,
         stride_ak=A.stride(1), stride_bk=B.stride(0),
         BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=GROUP_M, NUM_SMS=grids, NUM_XCDS=NUM_XCDS,
-        CHUNK_SIZE=chunk_size, BIAS=False, EVEN_K=even_k,
+        BIAS=False, EVEN_K=even_k,
         CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None, QUANTIZED=False,
         num_stages=2, num_warps=8, waves_per_eu=0,
         matrix_instr_nonkdim=16, kpack=1,
@@ -138,12 +142,11 @@ def launch_work_stealing(A, B, C, tile_counter, num_sms,
 
 
 def launch_streamk(A, B, C, locks, P, sk_grid,
-                   BLK_M=128, BLK_N=128, BLK_K=64, GROUP_M=8, NUM_XCDS=8):
+                   BLK_M=128, BLK_N=128, BLK_K=64, GROUP_M=8):
     """Stream-K persistent GEMM."""
     M, K, N, total_tiles, even_k, chunk_size = _common_params(
-        A, B, C, BLK_M, BLK_N, BLK_K, GROUP_M, NUM_XCDS
+        A, B, C, BLK_M, BLK_N, BLK_K, GROUP_M
     )
-    # StreamK tiles = remainder tiles that need cooperative decomposition
     streamk_tiles = total_tiles % sk_grid if sk_grid > 0 else 0
 
     chunk_size_sk = GROUP_M * GROUP_M
@@ -222,16 +225,17 @@ def main():
     device = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device)
     NUM_SMS = props.multi_processor_count
-    NUM_XCDS = 8  # MI300X
 
     print(f"Device      : {props.name}")
     print(f"CUs (SMs)   : {NUM_SMS}")
+    print(f"XCDs        : {NUM_XCDS}")
+    print(f"CUs per XCD : {NUM_SMS // NUM_XCDS}")
     print(f"HIP_VISIBLE : {os.environ.get('HIP_VISIBLE_DEVICES', '<not set>')}")
     print()
 
-    # Pre-allocate work-stealing counter + Stream-K buffers once
-    tile_counter = torch.zeros(1, device="cuda", dtype=torch.int32)
-    max_grid = NUM_SMS * 2  # generous upper bound for SK grid
+    # Pre-allocate per-XCD tile counters + Stream-K buffers
+    tile_counter = torch.zeros(NUM_XCDS, device="cuda", dtype=torch.int32)
+    max_grid = NUM_SMS * 2
     block_area = 128 * 128
     locks = torch.zeros(max_grid, device="cuda", dtype=torch.uint8)
     P = torch.zeros(max_grid, block_area, device="cuda", dtype=torch.float32)
@@ -239,7 +243,7 @@ def main():
     BLK_M, BLK_N, BLK_K, GROUP_M = 128, 128, 64, 8
     dtype = torch.float16
 
-    # Problem sizes to benchmark
+    # Problem sizes
     sizes = [
         # Square
         (256,   256,   256),
@@ -268,7 +272,7 @@ def main():
     # Header
     hdr = (
         f"{'M':>6} {'N':>6} {'K':>6} │ "
-        f"{'Persistent':>12} {'WorkSteal':>12} {'StreamK':>12} {'torch.mm':>12} │ "
+        f"{'Persistent':>12} {'WS-perXCD':>12} {'StreamK':>12} {'torch.mm':>12} │ "
         f"{'WS/Pers':>8} {'WS/SK':>8} {'WS/Torch':>8}"
     )
     sep = "─" * len(hdr)
@@ -281,38 +285,31 @@ def main():
 
     for M, N, K in sizes:
         A = torch.randn(M, K, device="cuda", dtype=dtype)
-        B = torch.randn(N, K, device="cuda", dtype=dtype).T  # K x N contiguous
+        B = torch.randn(N, K, device="cuda", dtype=dtype).T
         C_pers = torch.zeros(M, N, device="cuda", dtype=dtype)
         C_ws   = torch.zeros(M, N, device="cuda", dtype=dtype)
         C_sk   = torch.zeros(M, N, device="cuda", dtype=dtype)
         C_ref  = torch.zeros(M, N, device="cuda", dtype=dtype)
 
-        even_k = K % BLK_K == 0
-        total_tiles_m = triton.cdiv(M, BLK_M)
-        total_tiles_n = triton.cdiv(N, BLK_N)
-        total_tiles = total_tiles_m * total_tiles_n
-
-        # Skip tiny sizes where tiles < 1 (e.g. M=1 with BLK_M=128 still gives 1 tile)
         sk_grid = compute_sk_grid(M, N, K, BLK_M, BLK_N, BLK_K, NUM_SMS)
-        # Clamp stream-K grid to our pre-allocated buffer size
         sk_grid = min(sk_grid, max_grid)
 
         # ── Benchmark each variant ──────────────────────────────────
         try:
             ms_pers = bench(lambda: launch_persistent(
-                A, B, C_pers, BLK_M, BLK_N, BLK_K, GROUP_M, NUM_XCDS))
+                A, B, C_pers, BLK_M, BLK_N, BLK_K, GROUP_M))
         except Exception as e:
             ms_pers = float("nan")
 
         try:
             ms_ws = bench(lambda: launch_work_stealing(
-                A, B, C_ws, tile_counter, NUM_SMS, BLK_M, BLK_N, BLK_K, GROUP_M, NUM_XCDS))
+                A, B, C_ws, tile_counter, NUM_SMS, BLK_M, BLK_N, BLK_K, GROUP_M))
         except Exception as e:
             ms_ws = float("nan")
 
         try:
             ms_sk = bench(lambda: launch_streamk(
-                A, B, C_sk, locks, P, sk_grid, BLK_M, BLK_N, BLK_K, GROUP_M, NUM_XCDS))
+                A, B, C_sk, locks, P, sk_grid, BLK_M, BLK_N, BLK_K, GROUP_M))
         except Exception as e:
             ms_sk = float("nan")
 
@@ -344,7 +341,6 @@ def main():
         }
         results.append(row)
 
-        # Format ms; mark NaN
         def fmt_ms(v):
             return f"{v:12.4f}" if v == v else f"{'N/A':>12}"
         def fmt_su(v):
@@ -364,7 +360,7 @@ def main():
     print(f"{'':>20} │ {'── TFLOP/s ──':^51} │")
     hdr2 = (
         f"{'M':>6} {'N':>6} {'K':>6} │ "
-        f"{'Persistent':>12} {'WorkSteal':>12} {'StreamK':>12} {'torch.mm':>12} │"
+        f"{'Persistent':>12} {'WS-perXCD':>12} {'StreamK':>12} {'torch.mm':>12} │"
     )
     print(hdr2)
     print(sep)
@@ -388,7 +384,7 @@ def main():
         return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else float("nan")
 
     print()
-    print("Geometric-mean speedup of Work-Stealing over:")
+    print("Geometric-mean speedup of per-XCD Work-Stealing over:")
     print(f"  Persistent (static) : {geomean(valid_pers):.4f}x")
     print(f"  Stream-K            : {geomean(valid_sk):.4f}x")
     print(f"  torch.matmul        : {geomean(valid_torch):.4f}x")

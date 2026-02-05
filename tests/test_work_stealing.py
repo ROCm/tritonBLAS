@@ -1,5 +1,6 @@
 """
-Standalone smoke-test for the work-stealing persistent GEMM kernel.
+Standalone smoke-test for the work-stealing persistent GEMM kernel
+with per-XCD atomic counters.
 
 Directly imports the work-stealing kernel to avoid the stages/streamk import
 chain that requires a newer Triton with `constexpr_function`.
@@ -64,33 +65,28 @@ _ws_mod = _load_module(
 )
 ws_persistent_matmul = _ws_mod.ws_persistent_matmul
 
+NUM_XCDS = 8  # MI300X
+
 
 def make_tile_counter(device="cuda"):
-    """Allocate a fresh work-stealing tile counter."""
-    return torch.zeros(1, device=device, dtype=torch.int32)
+    """Allocate per-XCD work-stealing tile counters."""
+    return torch.zeros(NUM_XCDS, device=device, dtype=torch.int32)
 
 
 def run_ws_persistent_matmul(A, B, C, tile_counter, BLK_M=128, BLK_N=128, BLK_K=64, GROUP_M=8):
-    """Launch the work-stealing persistent kernel."""
+    """Launch the work-stealing persistent kernel with per-XCD counters."""
     M, K = A.shape
     _, N = B.shape
 
     props = torch.cuda.get_device_properties(A.device)
     NUM_SMS = props.multi_processor_count
 
-    total_blocks_M = triton.cdiv(M, BLK_M)
-    total_blocks_N = triton.cdiv(N, BLK_N)
-    total_tiles = total_blocks_M * total_blocks_N
     even_k = K % BLK_K == 0
-
-    NUM_XCDS = 8
-    chunk_size = GROUP_M * GROUP_M
-    chunk_size = min(chunk_size, max(1, total_tiles // NUM_XCDS))
 
     # Grid = number of CUs (work-stealing)
     grids = NUM_SMS
 
-    # Reset counter
+    # Reset all per-XCD counters
     tile_counter.zero_()
 
     ws_persistent_matmul[(grids,)](
@@ -113,7 +109,6 @@ def run_ws_persistent_matmul(A, B, C, tile_counter, BLK_M=128, BLK_N=128, BLK_K=
         GROUP_SIZE_M=GROUP_M,
         NUM_SMS=grids,
         NUM_XCDS=NUM_XCDS,
-        CHUNK_SIZE=chunk_size,
         BIAS=False,
         EVEN_K=even_k,
         CACHE_MODIFIER_A=None,
@@ -183,11 +178,12 @@ def main():
     props = torch.cuda.get_device_properties(device)
     print(f"Device: {props.name}  (CUs: {props.multi_processor_count})")
     print(f"HIP_VISIBLE_DEVICES = {os.environ.get('HIP_VISIBLE_DEVICES', '<not set>')}")
+    print(f"Per-XCD counters: {NUM_XCDS}")
     print()
 
     # ── Correctness ───────────────────────────────────────────────────
     print("=" * 68)
-    print("Correctness (work-stealing kernel vs torch.matmul)")
+    print("Correctness (per-XCD work-stealing kernel vs torch.matmul)")
     print("=" * 68)
     all_pass = True
     for m, n, k in [
@@ -209,7 +205,7 @@ def main():
     # ── Throughput ────────────────────────────────────────────────────
     print()
     print("=" * 68)
-    print("Throughput (work-stealing kernel)")
+    print("Throughput (per-XCD work-stealing kernel)")
     print("=" * 68)
     for m, n, k in [
         (1024, 1024, 1024),
