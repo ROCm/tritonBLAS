@@ -4,6 +4,7 @@ Kernel implementations for tritonblas.
 This package contains specific GEMM kernel implementations:
 - persistent_gemm: Persistent (data-parallel) GEMM kernel using composable stages
 - persistent_gemm_monolithic: Monolithic persistent GEMM kernel (legacy, for debugging)
+- persistent_gemm_work_stealing: Work-stealing persistent GEMM kernel
 - streamk_gemm: Stream-K GEMM kernel for load balancing
 - stages: Composable kernel building blocks
 
@@ -23,6 +24,9 @@ else:
     # Use composable stages version (default)
     from .persistent_gemm import persistent_matmul
 
+# Work-stealing kernel (opt-in via work_stealing=True in matmul calls)
+from .persistent_gemm_work_stealing import ws_persistent_matmul
+
 # Stream-K kernel is always the same
 from .streamk_gemm import streamk_matmul
 
@@ -32,4 +36,4 @@ from .fp4_matmul import fp4_matmul
 # Export stages submodule
 from . import stages
 
-__all__ = ['persistent_matmul', 'streamk_matmul', 'fp4_matmul', 'stages']
+__all__ = ['persistent_matmul', 'ws_persistent_matmul', 'streamk_matmul', 'fp4_matmul', 'stages']
