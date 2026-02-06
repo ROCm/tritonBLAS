@@ -68,9 +68,7 @@ Example
 # Core aggregates
 from .tile import Tile
 from .gemm_context import GemmContext
-from .schedule import (
-    ScheduleContext, make_schedule_context,
-)
+from .schedule import ScheduleContext
 from .matrix_view import (
     InputView, OutputView, ScaleView, BiasView,
     make_input_view, make_tensor_view, make_output_view,

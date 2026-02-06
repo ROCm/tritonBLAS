@@ -12,39 +12,30 @@ jobs:
     runs-on: [self-hosted, amd-gpu]
     
     container:
-      image: rocm/dev-ubuntu-24.04:7.2-complete
+      image: rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.7.1
       options: --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
     
     steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update
-          apt-get install -y git python3.12 python3.12-venv python3-pip python3.12-dev
-          update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
-          # Remove PEP 668 externally-managed marker so pip works in this disposable container since we're not using a virtual environment
-          rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
-
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
       - name: Set up environment
         run: |
           echo "Setting up ROCm environment..."
           export ROCM_PATH=/opt/rocm
           export PATH=$ROCM_PATH/bin:$PATH
-
-      - name: Install PyTorch with ROCm support
+          
+      - name: Install system dependencies
         run: |
-          pip3 install torch --index-url https://download.pytorch.org/whl/rocm7.1
-
-      - name: Install Triton
+          apt-get update
+          apt-get install -y git
+          
+      - name: Install Python dependencies
         run: |
+          python3 -m pip install --upgrade pip
           pip3 install -U triton
-
-      - name: Checkout tritonBLAS code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install tritonBLAS
-        run: |
           pip3 install -e .
           
       - name: Verify installation

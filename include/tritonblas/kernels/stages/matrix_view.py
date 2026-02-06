@@ -181,13 +181,13 @@ class BiasView:
         stride: Stride for bias vector (default: 1)
     """
     ptr: tl.tensor
-    N: tl.tensor
+    M: tl.tensor
     stride: tl.tensor
     
     @triton.constexpr_function
-    def __init__(self, ptr, N, stride):
+    def __init__(self, ptr, M, stride):
         self.ptr = ptr
-        self.N = N
+        self.M = M
         self.stride = stride
     
     @triton.jit
@@ -202,9 +202,9 @@ class BiasView:
         Returns:
             Accumulator with bias added
         """
-        _, rn = tile.indices()
-        bias_vector = tl.load(self.ptr + rn * self.stride, mask=rn < self.N, other=0.0)
-        acc = acc + bias_vector[None, :]
+        rm, _ = tile.indices()
+        bias_vector = tl.load(self.ptr + rm * self.stride, mask=rm < self.M, other=0.0)
+        acc = acc + bias_vector[:, None]
         return acc
 
 
@@ -317,7 +317,7 @@ class OutputView:
 # =============================================================================
 
 @triton.jit
-def make_input_view(ptr, rows, cols, stride_row, stride_col):
+def make_input_view(ptr, rows, cols, stride_row, stride_col) -> InputView:
     """
     Create an InputView with automatic stride type coercion.
     
@@ -327,7 +327,7 @@ def make_input_view(ptr, rows, cols, stride_row, stride_col):
     
     Args:
         ptr: Base pointer to matrix data
-        rows: Number of rows (first dimension)
+        rows: Number of rows (first dimension) - must be a tensor
         cols: Number of columns (second dimension)
         stride_row: Stride when moving along rows
         stride_col: Stride when moving along columns
@@ -347,25 +347,23 @@ def make_input_view(ptr, rows, cols, stride_row, stride_col):
     # TYPE PROMOTION TRICK
     # ═══════════════════════════════════════════════════════════════════════
     # Triton aggregates require strongly-typed fields (tl.tensor). However,
-    # dimensions and strides can be either Python ints or Triton tensors,
-    # especially under torch.compile which may pass ints during tracing.
+    # strides can be either Python ints (stride=1 for contiguous dimensions)
+    # or Triton tensors (stride>1 from kernel params).
     #
-    # The pattern `value + 0 * stride_row` promotes any int to a tensor:
-    #   - 0 * stride_row produces a tensor with value 0 (since stride_row is a tensor)
-    #   - value + (tensor 0) = tensor with value
+    # The pattern `stride + 0 * rows` promotes any int to a tensor:
+    #   - 0 * rows produces a tensor with value 0 (since rows is a tensor)
+    #   - stride + (tensor 0) = tensor with stride's value
     #
     # This has ZERO runtime cost - the compiler constant-folds 0*x and x+0.
     # ═══════════════════════════════════════════════════════════════════════
-    rows_t = rows + 0 * rows
-    cols_t = cols + 0 * rows
     stride_row_t = stride_row + 0 * rows
     stride_col_t = stride_col + 0 * rows
     
-    return InputView(ptr, rows_t, cols_t, stride_row_t, stride_col_t)
+    return InputView(ptr, rows, cols, stride_row_t, stride_col_t)
 
 
 @triton.jit
-def make_output_view(ptr, rows, cols, stride_row, stride_col):
+def make_output_view(ptr, rows, cols, stride_row, stride_col) -> OutputView:
     """
     Create an OutputView with automatic stride type coercion.
     
@@ -374,7 +372,7 @@ def make_output_view(ptr, rows, cols, stride_row, stride_col):
     
     Args:
         ptr: Base pointer to matrix data
-        rows: Number of rows (first dimension)
+        rows: Number of rows (first dimension) - must be a tensor
         cols: Number of columns (second dimension)
         stride_row: Stride when moving along rows
         stride_col: Stride when moving along columns
@@ -390,12 +388,10 @@ def make_output_view(ptr, rows, cols, stride_row, stride_col):
     # ═══════════════════════════════════════════════════════════════════════
     # TYPE PROMOTION TRICK - See make_input_view() for detailed explanation
     # ═══════════════════════════════════════════════════════════════════════
-    rows_t = rows + 0 * rows
-    cols_t = cols + 0 * rows
     stride_row_t = stride_row + 0 * rows
     stride_col_t = stride_col + 0 * rows
     
-    return OutputView(ptr, rows_t, cols_t, stride_row_t, stride_col_t)
+    return OutputView(ptr, rows, cols, stride_row_t, stride_col_t)
 
 
 # Alias for backward compatibility
@@ -403,7 +399,7 @@ make_tensor_view = make_input_view
 
 
 @triton.jit
-def make_scale_view(a_scale_ptr, b_scale_ptr, M, N, stride_a=1, stride_b=1):
+def make_scale_view(a_scale_ptr, b_scale_ptr, M, N, stride_a=1, stride_b=1) -> ScaleView:
     """
     Create a ScaleView for quantized GEMM epilogue.
     
@@ -434,15 +430,15 @@ def make_scale_view(a_scale_ptr, b_scale_ptr, M, N, stride_a=1, stride_b=1):
 
 
 @triton.jit
-def make_bias_view(bias_ptr, N, stride=1):
+def make_bias_view(bias_ptr, M, stride=1) -> BiasView:
     """
     Create a BiasView for GEMM epilogue.
     
     Stores bias vector pointer with automatic stride type coercion.
     
     Args:
-        bias_ptr: Pointer to bias vector (length N)
-        N: Number of columns (for bounds checking)
+        bias_ptr: Pointer to bias vector (length M)
+        M: Number of rows (for bounds checking) - must be a tensor
         stride: Stride for bias vector (default: 1)
     
     Returns:
@@ -450,14 +446,13 @@ def make_bias_view(bias_ptr, N, stride=1):
     
     Example::
     
-        bias_view = make_bias_view(bias_ptr, N, stride_bias)
+        bias_view = make_bias_view(bias_ptr, M, stride_bias)
         tensorC.store(acc, out_tile, bias=bias_view)
     """
     # Type promotion for stride
-    stride_t = stride + 0 * N
-    N_t = N + 0 * N
+    stride_t = stride + 0 * M
     
-    return BiasView(bias_ptr, N_t, stride_t)
+    return BiasView(bias_ptr, M, stride_t)
 
 
 # =============================================================================
