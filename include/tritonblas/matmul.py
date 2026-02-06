@@ -3,21 +3,102 @@ import triton
 import random
 import functools
 import time
-from .kernels import persistent_matmul, streamk_matmul
+from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from typing import Dict, Tuple, Optional
 
 _tensor_cache = {}
-current_device_index = torch.cuda.current_device()
-current_device = torch.cuda.get_device_properties(current_device_index)
-MAX_SMS = current_device.multi_processor_count
-# TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
-MAX_BLOCK_SIZE = 65536
 
-# Global pre-allocated buffers
-_global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
-_global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+# TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
+_DEFAULT_MAX_BLOCK_SIZE = 65536
+_DEFAULT_MAX_XCDS = 16  # Covers MI300X (8 XCDs) with headroom for future chips
+
+
+class MatmulConfig:
+    """
+    Pre-allocated GPU buffers and device metadata for GEMM kernel launches.
+
+    Create one via :func:`matmul_preamble` and pass it to any ``matmul*``
+    function.  Call :meth:`reset` (or the more targeted helpers) between
+    launches to zero out mutable state.
+
+    Attributes:
+        num_sms:        Number of SMs / CUs on the device.
+        max_block_size: Maximum tile footprint (BLOCK_M * BLOCK_N).
+        max_xcds:       Maximum number of XCDs (chiplets) supported.
+        tile_counter:   ``int32[max_xcds]`` per-XCD atomic counters for work-stealing.
+        locks:          ``uint8[num_sms]`` stream-K lock array.
+        P:              ``float32[num_sms, max_block_size]`` stream-K partial buffer.
+    """
+
+    def __init__(self, device: str = "cuda", max_block_size: int = _DEFAULT_MAX_BLOCK_SIZE,
+                 max_xcds: int = _DEFAULT_MAX_XCDS):
+        props = torch.cuda.get_device_properties(device)
+        self.device = device
+        self.num_sms: int = props.multi_processor_count
+        self.max_block_size: int = max_block_size
+        self.max_xcds: int = max_xcds
+
+        # Work-stealing per-XCD tile counters
+        self.tile_counter = torch.zeros(max_xcds, device=device, dtype=torch.int32)
+
+        # Stream-K buffers
+        self.locks = torch.empty(self.num_sms, device=device, dtype=torch.uint8)
+        self.P = torch.empty(self.num_sms, max_block_size, device=device, dtype=torch.float32)
+
+    # ------------------------------------------------------------------
+    # Reset helpers
+    # ------------------------------------------------------------------
+    def reset(self):
+        """Reset all mutable state (tile counter + stream-K buffers)."""
+        self.reset_tile_counter()
+        self.reset_streamk()
+
+    def reset_tile_counter(self):
+        """Zero the work-stealing tile counter."""
+        self.tile_counter.zero_()
+
+    def reset_streamk(self):
+        """Zero the stream-K locks (P is overwritten, no need to clear)."""
+        self.locks.zero_()
+
+    def __repr__(self):
+        return (
+            f"MatmulConfig(device={self.device!r}, num_sms={self.num_sms}, "
+            f"max_block_size={self.max_block_size}, max_xcds={self.max_xcds})"
+        )
+
+
+def matmul_preamble(device: str = "cuda", max_block_size: int = _DEFAULT_MAX_BLOCK_SIZE,
+                    max_xcds: int = _DEFAULT_MAX_XCDS) -> MatmulConfig:
+    """
+    Allocate all GPU-side buffers needed by the tritonBLAS GEMM kernels.
+
+    Call this once (e.g. during model init) and pass the returned config
+    into ``matmul``, ``matmul_lt``, ``matmul_a8w8``, etc.
+
+    Args:
+        device:         CUDA device string (default ``"cuda"``).
+        max_block_size: Maximum tile footprint (default 65536 = 256*256).
+        max_xcds:       Maximum XCD count for per-XCD counters (default 16).
+
+    Returns:
+        A :class:`MatmulConfig` ready for kernel launches.
+    """
+    return MatmulConfig(device=device, max_block_size=max_block_size, max_xcds=max_xcds)
+
+
+# Lazy default config -- created on first use so import-time CUDA init is
+# deferred until somebody actually calls a matmul function.
+_default_config: Optional[MatmulConfig] = None
+
+
+def _get_default_config() -> MatmulConfig:
+    global _default_config
+    if _default_config is None:
+        _default_config = matmul_preamble()
+    return _default_config
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -55,7 +136,11 @@ def persistent_matmul_lt(
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
+    work_stealing: bool = False,
+    config: Optional[MatmulConfig] = None,
 ):
+    cfg = config or _get_default_config()
+
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -84,49 +169,93 @@ def persistent_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
-    # Run in Data-parallel mode.
-    grids = total_tiles
-
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, total_programs // num_xcds)
+    chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
 
-    # TODO: Support other matmul algs.
-    kk = persistent_matmul[(grids,)](
-        a,
-        b,
-        c,
-        a_scale if quantized else None,  # A_scale_ptr
-        b_scale if quantized else None,  # B_scale_ptr
-        None,  # TODO: Enable bias.
-        M,
-        N,
-        K,
-        a.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        0,  # TODO: Enable bias stride.
-        stride_ak=a.stride(1),
-        stride_bk=b.stride(0),
-        BLOCK_SIZE_M=BLK_M,
-        BLOCK_SIZE_N=BLK_N,
-        BLOCK_SIZE_K=BLK_K,
-        GROUP_SIZE_M=gsize_m,
-        NUM_SMS=total_programs,
-        NUM_XCDS=num_xcds,
-        CHUNK_SIZE=chunk_size,
-        BIAS=False,
-        EVEN_K=even_k,
-        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
-        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
-        QUANTIZED=quantized,
-        num_stages=num_stages,
-        num_warps=num_warps,
-        waves_per_eu=waves_per_eu,
-        matrix_instr_nonkdim=mfmaInstrSize,
-        kpack=kpack,
-    )
+    if work_stealing:
+        # Work-stealing: launch grid = num CUs, tiles assigned dynamically
+        # via per-XCD atomic counters.
+        grids = cfg.num_sms
+
+        # Reset all per-XCD tile counters before each launch.
+        cfg.reset_tile_counter()
+
+        kk = ws_persistent_matmul[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,  # A_scale_ptr
+            b_scale if quantized else None,  # B_scale_ptr
+            None,  # TODO: Enable bias.
+            cfg.tile_counter,  # Per-XCD tile counters (int32[max_xcds])
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            0,  # TODO: Enable bias stride.
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=grids,
+            NUM_XCDS=num_xcds,
+            BIAS=False,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+        )
+    else:
+        # Default: data-parallel mode – one WG per tile.
+        grids = total_tiles
+
+        # TODO: Support other matmul algs.
+        kk = persistent_matmul[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,  # A_scale_ptr
+            b_scale if quantized else None,  # B_scale_ptr
+            None,  # TODO: Enable bias.
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            0,  # TODO: Enable bias stride.
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=total_programs,
+            NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size,
+            BIAS=False,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+        )
 
     return c
 
@@ -139,7 +268,10 @@ def streamk_matmul_lt(
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
+    config: Optional[MatmulConfig] = None,
 ):
+    cfg = config or _get_default_config()
+
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -180,13 +312,13 @@ def streamk_matmul_lt(
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
 
-    # Use global buffers with optimized zeroing
-    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
-        locks = _global_locks[:grids]
-        P = _global_P[:grids, :block_size]
+    # Use config buffers; fall back to fresh allocation for oversized grids.
+    if grids <= cfg.num_sms and block_size <= cfg.max_block_size:
+        locks = cfg.locks[:grids]
+        P = cfg.P[:grids, :block_size]
     else:
-        locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
-        P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
+        locks = torch.empty(grids, device=cfg.device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=cfg.device, dtype=torch.float32)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -234,31 +366,36 @@ def streamk_matmul_lt(
     return c
 
 def matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector,
+    enable_streamk=False, work_stealing=False, config: Optional[MatmulConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector)
+        return streamk_matmul_lt(a, b, c, selector, config=config)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, c, selector, work_stealing=work_stealing, config=config)
 
 def matmul_a8w8_lt(
-    a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
+    c: torch.Tensor, selector, enable_streamk=False, work_stealing=False,
+    config: Optional[MatmulConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return streamk_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True, config=config)
     else:
-        return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing, config=config)
 
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
     enable_streamk=False,
+    work_stealing=False,
     sk_grid=None,
+    config: Optional[MatmulConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -266,9 +403,9 @@ def matmul(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
+        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, config=config)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, c, selector, work_stealing=work_stealing, config=config)
 
 def matmul_a8w8(
     a: torch.Tensor,
@@ -277,7 +414,9 @@ def matmul_a8w8(
     b_scale: torch.Tensor,
     c: torch.Tensor,
     enable_streamk=False,
+    work_stealing=False,
     sk_grid=None,
+    config: Optional[MatmulConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -285,9 +424,9 @@ def matmul_a8w8(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, config=config)
     else:
-        return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing, config=config)
 
 def matmul_fp4(
     a: torch.Tensor,
