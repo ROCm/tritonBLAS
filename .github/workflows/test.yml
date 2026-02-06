@@ -32,7 +32,6 @@ jobs:
 
       - name: Install PyTorch with ROCm support
         run: |
-          python3 -m pip install --upgrade pip
           pip3 install torch --index-url https://download.pytorch.org/whl/rocm7.1
 
       - name: Install Triton
