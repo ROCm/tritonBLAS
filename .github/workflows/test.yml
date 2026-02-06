@@ -16,31 +16,34 @@ jobs:
       options: --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      
-      - name: Set up environment
-        run: |
-          echo "Setting up ROCm environment..."
-          export ROCM_PATH=/opt/rocm
-          export PATH=$ROCM_PATH/bin:$PATH
-          
       - name: Install system dependencies
         run: |
           apt-get update
           apt-get install -y git python3.12 python3.12-venv python3-pip python3.12-dev
           update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
-      - name: Install PyTorch (ROCm)
+      - name: Set up environment
+        run: |
+          echo "Setting up ROCm environment..."
+          export ROCM_PATH=/opt/rocm
+          export PATH=$ROCM_PATH/bin:$PATH
+
+      - name: Install PyTorch with ROCm support
         run: |
           python3 -m pip install --upgrade pip
           pip3 install torch --index-url https://download.pytorch.org/whl/rocm7.1
 
-      - name: Install Python dependencies
+      - name: Install Triton
         run: |
           pip3 install -U triton
+
+      - name: Checkout tritonBLAS code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install tritonBLAS
+        run: |
           pip3 install -e .
           
       - name: Verify installation
