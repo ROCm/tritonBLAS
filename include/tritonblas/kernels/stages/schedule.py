@@ -255,3 +255,19 @@ class ScheduleContext:
         num_pid_m = tl.cdiv(self.M, self.ctx.block_m)
         num_pid_n = tl.cdiv(self.N, self.ctx.block_n)
         return num_pid_m * num_pid_n
+
+
+@triton.jit
+def make_schedule_context(M, N, K, ctx: GemmContext, streamk_tiles=0):
+    """
+    Create a ScheduleContext from a GemmContext.
+    
+    Args:
+        M, N, K: Problem dimensions
+        ctx: GemmContext with block sizes and scheduling parameters
+        streamk_tiles: Number of tiles for Stream-K (0 = persistent only)
+    """
+    M_t = M + 0 * M
+    N_t = N + 0 * M
+    K_t = K + 0 * M
+    return ScheduleContext(M_t, N_t, K_t, ctx, streamk_tiles)
