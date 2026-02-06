@@ -134,17 +134,17 @@ def persistent_matmul_lt(
 def fused_matmul_lt(
     a: torch.Tensor,
     b: torch.Tensor,
-    e: torch.Tensor,
     d: torch.Tensor,
+    e: torch.Tensor,
     selector,
     enable_streamk: bool = False,
 ) -> torch.Tensor:
     """
-    Fused matrix multiplication: D = (A @ B) @ E
+    Fused matrix multiplication: E = (A @ B) @ D
     
     Performs two consecutive matrix multiplications in a fused manner:
         C = A @ B  (First GEMM: M×K @ K×N = M×N)
-        D = C @ E  (Second GEMM: M×N @ N×P = M×P)
+        E = C @ D  (Second GEMM: M×N @ N×P = M×P)
     
     The intermediate result C is allocated internally and passed to the fused kernel.
     
@@ -154,9 +154,9 @@ def fused_matmul_lt(
         First left input matrix (M × K)
     b : torch.Tensor
         First right input matrix (K × N)
-    e : torch.Tensor
-        Second right input matrix (N × P)
     d : torch.Tensor
+        Second right input matrix (N × P)
+    e : torch.Tensor
         Final output matrix (M × P), pre-allocated by user
     selector : OrigamiMatmulSelector
         Configuration selector for the first GEMM (M, N, K dimensions)
@@ -166,31 +166,41 @@ def fused_matmul_lt(
     Returns:
     --------
     torch.Tensor
-        The output matrix D
+        The output matrix E
     """
     # Validate dimensions
     assert a.shape[1] == b.shape[0], "First GEMM: incompatible dimensions (A.K != B.K)"
-    assert b.shape[1] == e.shape[0], "Second GEMM: incompatible dimensions (C.N != E.N)"
+    assert b.shape[1] == d.shape[0], "Second GEMM: incompatible dimensions (C.N != D.N)"
+
+    assert enable_streamk == False, "StreamK is not supported for fused GEMM"
     
     M, K = a.shape
     _, N = b.shape
-    _, P = e.shape
+    _, P = d.shape
     
     # Allocate intermediate tensor C (M × N)
     # Use same dtype as final output
-    c = torch.empty((M, N), device=a.device, dtype=d.dtype)
-    
-    # Extract configuration from selector
+    c = torch.empty((M, N), device=a.device, dtype=e.dtype)
+
+    # Extract configuration from selector. Both GEMMs share the same selector parameters.
     BLK_M = selector.block_m
     BLK_N = selector.block_n
     BLK_K = selector.block_k
     gsize_m = selector.group_m
     num_xcds = selector.num_sms
-    
-    total_blocks_M = triton.cdiv(M, BLK_M)
-    total_blocks_N = triton.cdiv(N, BLK_N)
-    total_tiles = total_blocks_M * total_blocks_N
-    total_programs = total_tiles
+
+    # The first GEMM is `alpha`, the second is `beta`.
+    # Both GEMMs for now use the same tile block sizes.
+    # GEMM alpha output is MxN
+    total_blocks_M_alpha = triton.cdiv(M, BLK_M)
+    total_blocks_N_alpha = triton.cdiv(N, BLK_N)
+    total_tiles_alpha = total_blocks_M_alpha * total_blocks_N_alpha
+    # GEMM beta output is MxP
+    total_blocks_M_beta = triton.cdiv(M, BLK_M)
+    total_blocks_P_beta = triton.cdiv(P, BLK_N)
+    total_tiles_beta = total_blocks_M_beta * total_blocks_P_beta
+
+    total_tiles = total_tiles_alpha + total_tiles_beta
     even_k = K % BLK_K == 0
     
     # Configuration parameters
@@ -207,15 +217,17 @@ def fused_matmul_lt(
     
     # Set chunk size
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, total_programs // num_xcds)
+    chunk_size = min(chunk_size, total_tiles // num_xcds)
+
+    locks = torch.zeros(total_tiles_alpha, device="cuda", dtype=torch.int32)
     
     # Launch fused kernel
     kk = fused_persistent_matmul[(grids,)](
         a,
         b,
         c,
-        e,
         d,
+        e,
         M,
         N,
         K,
@@ -226,15 +238,18 @@ def fused_matmul_lt(
         b.stride(1),  # stride_bn
         c.stride(0),  # stride_cm
         c.stride(1),  # stride_cn
-        e.stride(0),  # stride_en
-        e.stride(1),  # stride_ep
-        d.stride(0),  # stride_dm
+        d.stride(0),  # stride_dn
         d.stride(1),  # stride_dp
+        e.stride(0),  # stride_em
+        e.stride(1),  # stride_ep
+        locks,
         BLOCK_SIZE_M=BLK_M,
         BLOCK_SIZE_N=BLK_N,
         BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=gsize_m,
-        NUM_SMS=total_programs,
+        NUM_SMS_ALPHA=total_tiles_alpha,
+        NUM_SMS_BETA=total_tiles_beta,
+        NUM_SMS_TOTAL=total_tiles,
         NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk_size,
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
@@ -247,18 +262,18 @@ def fused_matmul_lt(
         kpack=kpack,
     )
     
-    return d
+    return e
 
 
 def fused_matmul(
     a: torch.Tensor,
     b: torch.Tensor,
-    e: torch.Tensor,
     d: torch.Tensor,
+    e: torch.Tensor,
     enable_streamk: bool = False,
 ) -> torch.Tensor:
     """
-    Fused matrix multiplication with automatic selector creation: D = (A @ B) @ E
+    Fused matrix multiplication with automatic selector creation: E = (A @ B) @ D
     
     This is a drop-in replacement API that automatically creates the configuration
     selector based on the input tensor dimensions and dtypes.
@@ -269,9 +284,9 @@ def fused_matmul(
         First left input matrix (M × K)
     b : torch.Tensor
         First right input matrix (K × N)
-    e : torch.Tensor
-        Second right input matrix (N × P)
     d : torch.Tensor
+        Second right input matrix (N × P)
+    e : torch.Tensor
         Final output matrix (M × P), pre-allocated by user
     enable_streamk : bool, optional
         Enable Stream-K algorithm (default: False)
@@ -279,25 +294,27 @@ def fused_matmul(
     Returns:
     --------
     torch.Tensor
-        The output matrix D
+        The output matrix E
     """
     # Validate dimensions
     assert a.shape[1] == b.shape[0], "First GEMM: incompatible dimensions (A.K != B.K)"
-    assert b.shape[1] == e.shape[0], "Second GEMM: incompatible dimensions (C.N != E.N)"
+    assert b.shape[1] == d.shape[0], "Second GEMM: incompatible dimensions (C.N != D.N)"
+
+    assert enable_streamk == False, "StreamK is not supported for fused GEMM"
     
     M, K = a.shape
     _, N = b.shape
-    _, P = e.shape
+    _, P = d.shape
     
     # Create selector for first GEMM (M, N, K)
     selector = _make_matmul_selector(
         M, N, K,
-        a.dtype, b.dtype, d.dtype,
+        a.dtype, b.dtype, e.dtype,
         a.device,
         streamk=enable_streamk
     )
     
-    return fused_matmul_lt(a, b, e, d, selector, enable_streamk)
+    return fused_matmul_lt(a, b, d, e, selector, enable_streamk)
 
 def streamk_matmul_lt(
     a: torch.Tensor, 
