@@ -41,6 +41,9 @@ EDGE_CASE_DIMS = [
     (15, 17, 512),        # Weird and small M and N
     (19, 13, 512),        # Weird and small M and N
     (128, 64, 12),        # Small K
+    (128, 64, 1),         # K=1 (forward K < BLK_K)
+    (128, 64, 8),         # K=8 (forward K < BLK_K)
+    (256, 1, 128),        # N=1 → backward grad_a has K=1
 ]
 
 # Skinny matrix dimensions (stress tests)
