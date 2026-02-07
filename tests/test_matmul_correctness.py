@@ -20,12 +20,6 @@ torch._dynamo.config.cache_size_limit = 10000
 # Also disable caches so every compile is fresh and new issues are caught.
 # Note this causes a single UserWarning that notes caches are disabled.
 torch._inductor.config.force_disable_caches = True
-# FIXME: Inductor seems to be initializing multiple CUDA runtimes somehow in
-# relation to some of triton's new features which is causing errors unrelated to
-# tritonBLAS.  The error tells you to change the multiplrocessing strategy to
-# 'spawn' but that actually doesn't fix the issue - you have to force
-# single-threaded compilation.  This needs to be fixed upstream in torch/triton.
-torch._inductor.config.compile_threads = 1
 
 # Standard test dimensions
 STANDARD_DIMS = [
