@@ -259,7 +259,7 @@ class GemmContext:
         num_k_tiles = tl.cdiv(A.cols, self.block_k)
         if not self.even_k:
             num_k_tiles -= 1
-        tl.assume(num_k_tiles > 0)
+        tl.assume(num_k_tiles >= 0)
         
         # Main K loop
         for k_idx in range(num_k_tiles):
