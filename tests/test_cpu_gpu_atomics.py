@@ -1,18 +1,3 @@
-"""
-Concurrent Triton kernels on AMD/ROCm without deprecated 'stream='.
-
-Key points:
-  * Use torch.cuda.Stream() and 'with torch.cuda.stream(s): ...' to choose streams.
-  * Triton launches are async; measure with explicit synchronization.
-  * AMD guidance: prefer num_stages >= 2 with the current stream pipeliner,
-    and size BLOCK_SIZE/num_warps to leave headroom for overlap.
-
-References:
-  - PyTorch HIP semantics reuse torch.cuda API on AMD (streams, etc.).
-  - torch.cuda.StreamContext enqueues ops on the chosen stream.
-  - Triton kernels run asynchronously; torch.cuda.synchronize() is appropriate.
-"""
-
 import ctypes
 import math
 import sys
@@ -41,27 +26,30 @@ def hip_check(call_result):
         raise RuntimeError(str(err))
     return result
 
-
-# -------------------------
 # Triton kernels
-# -------------------------
-
 @triton.jit
-def sch(live_flags_ptr, x_ptr, n_elements,
-        ITERS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+def sch(live_flags_ptr, x_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    tid = tl.arange(0, BLOCK_SIZE)
+    offsets = pid * BLOCK_SIZE + tid
     mask = offsets < n_elements
+
+    sync_mask = tid == 0
 
     live = 1
     done = 0
 
-    while tl.atomic_add(live_flags_ptr + pid, 0) == live:
+    live_flags_ptr_scalar = live_flags_ptr + pid
+    live_flags_ptr_block  = tl.broadcast_to(live_flags_ptr_scalar, [BLOCK_SIZE])
+    zero_i32 = tl.full([BLOCK_SIZE], 0, dtype=tl.int32)
 
+    flag_v = tl.atomic_add(live_flags_ptr_block, zero_i32, mask=sync_mask, sem="acquire", scope="cta")
+    flag_only_leader = tl.where(sync_mask, flag_v, tl.zeros([BLOCK_SIZE], dtype=flag_v.dtype))
+    flag = tl.sum(flag_only_leader, axis=0)
+
+    while flag == live:
         x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
-        for _ in range(ITERS):
-            x = x * 1.000000119 + 0.000000137
-
+        x += 1
         tl.store(x_ptr + offsets, x, mask=mask)
 
         ret = tl.inline_asm_elementwise(
@@ -72,6 +60,10 @@ def sch(live_flags_ptr, x_ptr, n_elements,
             is_pure=False,
             pack=1,
         )
+
+        flag_v = tl.atomic_add(live_flags_ptr_block, zero_i32, mask=sync_mask, sem="acquire", scope="cta")
+        flag_only_leader = tl.where(sync_mask, flag_v, tl.zeros([BLOCK_SIZE], dtype=flag_v.dtype))
+        flag = tl.sum(flag_only_leader, axis=0)
 
 @triton.jit
 def gemm(x_ptr, n_elements,
@@ -100,19 +92,17 @@ def comm(x_ptr, n_elements,
 
 
 def main():
-    # -------------------------
-    # Tunables for AMD GPUs
-    # -------------------------
     N = 32 * 1024 * 1024        # elements
     ITERS_A = 200
     ITERS_B = 200
-    BLOCK_SIZE = 256            # elements per Triton "program"/CTA
-    NUM_WARPS = 4               # try 4~8; AMD wavefront is 64-wide
+    BLOCK_SIZE_SCH = 256        # elements per scheduler WGs
+    BLOCK_SIZE = 256            # elements per WG
+    NUM_WARPS = 4               # try 4~8; MI300X wavefront is 64-wide
     NUM_STAGES = 2              # AMD's current stream pipeliner favors >=2
 
     # Load libatomic
     libatomic = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libatomic.so.1.2.0")  # Adjust path as needed
-    # Define the function signature
+    # Function signature for __atomic_fetch_add_4
     # __atomic_fetch_add_4(int *ptr, int val, int memorder)
     libatomic.__atomic_fetch_add_4.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int]
     libatomic.__atomic_fetch_add_4.restype = ctypes.c_int
@@ -131,65 +121,64 @@ def main():
 
     sch_stream = torch.cuda.Stream()
 
-    # Two independent streams (ROCm uses torch.cuda.* too)
+    # Independent streams
     gemm_stream = torch.cuda.Stream()
     comm_stream = torch.cuda.Stream()
 
     num_xcds = 8
-    sch_grid = num_xcds * BLOCK_SIZE
+    sch_grid = num_xcds
 
     done = 0
     live = 1
 
-    flags = array.array("I", [live for i in range(0, sch_grid)])
-    # allocate a Pointer class to be passed to the GPU kernel, flags_h is a void*
-    flags_h = hip_check(hip.hipHostMalloc(sch_grid * sys.getsizeof(live), 1))
-    flags_h.fromObj(flags) # initialize the storage pointed by flags_h
-    # casting flags_h to a typed pointer to access the pointed contents
+    # Flags passed to the GPU kernel, flags_h is a void*
+    flags_h = hip_check(hip.hipMalloc(sch_grid * sys.getsizeof(live)))
+    # Casting flags_h to a typed pointer, for content access
     flags_typed_ptr = ctypes.cast(flags_h.as_c_void_p(), ctypes.POINTER(ctypes.c_int * sch_grid))
     print(f'Flags (init):')
     for i in range(0, sch_grid):
+        flags_typed_ptr.contents[i] = live
         print(f'{flags_typed_ptr.contents[i]}')
 
     flags_h_np_array = np.ctypeslib.as_array(flags_typed_ptr, shape=(sch_grid,))
     flags_h_tensor = torch.from_numpy(flags_h_np_array)
 
+    sch_comp = torch.ones(num_xcds * BLOCK_SIZE, device="cuda", dtype=torch.float32).contiguous()
+
     print(f'Scheduler kernel started')
     with torch.cuda.stream(sch_stream):
-        sch[(sch_grid, 1, 1)](flags_h_tensor, a, N, ITERS=ITERS_A, BLOCK_SIZE=BLOCK_SIZE,
+        sch[(sch_grid, 1, 1)](flags_h_tensor, sch_comp, num_xcds * BLOCK_SIZE, BLOCK_SIZE=BLOCK_SIZE_SCH,
                        num_warps=NUM_WARPS, num_stages=NUM_STAGES)
+
+    time.sleep(1)
 
     # Memory order: 0 = relaxed, 1 = consume, 2 = acquire, 3 = release, 4 = acq_rel, 5 = seq_cst
     MEMORDER_RELAXED = 0
-    # Stop the scheduler kernel
+    # Signal the scheduler kernel to complete
     print(f'Flags (__atomic_fetch_add flags_h to signal the GPU kernel to proceed):')
     for i in range(0, sch_grid):
         ptr = ctypes.cast(ctypes.byref(flags_typed_ptr.contents, i * ctypes.sizeof(ctypes.c_int)), ctypes.POINTER(ctypes.c_int))
-        prev = libatomic.__atomic_fetch_add_4(ptr, done, MEMORDER_RELAXED)
+        prev = libatomic.__atomic_fetch_add_4(ptr, -live, MEMORDER_RELAXED)
         print(f'{prev} {flags_typed_ptr.contents[i]}')
 
     sch_stream.synchronize()
     print(f'Scheduler kernel done')
+    print(f'sch_comp[0]: {sch_comp[0]}')
 
-    # Grid: one program per BLOCK_SIZE chunk
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_SIZE"]),)
 
-    # -------------------------
     # Warm-up (JIT & cache)
-    # -------------------------
     with torch.cuda.stream(gemm_stream):
         gemm[grid](a, N, ITERS=ITERS_A, BLOCK_SIZE=BLOCK_SIZE,
                        num_warps=NUM_WARPS, num_stages=NUM_STAGES)
     with torch.cuda.stream(comm_stream):
         comm[grid](b, N, ITERS=ITERS_B, BLOCK_SIZE=BLOCK_SIZE,
                        num_warps=NUM_WARPS, num_stages=NUM_STAGES)
-    # Triton is async; explicit sync for clean timing
+
     gemm_stream.synchronize(); comm_stream.synchronize()
     print("Warm-up complete.\n")
 
-    # -------------------------
     # Sequential timing (A then B)
-    # -------------------------
     t0 = time.perf_counter()
     with torch.cuda.stream(gemm_stream):
         gemm[grid](a, N, ITERS=ITERS_A, BLOCK_SIZE=BLOCK_SIZE,
@@ -202,9 +191,7 @@ def main():
     t_seq = time.perf_counter() - t0
     print(f"Sequential total time: {t_seq:.3f} s")
 
-    # -------------------------
     # Concurrent timing (A || B)
-    # -------------------------
     t0 = time.perf_counter()
     with torch.cuda.stream(gemm_stream):
         gemm[grid](a, N, ITERS=ITERS_A, BLOCK_SIZE=BLOCK_SIZE,
@@ -219,13 +206,8 @@ def main():
 
     # Check a couple of results
     print("\nResults (samples):")
-    print(f"A[123456] = {a[123_456].item():.6f}")
-    print(f"B[234567] = {b[234_567].item():.6f}")
-
-    print("\nTip: If there's little or no overlap, reduce NUM_WARPS or BLOCK_SIZE "
-          "to leave headroom for both kernels to co-reside on the GPU. "
-          "On AMD, keep num_stages>=2 for the current stream pipeliner.")
-
+    print(f"A[0] = {a[0].item():.6f}")
+    print(f"B[0] = {b[0].item():.6f}")
 
 if __name__ == "__main__":
     main()
