@@ -101,9 +101,6 @@ def gemm(req_wgs_ptr, num_wgs_per_xcd, x_ptr, n_elements,
         req_wgs_v = tl.atomic_add(req_wgs_ptr_block, 0, mask=sync_mask, sem="acquire", scope="gpu") # read
         req_wgs_only_leader = tl.where(sync_mask, req_wgs_v, tl.zeros([BLOCK_SIZE], dtype=req_wgs_v.dtype))
         req_wgs = tl.sum(req_wgs_only_leader, axis=0)
-    for _ in range(ITERS_PER_CHKPNT):
-        x = x * 1.000000119 + 0.000000137
-        i += 1
 
     tl.store(x_ptr + offsets, x, mask=mask)
 
