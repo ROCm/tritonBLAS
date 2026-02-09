@@ -176,7 +176,7 @@ def main():
                        num_warps=NUM_WARPS, num_stages=NUM_STAGES)
 
     gemm_stream.synchronize(); comm_stream.synchronize()
-    print("Warm-up complete.\n")
+    print("Warm-up complete\n")
 
     # Sequential timing (A then B)
     t0 = time.perf_counter()
@@ -218,7 +218,7 @@ def main():
     flags_h = hip_check(hip.hipMalloc(num_sch_wgs * sys.getsizeof(live)))
     # Casting flags_h to a typed pointer, for content access
     flags_typed_ptr = ctypes.cast(flags_h.as_c_void_p(), ctypes.POINTER(ctypes.c_int * num_sch_wgs))
-    print(f'Flags (init):')
+    print(f'Scheduler live flags (init):')
     for i in range(0, num_sch_wgs):
         flags_typed_ptr.contents[i] = live
         print(f'{flags_typed_ptr.contents[i]}')
@@ -226,11 +226,11 @@ def main():
     flags_h_np_array = np.ctypeslib.as_array(flags_typed_ptr, shape=(num_sch_wgs,))
     flags_h_tensor = torch.from_numpy(flags_h_np_array)
 
-    # Requested resources passed to the GPU kernel, req_res_h is a void*
+    # Sync var used to request the release of resources (CUs),  passed to the GPU kernel, req_res_h is a void*
     req_res_h = hip_check(hip.hipMalloc(num_sch_wgs * sys.getsizeof(live)))
     # Casting req_res_h to a typed pointer, for content access
     req_res_typed_ptr = ctypes.cast(req_res_h.as_c_void_p(), ctypes.POINTER(ctypes.c_int * num_sch_wgs))
-    print(f'Flags (init):')
+    print(f'Request release sync vars (init):')
     for i in range(0, num_sch_wgs):
         req_res_typed_ptr.contents[i] = 0
         print(f'{req_res_typed_ptr.contents[i]}')
@@ -250,6 +250,16 @@ def main():
     with torch.cuda.stream(gemm_stream):
         gemm[grid](req_wgs_ptr, num_wgs_per_xcd, a, N, ITERS=ITERS_GEMM, ITERS_PER_CHKPNT=ITERS_PER_CHKPNT, BLOCK_SIZE=BLOCK_SIZE,
                        num_warps=NUM_WARPS, num_stages=NUM_STAGES)
+    # Memory order: 0 = relaxed, 1 = consume, 2 = acquire, 3 = release, 4 = acq_rel, 5 = seq_cst
+    MEMORDER_RELAXED = 0
+    # Signal the scheduler kernel to complete
+    print(f'Req the GPU scheduler kernel to release CUs (__atomic_fetch_add req_res_h):')
+    for i in range(0, num_sch_wgs):
+        ptr = ctypes.cast(ctypes.byref(req_res_typed_ptr.contents, i * ctypes.sizeof(ctypes.c_int)), ctypes.POINTER(ctypes.c_int))
+        comm_wgs = grid_comm[0] * grid_comm[1] * grid_comm[2]
+        wgs_to_release = comm_wgs // num_sch_wgs
+        prev = libatomic.__atomic_fetch_add_4(ptr, wgs_to_release, MEMORDER_RELAXED)
+        print(f'{prev} {flags_typed_ptr.contents[i]}')
     with torch.cuda.stream(comm_stream):
         comm[grid_comm](b, N, ITERS=ITERS_COMM, BLOCK_SIZE=BLOCK_SIZE,
                        num_warps=NUM_WARPS, num_stages=NUM_STAGES)
@@ -258,10 +268,8 @@ def main():
     t_conc = time.perf_counter() - t0
     print(f"With scheduler kernel concurrent total time: {t_conc:.3f} s")
 
-    # Memory order: 0 = relaxed, 1 = consume, 2 = acquire, 3 = release, 4 = acq_rel, 5 = seq_cst
-    MEMORDER_RELAXED = 0
     # Signal the scheduler kernel to complete
-    print(f'Flags (__atomic_fetch_add flags_h to signal the GPU kernel to proceed):')
+    print(f'Signal the GPU scheduler kernel to stop (__atomic_fetch_add flags_h):')
     for i in range(0, num_sch_wgs):
         ptr = ctypes.cast(ctypes.byref(flags_typed_ptr.contents, i * ctypes.sizeof(ctypes.c_int)), ctypes.POINTER(ctypes.c_int))
         prev = libatomic.__atomic_fetch_add_4(ptr, -live, MEMORDER_RELAXED)
