@@ -76,8 +76,8 @@ def streamk_matmul(
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
         if BIAS:
-            bias_ = bias_ptr + rm * stride_bias
-            bias = tl.load(bias_, mask=rm < M, other=0.0)
+            bias_ = bias_ptr + rn * stride_bias
+            bias = tl.load(bias_, mask=rn < N, other=0.0)
 
         loop_k = tl.cdiv(K, BLOCK_SIZE_K)
         if not EVEN_K:
@@ -140,12 +140,12 @@ def streamk_matmul(
             if QUANTIZED:
                 # For quantized mode: convert bias to float32, add to acc, then convert to output dtype
                 bias_float = bias.to(tl.float32)
-                c = acc + bias_float[:, None]
+                c = acc + bias_float[None, :]
                 c = c.to(C.type.element_ty)
             else:
                 # For non-quantized mode: convert acc to output dtype, then add bias
                 c = acc.to(C.type.element_ty)
-                c += bias[:, None]
+                c += bias[None, :]
         else:
             c = acc.to(C.type.element_ty)
 
@@ -210,8 +210,8 @@ def streamk_matmul(
             B_BASE = tl.multiple_of(B_BASE, (1, 16))
 
         if BIAS:
-            bias_ = bias_ptr + rm * stride_bias
-            bias = tl.load(bias_, mask=rm < M, other=0.0)
+            bias_ = bias_ptr + rn * stride_bias
+            bias = tl.load(bias_, mask=rn < N, other=0.0)
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for current_iter in range(start_iter, end_iter):
@@ -322,28 +322,34 @@ def streamk_matmul(
                 next_pid += 1
 
             # Unified bias handling for Stream-K section
+            # Bias is applied along N dimension (columns), broadcast across M (rows)
             if BIAS:
-                # Split bias for top and bottom halves
-                bias_top = bias[:BLOCK_SIZE_M // 2]
-                bias_bottom = bias[BLOCK_SIZE_M // 2:]
+                # Load bias for left and right halves (N dimension) with explicit indices
+                # Apply modulo N to match the behavior of the original rn computation
+                rn_bias_left = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N // 2)) % N
+                rn_bias_right = (pid_n * BLOCK_SIZE_N + BLOCK_SIZE_N // 2 + tl.arange(0, BLOCK_SIZE_N // 2)) % N
 
-                bias_top_reshaped = tl.reshape(bias_top, (BLOCK_SIZE_M // 2, 1))
-                bias_bottom_reshaped = tl.reshape(bias_bottom, (BLOCK_SIZE_M // 2, 1))
+                bias_left = tl.load(bias_ptr + rn_bias_left * stride_bias, mask=rn_bias_left < N, other=0.0)
+                bias_right = tl.load(bias_ptr + rn_bias_right * stride_bias, mask=rn_bias_right < N, other=0.0)
+
+                # Reshape for broadcasting: (1, N//2) to broadcast across M rows
+                bias_left_reshaped = tl.reshape(bias_left, (1, BLOCK_SIZE_N // 2))
+                bias_right_reshaped = tl.reshape(bias_right, (1, BLOCK_SIZE_N // 2))
 
                 if QUANTIZED:
                     # For quantized mode: convert bias to float32 before adding
-                    bias_top_float = bias_top_reshaped.to(tl.float32)
-                    bias_bottom_float = bias_bottom_reshaped.to(tl.float32)
-                    acc00 += bias_top_float
-                    acc01 += bias_top_float
-                    acc10 += bias_bottom_float
-                    acc11 += bias_bottom_float
+                    bias_left_float = bias_left_reshaped.to(tl.float32)
+                    bias_right_float = bias_right_reshaped.to(tl.float32)
+                    acc00 += bias_left_float
+                    acc01 += bias_right_float
+                    acc10 += bias_left_float
+                    acc11 += bias_right_float
                 else:
                     # For non-quantized mode: add bias directly
-                    acc00 += bias_top_reshaped
-                    acc01 += bias_top_reshaped
-                    acc10 += bias_bottom_reshaped
-                    acc11 += bias_bottom_reshaped
+                    acc00 += bias_left_reshaped
+                    acc01 += bias_right_reshaped
+                    acc10 += bias_left_reshaped
+                    acc11 += bias_right_reshaped
 
             # Convert to output dtype
             c00 = acc00.to(C.type.element_ty)
