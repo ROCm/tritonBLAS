@@ -56,7 +56,7 @@ def sch(live_flags_ptr, req_res_ptr, req_wgs_ptr, num_wgs_per_xcd, x_ptr, n_elem
         req_res_ptr_scalar = req_res_ptr + pid
         req_res_ptr_block  = tl.broadcast_to(req_res_ptr_scalar, [BLOCK_SIZE])
 
-        req_res_v = tl.atomic_add(req_res_ptr_block, zero_i32, mask=sync_mask, sem="acquire", scope="gpu")
+        req_res_v = tl.atomic_add(req_res_ptr_block, zero_i32, mask=sync_mask, sem="acquire", scope="sys")
         req_res_only_leader = tl.where(sync_mask, req_res_v, tl.zeros([BLOCK_SIZE], dtype=flag_v.dtype))
         req_res = tl.sum(req_res_only_leader, axis=0)
         if req_res != 0:
@@ -64,6 +64,7 @@ def sch(live_flags_ptr, req_res_ptr, req_wgs_ptr, num_wgs_per_xcd, x_ptr, n_elem
                 req_wgs_ptr_scalar = req_wgs_ptr + pid * num_wgs_per_xcd + i
                 req_wgs_ptr_block  = tl.broadcast_to(req_wgs_ptr_scalar, [BLOCK_SIZE])
                 tl.atomic_add(req_wgs_ptr_block, 1, mask=sync_mask, sem="acquire", scope="gpu")
+            tl.atomic_add(req_res_ptr_block, -req_res, mask=sync_mask, sem="acquire", scope="sys")
 
         ret = tl.inline_asm_elementwise(
             asm="""s_sleep 128""",
@@ -101,6 +102,8 @@ def gemm(req_wgs_ptr, num_wgs_per_xcd, x_ptr, n_elements,
         req_wgs_v = tl.atomic_add(req_wgs_ptr_block, 0, mask=sync_mask, sem="acquire", scope="gpu") # read
         req_wgs_only_leader = tl.where(sync_mask, req_wgs_v, tl.zeros([BLOCK_SIZE], dtype=req_wgs_v.dtype))
         req_wgs = tl.sum(req_wgs_only_leader, axis=0)
+        if req_wgs > 0:
+            tl.atomic_add(req_wgs_ptr_block, -req_wgs, mask=sync_mask, sem="acquire", scope="gpu") # reset
 
     tl.store(x_ptr + offsets, x, mask=mask)
 
@@ -120,7 +123,7 @@ def comm(x_ptr, n_elements,
 def main():
     N = 32 * 1024 * 1024        # elements
     ITERS_GEMM = 1024 * 1024 * 1024 
-    ITERS_PER_CHKPNT = 256
+    ITERS_PER_CHKPNT = 1024 * 1024
     ITERS_COMM = 1024
     BLOCK_SIZE_SCH = 256        # scheduler WG size
     BLOCK_SIZE = 256            # WG size
@@ -218,7 +221,7 @@ def main():
     flags_h = hip_check(hip.hipMalloc(num_sch_wgs * sys.getsizeof(live)))
     # Casting flags_h to a typed pointer, for content access
     flags_typed_ptr = ctypes.cast(flags_h.as_c_void_p(), ctypes.POINTER(ctypes.c_int * num_sch_wgs))
-    print(f'Scheduler live flags (init):')
+    print(f'\nScheduler live flags (init):')
     for i in range(0, num_sch_wgs):
         flags_typed_ptr.contents[i] = live
         print(f'{flags_typed_ptr.contents[i]}')
@@ -259,14 +262,18 @@ def main():
         comm_wgs = grid_comm[0] * grid_comm[1] * grid_comm[2]
         wgs_to_release = comm_wgs // num_sch_wgs
         prev = libatomic.__atomic_fetch_add_4(ptr, wgs_to_release, MEMORDER_RELAXED)
-        print(f'{prev} {flags_typed_ptr.contents[i]}')
+        print(f'{prev} {req_res_typed_ptr.contents[i]}')
     with torch.cuda.stream(comm_stream):
         comm[grid_comm](b, N, ITERS=ITERS_COMM, BLOCK_SIZE=BLOCK_SIZE,
                        num_warps=NUM_WARPS, num_stages=NUM_STAGES)
     # wait for both
     gemm_stream.synchronize(); comm_stream.synchronize()
     t_conc = time.perf_counter() - t0
-    print(f"With scheduler kernel concurrent total time: {t_conc:.3f} s")
+    print(f"Concurrent total time w/ scheduler kernel: {t_conc:.3f} s\n")
+
+    print(f'Read req release sync vars:')
+    for i in range(0, num_sch_wgs):
+        print(f'{req_res_typed_ptr.contents[i]}')
 
     # Signal the scheduler kernel to complete
     print(f'Signal the GPU scheduler kernel to stop (__atomic_fetch_add flags_h):')
