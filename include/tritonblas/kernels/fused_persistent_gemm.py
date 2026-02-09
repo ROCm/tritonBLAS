@@ -47,6 +47,8 @@ def fused_persistent_matmul(
     stride_em,
     stride_ep,
     locks,
+    alpha_xcd_map,
+    beta_xcd_map,
     # Performance parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -60,6 +62,7 @@ def fused_persistent_matmul(
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
     EVEN_K: tl.constexpr,
+    SHOW_MAP: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
 ):
     """
@@ -96,8 +99,12 @@ def fused_persistent_matmul(
     """
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
 
-    # Spatially partition workgroups.
-    xid, local_xid, wg_per_xcd_alpha, wg_per_xcd_beta, is_alpha, pid_alpha, is_beta, pid_beta = mosaic.spatial_partition(tl.program_id(0), NUM_SMS_ALPHA, NUM_SMS_BETA, NUM_SMS_TOTAL, NUM_XCDS)
+    # ════════════════════════════════════════════════════════════════════════
+    # SPATIAL PARTITION: Use mosaic spatial partitioning
+    # ════════════════════════════════════════════════════════════════════════
+    xid, local_xid, wg_per_xcd_alpha, wg_per_xcd_beta, is_alpha, pid_alpha, is_beta, pid_beta = mosaic.spatial_partition(
+        tl.program_id(0), NUM_SMS_ALPHA, NUM_SMS_BETA, NUM_SMS_TOTAL, NUM_XCDS
+    )
 
     # ════════════════════════════════════════════════════════════════════════
     # CREATE MATRIX VIEWS
@@ -113,8 +120,8 @@ def fused_persistent_matmul(
     # ════════════════════════════════════════════════════════════════════════
     # CREATE EPILOGUE VIEWS (optional scale and bias)
     # ════════════════════════════════════════════════════════════════════════
-    scale_view = None 
-    bias_view = None 
+    scale_view = None
+    bias_view = None
 
     if is_alpha:
         # This workgroup is part of the `alpha` partition.
@@ -147,6 +154,11 @@ def fused_persistent_matmul(
         for tile_id in range(pid_alpha, total_tiles_alpha, NUM_SMS_ALPHA):
             out_tile = alpha_sched.get_tile_from_idx(tile_id)
 
+            # Debug: Record which XCD is processing this tile
+            if SHOW_MAP:
+                offset = out_tile.pid_m * num_pid_n_alpha + out_tile.pid_n
+                tl.store(alpha_xcd_map + offset, xid.to(tl.int8))
+
             # ════════════════════════════════════════════════════════════════════
             # COMPUTE GEMM: K-loop handled by GemmContext
             # ════════════════════════════════════════════════════════════════════
@@ -161,8 +173,10 @@ def fused_persistent_matmul(
             tl.debug_barrier()
 
             # Signal that this tile is ready (using row-major tile_id)
-            tl.atomic_xchg(locks + (out_tile.pid_m * num_pid_n_alpha + out_tile.pid_n), 1)
-    else: 
+            # tl.atomic_xchg(locks + (out_tile.pid_m * num_pid_n_alpha + out_tile.pid_n), 1)
+            tl.store(locks + tile_id, 1)
+
+    else:
         # This workgroup is part of the beta partition.
 
         # ════════════════════════════════════════════════════════════════════════
@@ -200,13 +214,20 @@ def fused_persistent_matmul(
             # ════════════════════════════════════════════════════
             out_tile = beta_sched.get_tile_from_idx(tile_id)
 
+            # Debug: Record which XCD is processing this tile
+            if SHOW_MAP:
+                offset = out_tile.pid_m * num_pid_p_beta + out_tile.pid_n
+                tl.store(beta_xcd_map + offset, xid.to(tl.int8))
+
             # We need to wait on all the input tiles from C that this output tile depends on.
             # Beta tile at (pid_m, pid_p) needs all alpha tiles in row pid_m.
             # Use row-major tile indexing (matching alpha's lock storage).
             row_start_tile = out_tile.pid_m * num_pid_n_alpha
             row_end_tile = row_start_tile + num_pid_n_alpha
             for dep_tile in range(row_start_tile, row_end_tile):
-                while tl.atomic_cas(locks + dep_tile, 1, 1) != 1:
+                # while tl.atomic_cas(locks + dep_tile, 1, 1) != 1:
+                #     pass
+                while tl.load(locks + dep_tile, cache_modifier=".cv", volatile=True) != 1:
                     pass
 
             # ════════════════════════════════════════════════════════════════════
