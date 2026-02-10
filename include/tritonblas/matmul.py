@@ -11,16 +11,32 @@ from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 
-_tensor_cache = {}
-current_device_index = torch.cuda.current_device()
-current_device = torch.cuda.get_device_properties(current_device_index)
-MAX_SMS = current_device.multi_processor_count
 # TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
 MAX_BLOCK_SIZE = 65536
 
-# Global pre-allocated buffers
-_global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
-_global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+# Per-device lazy-initialized StreamK workspace buffers.
+# Keyed by device index -> (max_sms, locks_tensor, P_tensor).
+# Buffers are allocated on first use for a given device to avoid GPU Runtime
+# initialization errors at import time.
+_streamk_buffers: dict[int, tuple[int, torch.Tensor, torch.Tensor]] = {}
+
+
+def _get_streamk_buffers(device: torch.device) -> tuple[int, torch.Tensor, torch.Tensor]:
+    """Lazy-initialize and return per-device StreamK workspace buffers.
+
+    Returns:
+        (max_sms, locks, P) for the given device.
+    """
+    device_idx = device.index if device.index is not None else torch.cuda.current_device()
+
+    if device_idx not in _streamk_buffers:
+        props = torch.cuda.get_device_properties(device_idx)
+        max_sms = props.multi_processor_count
+        locks = torch.empty(max_sms, device=device, dtype=torch.uint8)
+        P = torch.empty(max_sms, MAX_BLOCK_SIZE, device=device, dtype=torch.float32)
+        _streamk_buffers[device_idx] = (max_sms, locks, P)
+
+    return _streamk_buffers[device_idx]
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -187,13 +203,14 @@ def streamk_matmul_lt(
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
 
-    # Use global buffers with optimized zeroing
-    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
-        locks = _global_locks[:grids]
-        P = _global_P[:grids, :block_size]
+    # Use pre-allocated per-device buffers when possible, otherwise allocate fresh
+    max_sms, global_locks, global_P = _get_streamk_buffers(a.device)
+    if grids <= max_sms and block_size <= MAX_BLOCK_SIZE:
+        locks = global_locks[:grids]
+        P = global_P[:grids, :block_size]
     else:
-        locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
-        P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
+        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
