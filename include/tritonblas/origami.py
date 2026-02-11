@@ -37,6 +37,7 @@ class OrigamiMatmulSelector:
         device: torch.device,
         mx_block_size=0,
         streamk=False,
+        total_cus: int = None,
     ):
         # Save tensor sizes
         self._m = m
@@ -91,6 +92,11 @@ class OrigamiMatmulSelector:
 
         # Get hardware info from Origami
         self._hardware = origami.get_hardware_for_device(device.index)
+        # When running under a CU mask (e.g. cu-sweep), the GPU reports a
+        # reduced N_CU.  Override with the real total so architecture
+        # detection and config generation use the correct value.
+        if total_cus is not None:
+            self._hardware.N_CU = total_cus
         self._N_CU = self._hardware.N_CU
 
         # Create list of Origami config_t objects from defaults.
@@ -381,7 +387,8 @@ class OrigamiMatmulSelector:
         # Architecture Detected is not valid
         if mi_dim == None:
             raise ValueError(
-                f"No Valid Matrix Instruction integrated for {element_size_A}-bit or {element_size_B}-bit datatypes"
+                f"No Valid Matrix Instruction for {self._a_dtype_bitsize}-bit/{self._b_dtype_bitsize}-bit dtypes "
+                f"on hardware with N_CU={self._hardware.N_CU}"
             )
 
         return mi_dim

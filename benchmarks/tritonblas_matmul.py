@@ -123,6 +123,8 @@ def bench_matmul(
     enable_streamk=False,
     work_stealing=False,
     check_correctness=False,
+    total_cus=None,
+    counters_per_xcd=None,
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -174,8 +176,10 @@ def bench_matmul(
 
         selector = tritonblas.OrigamiMatmulSelector(
             m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
-            streamk=enable_streamk
+            streamk=enable_streamk, total_cus=total_cus,
         )
+        if counters_per_xcd is not None:
+            selector.COUNTERS_PER_XCD = counters_per_xcd
         cfg = tritonblas.matmul_preamble(selector)
         config = (selector.block_m, selector.block_n, selector.block_k)
 
@@ -191,7 +195,7 @@ def bench_matmul(
             )
 
         reset = lambda: cfg.reset(streamk=enable_streamk, work_stealing=work_stealing)
-        ms = tritonblas.do_bench(matmul, reset_fn=reset, n_warmup=20, n_repeat=20)
+        ms = tritonblas.do_bench(matmul, reset_fn=reset, n_warmup=20, n_repeat=100)
         perf = gflops(ms)
 
         # Determine mode string for output
@@ -263,6 +267,8 @@ def _build_child_cmd(args):
         cmd.append("--enable-streamk")
     elif args.work_stealing:
         cmd.append("--work-stealing")
+    if args.counters_per_xcd is not None:
+        cmd += ["--counters-per-xcd", str(args.counters_per_xcd)]
     return cmd
 
 
@@ -340,9 +346,14 @@ if __name__ == "__main__":
         "--cu-sweep-max-remove", type=int, default=34,
         help="Max CUs to remove per XCD (default 34, minimum 4 CUs/XCD left).",
     )
+    parser.add_argument(
+        "--counters-per-xcd", type=int, default=None,
+        help="Override COUNTERS_PER_XCD for work-stealing (default: use selector value).",
+    )
 
     # Hidden: used by cu-sweep parent to tag subprocess results
     parser.add_argument("--_active-cus", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--_total-cus", type=int, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -356,7 +367,8 @@ if __name__ == "__main__":
             active = full_cus - r * num_xcds
             mask = build_balanced_hex_mask(r, num_xcds, cus_per_xcd)
 
-            child_cmd = child_base + ["--_active-cus", str(active)]
+            child_cmd = child_base + ["--_active-cus", str(active),
+                                      "--_total-cus", str(full_cus)]
 
             env = os.environ.copy()
             if mask:
@@ -388,6 +400,8 @@ if __name__ == "__main__":
         enable_streamk=args.enable_streamk,
         work_stealing=args.work_stealing,
         check_correctness=args.checkcorrectness,
+        total_cus=args._total_cus,
+        counters_per_xcd=args.counters_per_xcd,
     )
 
     if is_worker:

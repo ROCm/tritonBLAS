@@ -96,108 +96,107 @@ def ws_persistent_matmul(
     counter_ptr = tile_counter + xcd_id * COUNTERS_PER_XCD + slot
     local_tile_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
 
-    for _ in range(tiles_per_slot):
-        if local_tile_idx < tiles_this_slot:
-            # Map slot-local index → global tile_id
-            tile_id = xcd_base + slot_base + local_tile_idx
+    while local_tile_idx < tiles_this_slot:
+        # Map slot-local index → global tile_id
+        tile_id = xcd_base + slot_base + local_tile_idx
 
-            # GROUP_SIZE_M swizzle → (pid_m, pid_n)
-            num_pid_in_group = GROUP_SIZE_M * num_pid_n
-            group_id = tile_id // num_pid_in_group
-            first_pid_m = group_id * GROUP_SIZE_M
-            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-            pid_n = (tile_id % num_pid_in_group) // group_size_m
-            tl.assume(pid_m >= 0)
-            tl.assume(pid_n >= 0)
+        # GROUP_SIZE_M swizzle → (pid_m, pid_n)
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
 
-            rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-            rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-            rk = tl.arange(0, BLOCK_SIZE_K)
-            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        rk = tl.arange(0, BLOCK_SIZE_K)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
+        B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+
+        if BIAS:
+            bias_ = bias_ptr + rm * stride_bias
+            bias = tl.load(bias_, mask=rm < M, other=0.0)
+
+        loop_k = tl.cdiv(K, BLOCK_SIZE_K)
+        if not EVEN_K:
+            loop_k -= 1
+        tl.assume(loop_k > 1)
+
+        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+        for k in range(0, loop_k):
+            if stride_ak == 1:
+                a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_A)
+            else:
+                a = tl.load(tl.multiple_of(A_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_A)
+
+            if stride_bk == 1:
+                b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_B)
+            else:
+                b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
+
+            # Conditional dot product precision based on quantization mode
+            if QUANTIZED:
+                acc += tl.dot(a, b, input_precision="ieee")
+            else:
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+            A_BASE += BLOCK_SIZE_K * stride_ak
+            B_BASE += BLOCK_SIZE_K * stride_bk
+
+        if not EVEN_K:
+            k = loop_k
+            rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
             A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
             B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+            if stride_ak == 1:
+                A_BASE = tl.multiple_of(A_BASE, (1, 16))
+            else:
+                A_BASE = tl.multiple_of(A_BASE, (16, 1))
 
-            if BIAS:
-                bias_ = bias_ptr + rm * stride_bias
-                bias = tl.load(bias_, mask=rm < M, other=0.0)
+            if stride_bk == 1:
+                B_BASE = tl.multiple_of(B_BASE, (16, 1))
+            else:
+                B_BASE = tl.multiple_of(B_BASE, (1, 16))
+            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
+            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
-            loop_k = tl.cdiv(K, BLOCK_SIZE_K)
-            if not EVEN_K:
-                loop_k -= 1
-            tl.assume(loop_k > 1)
-
-            acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-            for k in range(0, loop_k):
-                if stride_ak == 1:
-                    a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_A)
-                else:
-                    a = tl.load(tl.multiple_of(A_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_A)
-
-                if stride_bk == 1:
-                    b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_B)
-                else:
-                    b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
-
-                # Conditional dot product precision based on quantization mode
-                if QUANTIZED:
-                    acc += tl.dot(a, b, input_precision="ieee")
-                else:
-                    acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
-                A_BASE += BLOCK_SIZE_K * stride_ak
-                B_BASE += BLOCK_SIZE_K * stride_bk
-
-            if not EVEN_K:
-                k = loop_k
-                rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-                A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-                B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-                if stride_ak == 1:
-                    A_BASE = tl.multiple_of(A_BASE, (1, 16))
-                else:
-                    A_BASE = tl.multiple_of(A_BASE, (16, 1))
-
-                if stride_bk == 1:
-                    B_BASE = tl.multiple_of(B_BASE, (16, 1))
-                else:
-                    B_BASE = tl.multiple_of(B_BASE, (1, 16))
-                a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
-                b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
-
-                if QUANTIZED:
-                    acc += tl.dot(a, b, input_precision="ieee")
-                else:
-                    acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
-
-            # Conditional scaling for quantized mode
             if QUANTIZED:
-                # Create pointers for the scale tensors and load them
-                rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
-                rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
-                A_scale = tl.load(A_scale_ptr + rm_A_scale)
-                B_scale = tl.load(B_scale_ptr + rn_B_scale)
-                acc *= A_scale[:, None] * B_scale[None, :]
+                acc += tl.dot(a, b, input_precision="ieee")
+            else:
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
 
-            # Unified bias handling
-            if BIAS:
-                if QUANTIZED:
-                    bias_float = bias.to(tl.float32)
-                    c = acc + bias_float[:, None]
-                    c = c.to(C.type.element_ty)
-                else:
-                    c = acc.to(C.type.element_ty)
-                    c += bias[:, None]
+        # Conditional scaling for quantized mode
+        if QUANTIZED:
+            # Create pointers for the scale tensors and load them
+            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
+            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
+            A_scale = tl.load(A_scale_ptr + rm_A_scale)
+            B_scale = tl.load(B_scale_ptr + rn_B_scale)
+            acc *= A_scale[:, None] * B_scale[None, :]
+
+        # Unified bias handling
+        if BIAS:
+            if QUANTIZED:
+                bias_float = bias.to(tl.float32)
+                c = acc + bias_float[:, None]
+                c = c.to(C.type.element_ty)
             else:
                 c = acc.to(C.type.element_ty)
+                c += bias[:, None]
+        else:
+            c = acc.to(C.type.element_ty)
 
-            rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-            rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-            c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-            C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-            tl.store(C_, c, c_mask)
+        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+        C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        tl.store(C_, c, c_mask)
 
-            # Grab next tile from this slot's counter
-            local_tile_idx = tl.atomic_add(counter_ptr, 1)
+        # Grab next tile from this slot's counter
+        local_tile_idx = tl.atomic_add(counter_ptr, 1)
