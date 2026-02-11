@@ -11,8 +11,14 @@ PIDs are assigned round-robin across XCDs:
 The tile space is partitioned into contiguous per-XCD regions:
     XCD i owns tiles [i * tiles_per_xcd, min((i+1) * tiles_per_xcd, total_tiles))
 
-Each XCD has its own atomic counter (tile_counter[xcd_id]) so CUs only
-contend with the ~38 other CUs on the same die, not all 304 CUs.
+To reduce atomic contention, each XCD uses COUNTERS_PER_XCD independent
+counters (default 16).  The XCD's tiles are further sub-partitioned:
+    counter slot j within XCD i owns tiles
+        [xcd_base + j * tiles_per_slot, xcd_base + min((j+1) * tiles_per_slot, tiles_this_xcd))
+
+Each WG picks its slot via:  slot = (pid // NUM_XCDS) % COUNTERS_PER_XCD
+
+With 38 CUs per XCD and 16 slots, only ~2-3 CUs contend on each counter.
 """
 
 import triton
@@ -28,7 +34,7 @@ def ws_persistent_matmul(
     A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
-    tile_counter,  # Per-XCD atomic counters (int32[NUM_XCDS])
+    tile_counter,  # Per-XCD×slot atomic counters (int32[NUM_XCDS * COUNTERS_PER_XCD])
     M,
     N,
     K,
@@ -45,6 +51,7 @@ def ws_persistent_matmul(
     GROUP_SIZE_M: tl.constexpr,
     NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
+    COUNTERS_PER_XCD: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
     CACHE_MODIFIER_A: tl.constexpr,
@@ -54,9 +61,11 @@ def ws_persistent_matmul(
 ):
     pid = tl.program_id(0)
 
-    # ── Per-XCD work-stealing ──────────────────────────────────────────
+    # ── Per-XCD work-stealing with multiple counter slots ──────────────
     # PIDs are round-robin across XCDs: 0→XCD0, 1→XCD1, …, 7→XCD7, 8→XCD0…
     xcd_id = pid % NUM_XCDS
+    local_wg_id = pid // NUM_XCDS  # WG index within this XCD
+    slot = local_wg_id % COUNTERS_PER_XCD
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -68,6 +77,12 @@ def ws_persistent_matmul(
     xcd_end = tl.minimum(xcd_base + tiles_per_xcd, total_tiles)
     tiles_this_xcd = xcd_end - xcd_base
 
+    # Sub-partition within the XCD across COUNTERS_PER_XCD slots.
+    tiles_per_slot = tl.cdiv(tiles_this_xcd, COUNTERS_PER_XCD)
+    slot_base = slot * tiles_per_slot                         # relative to xcd_base
+    slot_end = tl.minimum(slot_base + tiles_per_slot, tiles_this_xcd)
+    tiles_this_slot = slot_end - slot_base
+
     tl.assume(stride_am > 0)
     tl.assume(stride_ak > 0)
     tl.assume(stride_bn > 0)
@@ -77,14 +92,14 @@ def ws_persistent_matmul(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    # Per-XCD atomic counter — only CUs on the same die contend.
-    counter_ptr = tile_counter + xcd_id
-    local_tile_idx = tl.atomic_add(counter_ptr, 1)
+    # Counter for this XCD + slot — only ~2-3 CUs contend.
+    counter_ptr = tile_counter + xcd_id * COUNTERS_PER_XCD + slot
+    local_tile_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
 
-    for _ in range(tiles_per_xcd):
-        if local_tile_idx < tiles_this_xcd:
-            # Map local index → global tile_id
-            tile_id = xcd_base + local_tile_idx
+    for _ in range(tiles_per_slot):
+        if local_tile_idx < tiles_this_slot:
+            # Map slot-local index → global tile_id
+            tile_id = xcd_base + slot_base + local_tile_idx
 
             # GROUP_SIZE_M swizzle → (pid_m, pid_n)
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -184,5 +199,5 @@ def ws_persistent_matmul(
             C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
             tl.store(C_, c, c_mask)
 
-            # Grab next tile from this XCD's counter
+            # Grab next tile from this slot's counter
             local_tile_idx = tl.atomic_add(counter_ptr, 1)

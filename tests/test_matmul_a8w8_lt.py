@@ -86,10 +86,13 @@ def test_matmul_a8w8(m, n, k, in_dtype, out_dtype, transA, transB, enable_stream
     # Scales from generate_matmul_inputs are already 1D: (M,) and (N,)
     # which is what the kernel expects
     selector = tritonblas.OrigamiMatmulSelector(
-        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device
+        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
+        streamk=enable_streamk,
     )
+    config = tritonblas.matmul_preamble(selector)
     tritonblas.matmul_a8w8_lt(
-        inputs.A, inputs.B, inputs.scaleA, inputs.scaleB, inputs.C, selector, enable_streamk
+        inputs.A, inputs.B, inputs.scaleA, inputs.scaleB, inputs.C, selector, config,
+        enable_streamk,
     )
 
     # Check correctness using reference computation

@@ -12,7 +12,8 @@ def example_matmul(m, n, k):
 
     # Run TritonBLAS matmul
     selector = tritonblas.OrigamiMatmulSelector(m, n, k, A.dtype, B.dtype, C.dtype, A.device)
-    tritonblas.matmul_lt(A, B, C, selector)
+    config = tritonblas.matmul_preamble(selector)
+    tritonblas.matmul_lt(A, B, C, selector, config)
 
     # Print result
     print(C)

@@ -73,7 +73,8 @@ def run_tritonblas_matmul(
     config = selector.get_config()  # (BLK_M, BLK_N, BLK_K, group_size)
 
     # Benchmark
-    matmul_fn = lambda: tritonblas.matmul_lt(A, B, C, selector, False)
+    cfg = tritonblas.matmul_preamble(selector)
+    matmul_fn = lambda: tritonblas.matmul_lt(A, B, C, selector, cfg, False)
     elapsed_ms = triton.testing.do_bench(matmul_fn, warmup=20, rep=200)
     tflops = perf_ms(elapsed_ms, m, n, k)
     return tflops, elapsed_ms, config

@@ -2,36 +2,59 @@
 """
 TritonBLAS Unified Matrix Multiplication Benchmark
 
-This benchmark script supports both standard (fp16/bf16/fp32) and quantized (fp8/int8) 
+This benchmark script supports both standard (fp16/bf16/fp32) and quantized (fp8/int8)
 matrix multiplication. It automatically detects the dtype and uses the appropriate API.
+
+Supports three kernel modes via CLI flags:
+  (default)           Persistent GEMM
+  --enable-streamk    Stream-K GEMM
+  --work-stealing     Work-stealing persistent GEMM
+
+Optional --cu-sweep runs a balanced CU-mask sweep (MI300X) by re-invoking this
+script as subprocesses with ROC_GLOBAL_CU_MASK set.  Results flow into the same
+CSV with an extra ``active_cus`` column.
 """
 import argparse
 import csv
+import json
+import os
 import random
+import subprocess
+import sys
 
 import torch  # type: ignore
 import triton  # type: ignore
-import tritonblas  # type: ignore
 import yaml  # type: ignore
 from tqdm import tqdm  # type: ignore
 
-from tritonblas.utils import MatmulInputs, generate_matmul_inputs, str_to_dtype, _is_float8_like  # type: ignore
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "include"))
+import tritonblas  # type: ignore
+
+from common import get_cu_info, build_balanced_hex_mask  # type: ignore
+from tritonblas.utils import generate_matmul_inputs, str_to_dtype, _is_float8_like  # type: ignore
 
 
-def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk, init_type="randn"):
+def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk,
+                work_stealing=False, init_type="randn"):
     """Test matmul with proper input generation - handles both quantized and non-quantized dtypes"""
 
     inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
     selector = tritonblas.OrigamiMatmulSelector(
-        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device
+        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
+        streamk=enable_streamk,
     )
+    cfg = tritonblas.matmul_preamble(selector)
 
     if inputs.is_quantized:
         tritonblas.matmul_a8w8_lt(
-            inputs.A, inputs.B, inputs.scaleA, inputs.scaleB, inputs.C, selector, enable_streamk
+            inputs.A, inputs.B, inputs.scaleA, inputs.scaleB, inputs.C, selector, cfg,
+            enable_streamk, work_stealing=work_stealing,
         )
     else:
-        tritonblas.matmul_lt(inputs.A, inputs.B, inputs.C, selector, enable_streamk)
+        tritonblas.matmul_lt(
+            inputs.A, inputs.B, inputs.C, selector, cfg,
+            enable_streamk, work_stealing=work_stealing,
+        )
 
     if inputs.is_quantized:
         acc = torch.matmul(inputs.A.to(torch.float32), inputs.B.to(torch.float32))
@@ -89,6 +112,7 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk, in
     print(f"{size_str} Correct✅")
 
 
+
 def bench_matmul(
     input_yaml: str,
     init_type: str,
@@ -97,6 +121,7 @@ def bench_matmul(
     output_csv=None,
     write_csv_freq=100,
     enable_streamk=False,
+    work_stealing=False,
     check_correctness=False,
 ):
     with open(input_yaml, "r") as f:
@@ -147,30 +172,41 @@ def bench_matmul(
             )
         )
 
-        # Build a tritonBLAS selector config and launch matmul
         selector = tritonblas.OrigamiMatmulSelector(
             m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
             streamk=enable_streamk
         )
-        ## TODO
+        cfg = tritonblas.matmul_preamble(selector)
         config = (selector.block_m, selector.block_n, selector.block_k)
 
-        # Use appropriate API based on quantization
         if inputs.is_quantized:
             matmul = lambda: tritonblas.matmul_a8w8_lt(
-                inputs.A, inputs.B, inputs.scaleA, inputs.scaleB, inputs.C, selector, enable_streamk
+                inputs.A, inputs.B, inputs.scaleA, inputs.scaleB, inputs.C, selector, cfg,
+                enable_streamk, work_stealing=work_stealing,
             )
         else:
-            matmul = lambda: tritonblas.matmul(
-                inputs.A, inputs.B, inputs.C, enable_streamk=enable_streamk
+            matmul = lambda: tritonblas.matmul_lt(
+                inputs.A, inputs.B, inputs.C, selector, cfg,
+                enable_streamk, work_stealing=work_stealing,
             )
 
-        ms = triton.testing.do_bench(matmul, warmup=20, rep=20)
+        reset = lambda: cfg.reset(streamk=enable_streamk, work_stealing=work_stealing)
+        ms = tritonblas.do_bench(matmul, reset_fn=reset, n_warmup=20, n_repeat=20)
         perf = gflops(ms)
+
+        # Determine mode string for output
+        if work_stealing:
+            mode_str = "work_stealing"
+        elif enable_streamk:
+            mode_str = "streamk"
+        else:
+            mode_str = "persistent"
 
         if print_verbose:
             print(
-                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, init={init_type}, perf={perf}(GFLOPs) selected_tile={selector.block_m}x{selector.block_n}x{selector.block_k}"
+                f"m={m}, n={n}, k={k}, in_dtype={in_dtype}, out_dtype={out_dtype}, "
+                f"init={init_type}, mode={mode_str}, perf={perf}(GFLOPs) "
+                f"selected_tile={selector.block_m}x{selector.block_n}x{selector.block_k}"
             )
 
         metrics = {
@@ -195,7 +231,7 @@ def bench_matmul(
             "us": ms / 1000,
             "alpha": 1,
             "beta": 0,
-            "enable_streamk": enable_streamk,
+            "mode": mode_str,
         }
         benchmark_results.append(metrics)
 
@@ -207,36 +243,39 @@ def bench_matmul(
 
         if check_correctness:
             print("correctness: ", end=" ", flush=True)
-            test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk, init_type)
+            test_matmul(m, n, k, in_dtype, out_dtype, transA, transB,
+                        enable_streamk, work_stealing=work_stealing, init_type=init_type)
 
     return benchmark_results
 
 
+def _build_child_cmd(args):
+    """Build a subprocess command from parsed args (excludes --cu-sweep and --output-csv)."""
+    cmd = [sys.executable, os.path.abspath(__file__)]
+    cmd += ["--input-yaml", args.input_yaml]
+    cmd += ["--init_type", args.init_type]
+    cmd += ["--csv-write-freq", str(args.csv_write_freq)]
+    if args.shuffle_bench:
+        cmd.append("--shuffle-bench")
+    if args.checkcorrectness:
+        cmd.append("--checkcorrectness")
+    if args.enable_streamk:
+        cmd.append("--enable-streamk")
+    elif args.work_stealing:
+        cmd.append("--work-stealing")
+    return cmd
+
+
 def write_csv(filename: str, results):
     fieldnames = [
-        "m",
-        "n",
-        "k",
-        "mnk",
-        "macro_tile",
-        "bytes",
-        "flops",
+        "m", "n", "k", "mnk", "macro_tile", "bytes", "flops",
         "tritonblas_gflops",
-        "a_type",
-        "b_type",
-        "c_type",
-        "d_type",
-        "compute_type",
-        "in_dtype",
-        "out_dtype",
-        "init_type",
-        "transA",
-        "transB",
-        "us",
-        "alpha",
-        "beta",
-        "enable_streamk",
+        "a_type", "b_type", "c_type", "d_type", "compute_type",
+        "in_dtype", "out_dtype", "init_type",
+        "transA", "transB", "us", "alpha", "beta", "mode",
     ]
+    if results and "active_cus" in results[0]:
+        fieldnames.insert(0, "active_cus")
     with open(filename, mode="w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
@@ -245,68 +284,118 @@ def write_csv(filename: str, results):
     print(f"Benchmark results saved to '{filename}'.")
 
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Benchmark matmul performance (supports both standard and quantized dtypes) and optionally output performance metrics to a CSV file."
+        description="Benchmark matmul performance (supports both standard and quantized dtypes) "
+                    "and optionally output performance metrics to a CSV file."
     )
     parser.add_argument(
-        "--input-yaml",
-        type=str,
-        default="../datasets/matmul_random.yaml",
+        "--input-yaml", type=str, default="../datasets/matmul_random.yaml",
         help="Input YAML file containing benchmark cases (default: ./matmul_random.yaml).",
     )
     parser.add_argument(
-        "--output-csv",
-        type=str,
-        default="",
+        "--output-csv", type=str, default="",
         help="Filename for CSV output (if not specified, CSV output is disabled).",
     )
     parser.add_argument(
-        "--init_type",
-        type=str,
-        default="randn",
+        "--init_type", type=str, default="randn",
         choices=["hpl", "trig_float", "zeros", "randn"],
         help="Tensor initialization type (default: randn).",
     )
     parser.add_argument(
-        "--shuffle-bench",
-        action="store_true",
+        "--shuffle-bench", action="store_true",
         help="Randomly shuffle the order the benchmark runs",
     )
     parser.add_argument(
-        "--csv-write-freq",
-        type=int,
-        default=1000,
+        "--csv-write-freq", type=int, default=1000,
         help="Number of problems to run before writing to csv",
     )
     parser.add_argument(
-        "--print-verbose",
-        action="store_true",
+        "--print-verbose", action="store_true",
         help="Print detailed information for each benchmark.",
     )
     parser.add_argument(
-        "--checkcorrectness",
-        action="store_true",
-        default=False,
+        "--checkcorrectness", action="store_true", default=False,
         help="Check result correctness",
     )
-    parser.add_argument(
-        "--enable-streamk",
-        action="store_true",
-        help="Enable Stream-K mode for matrix multiplication (default: False for persistent mode).",
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--enable-streamk", action="store_true",
+        help="Enable Stream-K mode for matrix multiplication.",
     )
+    mode_group.add_argument(
+        "--work-stealing", action="store_true",
+        help="Enable work-stealing persistent GEMM with per-XCD atomic counters.",
+    )
+
+    parser.add_argument(
+        "--cu-sweep", action="store_true",
+        help="Run a balanced CU-mask sweep (MI300X).  Uses the same --input-yaml "
+             "shapes and kernel mode.  Re-invokes this script as subprocesses with "
+             "ROC_GLOBAL_CU_MASK set; results include an active_cus column.",
+    )
+    parser.add_argument(
+        "--cu-sweep-max-remove", type=int, default=34,
+        help="Max CUs to remove per XCD (default 34, minimum 4 CUs/XCD left).",
+    )
+
+    # Hidden: used by cu-sweep parent to tag subprocess results
+    parser.add_argument("--_active-cus", type=int, default=None, help=argparse.SUPPRESS)
+
     args = parser.parse_args()
 
+    if args.cu_sweep:
+        full_cus, num_xcds, cus_per_xcd = get_cu_info()
+        all_results = []
+        child_base = _build_child_cmd(args)
+        max_remove = min(args.cu_sweep_max_remove, cus_per_xcd - 1)
+
+        for r in range(max_remove + 1):
+            active = full_cus - r * num_xcds
+            mask = build_balanced_hex_mask(r, num_xcds, cus_per_xcd)
+
+            child_cmd = child_base + ["--_active-cus", str(active)]
+
+            env = os.environ.copy()
+            if mask:
+                env["ROC_GLOBAL_CU_MASK"] = mask
+
+            proc = subprocess.run(
+                child_cmd, capture_output=True, text=True, env=env,
+            )
+            if proc.returncode != 0:
+                print(f"[active_cus={active}] subprocess failed:", file=sys.stderr)
+                sys.stderr.write(proc.stderr[-500:] if len(proc.stderr) > 500 else proc.stderr)
+                continue
+
+            step_results = json.loads(proc.stdout)
+            all_results.extend(step_results)
+
+        if args.output_csv:
+            write_csv(args.output_csv, all_results)
+        sys.exit(0)
+
+    is_worker = args._active_cus is not None
     benchmark_results = bench_matmul(
         args.input_yaml,
         args.init_type,
         shuffle_benchmark=args.shuffle_bench,
-        output_csv=args.output_csv,
+        output_csv=args.output_csv if not is_worker else None,
         write_csv_freq=args.csv_write_freq,
-        print_verbose=args.print_verbose,
+        print_verbose=args.print_verbose if not is_worker else False,
         enable_streamk=args.enable_streamk,
+        work_stealing=args.work_stealing,
         check_correctness=args.checkcorrectness,
     )
+
+    if is_worker:
+        # Tag each result with CU count and dump JSON to stdout for parent
+        for row in benchmark_results:
+            row["active_cus"] = args._active_cus
+        print(json.dumps(benchmark_results))
+        sys.exit(0)
 
     if args.output_csv:
         write_csv(args.output_csv, benchmark_results)

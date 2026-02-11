@@ -24,6 +24,8 @@ class OrigamiMatmulSelector:
     if hasattr(torch, "float8_e4m3fnuz"):
         dtype_to_str[torch.float8_e4m3fnuz] = "f8"
 
+    COUNTERS_PER_XCD = 16  # work-stealing: atomic counter slots per XCD
+
     def __init__(
         self,
         m: int,
@@ -110,19 +112,21 @@ class OrigamiMatmulSelector:
         else:
             self._grid = self._hardware.N_CU
 
-        # Try both workgroup mapping modes for compatibility with Origami Versions
-        try:
-            _mapping_mode, self._xcc_workgroup_mapping, self._workgroup_mapping = (
-                origami.select_workgroup_mapping(
-                    self._problem, self._hardware, self._result.config, self._grid
-                )
-            )
-        except ValueError:
-            self._xcc_workgroup_mapping, self._workgroup_mapping = (
-                origami.select_workgroup_mapping(
-                    self._problem, self._hardware, self._result.config, self._grid
-                )
-            )
+        # Handle different origami API versions for workgroup mapping
+        _wg_result = origami.select_workgroup_mapping(
+            self._problem, self._hardware, self._result.config, self._grid
+        )
+        if isinstance(_wg_result, tuple):
+            # Older origami: returns (mode, xcc_mapping, mapping) or (xcc_mapping, mapping)
+            if len(_wg_result) == 3:
+                _, self._xcc_workgroup_mapping, self._workgroup_mapping = _wg_result
+            else:
+                self._xcc_workgroup_mapping, self._workgroup_mapping = _wg_result
+        else:
+            # origami >= 0.1.0: returns workgroup_mapping_t object
+            self._xcc_workgroup_mapping = _wg_result.wgmxcc
+            self._workgroup_mapping = _wg_result.wgm
+
     @property
     def block_m(self):
         return self._result.config.mt.m
