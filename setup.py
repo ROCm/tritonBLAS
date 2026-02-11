@@ -76,6 +76,9 @@ class CustomBuildExt(build_ext):
 
 
 setup(
+    name="tritonblas",
+    version="0.1.0",
+    package_dir={"": "include"},
     cmdclass={"build_ext": CustomBuildExt},
     ext_modules=[Extension("_trigger_ext", sources=[])],
 )
