@@ -120,6 +120,7 @@ def persistent_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            GLOBAL_ATOMIC=cfg.global_atomic,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,

@@ -25,6 +25,8 @@ import triton
 import triton.language as tl
 import torch
 
+from .stages.indexing.pid_transforms import chiplet_transform
+
 
 @triton.jit()
 def ws_persistent_matmul(
@@ -59,30 +61,37 @@ def ws_persistent_matmul(
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    GLOBAL_ATOMIC: tl.constexpr = False,  # True: single device-wide counter
 ):
     pid = tl.program_id(0)
-
-    # ── Per-XCD work-stealing with multiple counter slots ──────────────
-    # PIDs are round-robin across XCDs: 0→XCD0, 1→XCD1, …, 7→XCD7, 8→XCD0…
     xcd_id = pid % NUM_XCDS
-    local_wg_id = pid // NUM_XCDS  # WG index within this XCD
-    slot = local_wg_id % COUNTERS_PER_XCD
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
-
-    # Partition tiles into contiguous per-XCD regions.
     tiles_per_xcd = tl.cdiv(total_tiles, NUM_XCDS)
-    xcd_base = xcd_id * tiles_per_xcd
-    xcd_end = tl.minimum(xcd_base + tiles_per_xcd, total_tiles)
-    tiles_this_xcd = xcd_end - xcd_base
 
-    # Sub-partition within the XCD across COUNTERS_PER_XCD slots.
-    tiles_per_slot = tl.cdiv(tiles_this_xcd, COUNTERS_PER_XCD)
-    slot_base = slot * tiles_per_slot                         # relative to xcd_base
-    slot_end = tl.minimum(slot_base + tiles_per_slot, tiles_this_xcd)
-    tiles_this_slot = slot_end - slot_base
+    if GLOBAL_ATOMIC:
+        # Single device-wide atomic — all CUs contend on one counter.
+        counter_ptr = tile_counter
+        bound = total_tiles
+    else:
+        # Per-XCD counters with multiple slots to reduce contention.
+        local_wg_id = pid // NUM_XCDS
+        slot = local_wg_id % COUNTERS_PER_XCD
+
+        xcd_base = xcd_id * tiles_per_xcd
+        xcd_end = tl.minimum(xcd_base + tiles_per_xcd, total_tiles)
+        tiles_this_xcd = xcd_end - xcd_base
+
+        tiles_per_slot = tl.cdiv(tiles_this_xcd, COUNTERS_PER_XCD)
+        slot_base = slot * tiles_per_slot
+        slot_end = tl.minimum(slot_base + tiles_per_slot, tiles_this_xcd)
+        bound = slot_end - slot_base
+
+        # Counters are padded to COUNTER_STRIDE int32 elements (256B) apart
+        # to avoid false sharing across L2 cache lines.
+        counter_ptr = tile_counter + (xcd_id * COUNTERS_PER_XCD + slot) * COUNTER_STRIDE
 
     tl.assume(stride_am > 0)
     tl.assume(stride_ak > 0)
@@ -93,15 +102,16 @@ def ws_persistent_matmul(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    # Counter for this XCD + slot — only ~2-3 CUs contend.
-    # Counters are padded to COUNTER_STRIDE int32 elements (256B) apart
-    # to avoid false sharing across L2 cache lines.
-    counter_ptr = tile_counter + (xcd_id * COUNTERS_PER_XCD + slot) * COUNTER_STRIDE
-    local_tile_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
+    raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
 
-    while local_tile_idx < tiles_this_slot:
-        # Map slot-local index → global tile_id
-        tile_id = xcd_base + slot_base + local_tile_idx
+    while raw_idx < bound:
+        # Map raw counter value → global tile_id
+        if GLOBAL_ATOMIC:
+            # Chiplet swizzle: remap global sequential index into
+            # per-XCD tile regions so data stays in the issuing XCD's L2.
+            tile_id = chiplet_transform(raw_idx, total_tiles, NUM_XCDS)
+        else:
+            tile_id = xcd_base + slot_base + raw_idx
 
         # GROUP_SIZE_M swizzle → (pid_m, pid_n)
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -142,7 +152,6 @@ def ws_persistent_matmul(
             else:
                 b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
 
-            # Conditional dot product precision based on quantization mode
             if QUANTIZED:
                 acc += tl.dot(a, b, input_precision="ieee")
             else:
@@ -172,16 +181,13 @@ def ws_persistent_matmul(
             else:
                 acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
 
-        # Conditional scaling for quantized mode
         if QUANTIZED:
-            # Create pointers for the scale tensors and load them
             rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
             rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
             A_scale = tl.load(A_scale_ptr + rm_A_scale)
             B_scale = tl.load(B_scale_ptr + rn_B_scale)
             acc *= A_scale[:, None] * B_scale[None, :]
 
-        # Unified bias handling
         if BIAS:
             if QUANTIZED:
                 bias_float = bias.to(tl.float32)
@@ -201,5 +207,4 @@ def ws_persistent_matmul(
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
 
-        # Grab next tile from this slot's counter
-        local_tile_idx = tl.atomic_add(counter_ptr, 1)
+        raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")

@@ -49,6 +49,7 @@ def main():
     parser.add_argument("--ws", type=str, help="Work-stealing GEMM CSV (single line, legacy)")
     parser.add_argument("--ws-cpc", nargs=2, action="append", metavar=("CPC", "CSV"),
                         help="Work-stealing CSV with counters-per-XCD value, e.g. --ws-cpc 4 file.csv")
+    parser.add_argument("--ws-global", type=str, help="Work-stealing global-atomic CSV")
     parser.add_argument("--torch", type=str, help="torch.mm CSV")
     parser.add_argument("-o", "--output", type=str, default="cu_sweep_plot.png",
                         help="Output image path (default: cu_sweep_plot.png)")
@@ -86,6 +87,11 @@ def main():
         cus, gf = load_tritonblas_csv(args.ws)
         ax.plot(cus, gf, label="Work-Stealing", linewidth=2, markersize=5,
                 color="#FF9800", marker="^")
+
+    if args.ws_global:
+        cus, gf = load_tritonblas_csv(args.ws_global)
+        ax.plot(cus, gf, label="Work-Stealing (Global Atomic)", linewidth=2.5, markersize=5,
+                color="#673AB7", marker="*", linestyle="-.")
 
     if args.ws_cpc:
         for cpc_val, csv_path in sorted(args.ws_cpc, key=lambda x: int(x[0])):

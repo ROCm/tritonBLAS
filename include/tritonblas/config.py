@@ -21,11 +21,13 @@ class MatmulConfig:
     """
 
     def __init__(self, device: torch.device, tile_counter: torch.Tensor,
-                 locks: torch.Tensor, P: torch.Tensor):
+                 locks: torch.Tensor, P: torch.Tensor,
+                 global_atomic: bool = False):
         self.device = device
         self.tile_counter = tile_counter
         self.locks = locks
         self.P = P
+        self.global_atomic = global_atomic
 
     def reset(self, streamk: bool = False, work_stealing: bool = False):
         """Reset mutable state based on the active kernel mode.

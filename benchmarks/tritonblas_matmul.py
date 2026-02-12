@@ -125,6 +125,7 @@ def bench_matmul(
     check_correctness=False,
     total_cus=None,
     counters_per_xcd=None,
+    global_atomic=False,
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -181,6 +182,7 @@ def bench_matmul(
         if counters_per_xcd is not None:
             selector.COUNTERS_PER_XCD = counters_per_xcd
         cfg = tritonblas.matmul_preamble(selector)
+        cfg.global_atomic = global_atomic
         config = (selector.block_m, selector.block_n, selector.block_k)
 
         if inputs.is_quantized:
@@ -269,6 +271,8 @@ def _build_child_cmd(args):
         cmd.append("--work-stealing")
     if args.counters_per_xcd is not None:
         cmd += ["--counters-per-xcd", str(args.counters_per_xcd)]
+    if args.global_atomic:
+        cmd.append("--global-atomic")
     return cmd
 
 
@@ -350,6 +354,11 @@ if __name__ == "__main__":
         "--counters-per-xcd", type=int, default=None,
         help="Override COUNTERS_PER_XCD for work-stealing (default: use selector value).",
     )
+    parser.add_argument(
+        "--global-atomic", action="store_true",
+        help="Use a single device-wide atomic counter instead of per-XCD counters "
+             "(only meaningful with --work-stealing).",
+    )
 
     # Hidden: used by cu-sweep parent to tag subprocess results
     parser.add_argument("--_active-cus", type=int, default=None, help=argparse.SUPPRESS)
@@ -402,6 +411,7 @@ if __name__ == "__main__":
         check_correctness=args.checkcorrectness,
         total_cus=args._total_cus,
         counters_per_xcd=args.counters_per_xcd,
+        global_atomic=args.global_atomic,
     )
 
     if is_worker:
