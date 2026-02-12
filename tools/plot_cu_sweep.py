@@ -90,7 +90,7 @@ def main():
             cus, gf = load_tritonblas_csv(csv_path)
             color = ws_colors.get(cpc_val, "#607D8B")
             marker = ws_markers.get(cpc_val, "x")
-            ax.plot(cus, gf, label=f"WS (cpc={cpc_val})", linewidth=1.8, markersize=5,
+            ax.plot(cus, gf, label=f"Work-Stealing (Counters/XCD = {cpc_val})", linewidth=1.8, markersize=5,
                     color=color, marker=marker, linestyle="--")
 
     ax.set_xlabel("Active CUs", fontsize=13)

@@ -113,6 +113,13 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
+        # Heuristic to favor 256x256x64 tile when close~
+        if((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
+           (self._result.config.mt.m != 256 and self._result.config.mt.n == 256)):
+            self._result.config.mt.m = 256
+            self._result.config.mt.n = 256
+            self._result.config.mt.k = 64
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
