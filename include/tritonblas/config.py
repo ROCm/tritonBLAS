@@ -1,5 +1,9 @@
 import torch
 
+# 256-byte separation between atomic counters to avoid false sharing
+# across L2 cache lines.  Each int32 is 4 bytes → stride = 256 / 4 = 64 elements.
+COUNTER_STRIDE = 64
+
 
 class MatmulConfig:
     """
@@ -10,7 +14,8 @@ class MatmulConfig:
 
     Attributes:
         device:        ``torch.device`` the buffers live on.
-        tile_counter:  ``int32[num_xcds * counters_per_xcd]`` work-stealing counters.
+        tile_counter:  ``int32[num_counters * COUNTER_STRIDE]`` work-stealing
+                       counters, padded to 256B per slot to avoid false sharing.
         locks:         ``uint8[sk_grid]`` stream-K lock array.
         P:             ``float32[sk_grid, block_size]`` stream-K partial buffer.
     """
@@ -67,7 +72,8 @@ def matmul_preamble(selector, device: torch.device = None) -> MatmulConfig:
     block_size = selector.block_m * selector.block_n
     sk_grid = selector.sk_grid
 
-    tile_counter = torch.zeros(num_xcds * counters_per_xcd, device=device, dtype=torch.int32)
+    num_counters = num_xcds * counters_per_xcd
+    tile_counter = torch.zeros(num_counters * COUNTER_STRIDE, device=device, dtype=torch.int32)
     locks = torch.zeros(sk_grid, device=device, dtype=torch.uint8)
     P = torch.empty(sk_grid, block_size, device=device, dtype=torch.float32)
 

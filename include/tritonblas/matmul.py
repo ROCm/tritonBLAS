@@ -6,7 +6,7 @@ import time
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
-from .config import MatmulConfig, matmul_preamble
+from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 from typing import Dict, Tuple, Optional
 
 _tensor_cache = {}
@@ -87,6 +87,7 @@ def persistent_matmul_lt(
         # Work-stealing: launch grid = num CUs, tiles assigned dynamically
         # via per-XCD atomic counters.
         grids = selector._hardware.N_CU
+        # grids = total_tiles
 
         kk = ws_persistent_matmul[(grids,)](
             a,
@@ -113,6 +114,7 @@ def persistent_matmul_lt(
             NUM_SMS=grids,
             NUM_XCDS=num_xcds,
             COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
+            COUNTER_STRIDE=COUNTER_STRIDE,
             BIAS=False,
             EVEN_K=even_k,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,

@@ -52,6 +52,7 @@ def ws_persistent_matmul(
     NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     COUNTERS_PER_XCD: tl.constexpr,
+    COUNTER_STRIDE: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
     CACHE_MODIFIER_A: tl.constexpr,
@@ -93,7 +94,9 @@ def ws_persistent_matmul(
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
     # Counter for this XCD + slot — only ~2-3 CUs contend.
-    counter_ptr = tile_counter + xcd_id * COUNTERS_PER_XCD + slot
+    # Counters are padded to COUNTER_STRIDE int32 elements (256B) apart
+    # to avoid false sharing across L2 cache lines.
+    counter_ptr = tile_counter + (xcd_id * COUNTERS_PER_XCD + slot) * COUNTER_STRIDE
     local_tile_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
 
     while local_tile_idx < tiles_this_slot:
