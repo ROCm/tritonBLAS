@@ -23,39 +23,39 @@ import mosaic
 class ScheduleContext:
     """
     Unified scheduling context that hides persistent GEMM loop complexity.
-    
+
     Two simple iteration patterns:
     - Tile loop: for tile_id in range(start, total, stride) with get_tile(tile_id)
     - Iter loop: for iter_id in range(start, end) with get_iter(iter_id)
-    
+
     Example usage (persistent GEMM):
-        ctx = GemmContext(block_m=128, block_n=256, block_k=64, 
+        ctx = GemmContext(block_m=128, block_n=256, block_k=64,
                           num_sms=NUM_SMS, num_xcds=NUM_XCDS)
         sched = ScheduleContext(M, N, K, ctx)
-        
+
         start, total, stride = sched.persistent_tile_range()
         for tile_id in range(start, total, stride):
             out_tile = sched.get_tile_from_idx(tile_id)
             # Process full tile
-    
+
     Example usage (Stream-K):
         ctx = GemmContext(block_m=128, block_n=256, block_k=64, num_sms=NUM_SMS)
         sched = ScheduleContext(M, N, K, ctx, streamk_tiles=STREAMK_TILES)
-        
+
         start, end = sched.iter_range()
         for iter_id in range(start, end):
             pid_m, pid_n, k_iter = sched.get_iter(iter_id)
             # Process single K iteration at (pid_m, pid_n, k_iter)
     """
-    
+
     # Problem dimensions
     M: tl.tensor
     N: tl.tensor
     K: tl.tensor
-    
+
     # GemmContext with all block sizes and scheduling params
     ctx: GemmContext
-    
+
     # Stream-K specific
     streamk_tiles: tl.constexpr
     
@@ -70,7 +70,7 @@ class ScheduleContext:
     ):
         """
         Create a ScheduleContext from a GemmContext.
-        
+
         Args:
             M, N, K: Problem dimensions
             ctx: GemmContext with block sizes and scheduling parameters
@@ -90,41 +90,90 @@ class ScheduleContext:
     def persistent_tile_range(self):
         """
         Get tile iteration range for this workgroup (persistent GEMM).
-        
+
+        Applies chiplet transform based on chunk_size:
+            chunk_size > 0: chiplet_transform_chunked (chunked assignment)
+            chunk_size = 0: chiplet_transform (contiguous assignment)
+
         Returns:
             (start, total, stride): Use as range(start, total, stride)
-            
+
             start, total, stride = sched.persistent_tile_range()
             for tile_id in range(start, total, stride):
-                pid_m, pid_n = sched.get_tile(tile_id)
+                out_tile = sched.get_tile_from_idx(tile_id)
                 ...
         """
         num_pid_m = tl.cdiv(self.M, self.ctx.block_m)
         num_pid_n = tl.cdiv(self.N, self.ctx.block_n)
         total_tiles = num_pid_m * num_pid_n
-        
-        # Get transformed program ID
+
+        # Get transformed program ID with chiplet transform
         pid = tl.program_id(0)
-        if self.ctx.num_xcds != 1:
-            pid = mosaic.chiplet_transform_chunked(pid, self.ctx.num_sms, self.ctx.num_xcds, self.ctx.chunk_size)
-        
+        # Only apply chiplet transform if NOT in default mode (mode 2)
+        if self.ctx.num_xcds != 1 and self.ctx.mosaic_mode != 2:
+            if self.ctx.chunk_size == 0:
+                # Use chiplet_transform (contiguous assignment to XCDs)
+                pid = mosaic.chiplet_transform(pid, self.ctx.num_sms, self.ctx.num_xcds)
+            else:
+                # Use chiplet_transform_chunked (chunked assignment)
+                pid = mosaic.chiplet_transform_chunked(pid, self.ctx.num_sms, self.ctx.num_xcds, self.ctx.chunk_size)
+
         return pid, total_tiles, self.ctx.num_sms
     
     @triton.jit
     def get_tile_from_idx(self, tile_id):
         """
-        Get a Tile for a given tile ID.
-        
+        Get a Tile for a given tile ID using the configured scheduling mode.
+
+        Scheduling modes:
+            0 (baseline): wgm_transform (current tritonBLAS behavior)
+            1 (mosaic): Hierarchical layouts with gemm_grid_transform
+            2 (default): Raw row-major assignment, no transforms
+
         Args:
             tile_id: Linear tile index
-            
+
         Returns:
             Tile: Tile object with computed coordinates and ctx block sizes
         """
         num_pid_m = tl.cdiv(self.M, self.ctx.block_m)
         num_pid_n = tl.cdiv(self.N, self.ctx.block_n)
 
-        pid_m, pid_n = mosaic.wgm_transform(tile_id, num_pid_m, num_pid_n, self.ctx.group_size_m)
+        if self.ctx.mosaic_mode == 1:  # Mosaic mode (hierarchical layouts)
+            # Create hierarchical layout and apply gemm_grid_transform
+            if self.ctx.mosaic_has_l3:
+                # 3-level layout: LayoutRank2Depth3
+                layout = mosaic.LayoutRank2Depth3(
+                    self.ctx.mosaic_meta_y, self.ctx.mosaic_meta_x,            # outer
+                    self.ctx.mosaic_l3_tile_y, self.ctx.mosaic_l3_tile_x,      # middle
+                    self.ctx.mosaic_l2_tile_y, self.ctx.mosaic_l2_tile_x,      # inner
+                    self.ctx.mosaic_meta_ordering,
+                    self.ctx.mosaic_l3_ordering,
+                    self.ctx.mosaic_l2_ordering,
+                )
+            else:
+                # 2-level layout: LayoutRank2Depth2
+                layout = mosaic.LayoutRank2Depth2(
+                    self.ctx.mosaic_meta_y, self.ctx.mosaic_meta_x,            # outer
+                    self.ctx.mosaic_l2_tile_y, self.ctx.mosaic_l2_tile_x,      # inner
+                    self.ctx.mosaic_meta_ordering,
+                    self.ctx.mosaic_l2_ordering,
+                )
+
+            # Apply gemm_grid_transform
+            offset = layout.gemm_grid_transform(tile_id, num_pid_m, num_pid_n)
+            pid_m = offset // num_pid_n
+            pid_n = offset % num_pid_n
+
+        elif self.ctx.mosaic_mode == 2:  # Default mode (no transforms)
+            # Raw row-major assignment
+            pid_m = tile_id // num_pid_n
+            pid_n = tile_id % num_pid_n
+
+        else:  # mosaic_mode == 0: Baseline mode (current tritonBLAS behavior)
+            # Use wgm_transform (grouped scheduling)
+            pid_m, pid_n = mosaic.wgm_transform(tile_id, num_pid_m, num_pid_n, self.ctx.group_size_m)
+
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
         return Tile(pid_m, pid_n, self.ctx.block_m, self.ctx.block_n)

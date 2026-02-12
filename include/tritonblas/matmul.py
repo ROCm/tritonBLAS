@@ -55,6 +55,7 @@ def persistent_matmul_lt(
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
+    mosaic_config: Optional[Dict] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -91,6 +92,54 @@ def persistent_matmul_lt(
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, total_programs // num_xcds)
 
+    # Parse mosaic_config
+    mosaic_mode = 0  # Default: baseline (wgm_transform)
+    mosaic_meta_y = 1
+    mosaic_meta_x = 1
+    mosaic_meta_ordering = 0
+    mosaic_l2_tile_y = 1
+    mosaic_l2_tile_x = 1
+    mosaic_l2_ordering = 0
+    mosaic_has_l3 = False
+    mosaic_l3_tile_y = 1
+    mosaic_l3_tile_x = 1
+    mosaic_l3_ordering = 0
+
+    if mosaic_config is not None:
+        mode = mosaic_config.get("mode", "baseline")
+
+        if mode == "default":
+            # Mode 2: No transforms (raw row-major)
+            mosaic_mode = 2
+            chunk_size = 0  # No chiplet transform
+
+        elif mode == "mosaic":
+            # Mode 1: Hierarchical layouts
+            mosaic_mode = 1
+            mosaic_meta_ordering = mosaic_config.get("meta_ordering", 0)
+            mosaic_l2_tile_y = mosaic_config.get("l2_tile_y", 1)
+            mosaic_l2_tile_x = mosaic_config.get("l2_tile_x", 1)
+            mosaic_l2_ordering = mosaic_config.get("l2_ordering", 0)
+            mosaic_has_l3 = mosaic_config.get("has_l3_tiling", False)
+
+            if mosaic_has_l3:
+                mosaic_l3_tile_y = mosaic_config.get("l3_tile_y", 1)
+                mosaic_l3_tile_x = mosaic_config.get("l3_tile_x", 1)
+                mosaic_l3_ordering = mosaic_config.get("l3_ordering", 0)
+                # Compute meta dimensions for 3-level layout
+                mosaic_meta_y = total_blocks_M // (mosaic_l3_tile_y * mosaic_l2_tile_y)
+                mosaic_meta_x = total_blocks_N // (mosaic_l3_tile_x * mosaic_l2_tile_x)
+            else:
+                # Compute meta dimensions for 2-level layout
+                mosaic_meta_y = total_blocks_M // mosaic_l2_tile_y
+                mosaic_meta_x = total_blocks_N // mosaic_l2_tile_x
+
+            # Override chunk_size if provided
+            if "chunk_size" in mosaic_config:
+                chunk_size = mosaic_config["chunk_size"]
+                if chunk_size > 0:
+                    chunk_size = min(chunk_size, total_programs // num_xcds)
+
     # TODO: Support other matmul algs.
     kk = persistent_matmul[(grids,)](
         a,
@@ -121,6 +170,18 @@ def persistent_matmul_lt(
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
         QUANTIZED=quantized,
+        # Mosaic parameters
+        MOSAIC_MODE=mosaic_mode,
+        MOSAIC_META_Y=mosaic_meta_y,
+        MOSAIC_META_X=mosaic_meta_x,
+        MOSAIC_META_ORDERING=mosaic_meta_ordering,
+        MOSAIC_L2_TILE_Y=mosaic_l2_tile_y,
+        MOSAIC_L2_TILE_X=mosaic_l2_tile_x,
+        MOSAIC_L2_ORDERING=mosaic_l2_ordering,
+        MOSAIC_HAS_L3=mosaic_has_l3,
+        MOSAIC_L3_TILE_Y=mosaic_l3_tile_y,
+        MOSAIC_L3_TILE_X=mosaic_l3_tile_x,
+        MOSAIC_L3_ORDERING=mosaic_l3_ordering,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -224,6 +285,17 @@ def fused_matmul_lt(
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, total_tiles // num_xcds)
 
+    # Parse mosaic_config (fused kernel doesn't use mosaic yet, but accept for API compatibility)
+    mosaic_mode = 0
+    mosaic_meta_ordering = 0
+    mosaic_l2_tile_y = 1
+    mosaic_l2_tile_x = 1
+    mosaic_l2_ordering = 0
+    mosaic_has_l3 = False
+    mosaic_l3_tile_y = 1
+    mosaic_l3_tile_x = 1
+    mosaic_l3_ordering = 0
+
     locks = torch.zeros(total_tiles_alpha, device="cuda", dtype=torch.int32)
 
     # Allocate XCD maps if needed for debugging
@@ -279,6 +351,16 @@ def fused_matmul_lt(
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
         EVEN_K=even_k,
         SHOW_MAP=show_map,
+        # Mosaic parameters (for API compatibility)
+        MOSAIC_MODE=mosaic_mode,
+        MOSAIC_META_ORDERING=mosaic_meta_ordering,
+        MOSAIC_L2_TILE_Y=mosaic_l2_tile_y,
+        MOSAIC_L2_TILE_X=mosaic_l2_tile_x,
+        MOSAIC_L2_ORDERING=mosaic_l2_ordering,
+        MOSAIC_HAS_L3=mosaic_has_l3,
+        MOSAIC_L3_TILE_Y=mosaic_l3_tile_y,
+        MOSAIC_L3_TILE_X=mosaic_l3_tile_x,
+        MOSAIC_L3_ORDERING=mosaic_l3_ordering,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -357,14 +439,15 @@ def fused_matmul(
     return fused_matmul_lt(a, b, d, e, selector, c, enable_streamk, show_map)
 
 def streamk_matmul_lt(
-    a: torch.Tensor, 
-    b: torch.Tensor, 
-    c: torch.Tensor, 
-    selector, 
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
     sk_grid: Optional[int] = None,
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
+    mosaic_config: Optional[Dict] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -416,7 +499,45 @@ def streamk_matmul_lt(
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, grids // num_xcds) 
+    chunk_size = min(chunk_size, grids // num_xcds)
+
+    # Parse mosaic_config
+    mosaic_mode = 0  # Default: baseline (wgm_transform)
+    mosaic_meta_y = 1
+    mosaic_meta_x = 1
+    mosaic_meta_ordering = 0
+    mosaic_l2_tile_y = 1
+    mosaic_l2_tile_x = 1
+    mosaic_l2_ordering = 0
+    mosaic_has_l3 = False
+    mosaic_l3_tile_y = 1
+    mosaic_l3_tile_x = 1
+    mosaic_l3_ordering = 0
+
+    if mosaic_config is not None:
+        mode = mosaic_config.get("mode", "baseline")
+
+        if mode == "default":
+            mosaic_mode = 2
+            chunk_size = 0
+
+        elif mode == "mosaic":
+            mosaic_mode = 1
+            mosaic_meta_ordering = mosaic_config.get("meta_ordering", 0)
+            mosaic_l2_tile_y = mosaic_config.get("l2_tile_y", 1)
+            mosaic_l2_tile_x = mosaic_config.get("l2_tile_x", 1)
+            mosaic_l2_ordering = mosaic_config.get("l2_ordering", 0)
+            mosaic_has_l3 = mosaic_config.get("has_l3_tiling", False)
+
+            if mosaic_has_l3:
+                mosaic_l3_tile_y = mosaic_config.get("l3_tile_y", 1)
+                mosaic_l3_tile_x = mosaic_config.get("l3_tile_x", 1)
+                mosaic_l3_ordering = mosaic_config.get("l3_ordering", 0)
+
+            if "chunk_size" in mosaic_config:
+                chunk_size = mosaic_config["chunk_size"]
+                if chunk_size > 0:
+                    chunk_size = min(chunk_size, grids // num_xcds)
 
     kk = streamk_matmul[(grids,)](
         a,
@@ -450,6 +571,18 @@ def streamk_matmul_lt(
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
         QUANTIZED=quantized,
+        # Mosaic parameters
+        MOSAIC_MODE=mosaic_mode,
+        MOSAIC_META_Y=mosaic_meta_y,
+        MOSAIC_META_X=mosaic_meta_x,
+        MOSAIC_META_ORDERING=mosaic_meta_ordering,
+        MOSAIC_L2_TILE_Y=mosaic_l2_tile_y,
+        MOSAIC_L2_TILE_X=mosaic_l2_tile_x,
+        MOSAIC_L2_ORDERING=mosaic_l2_ordering,
+        MOSAIC_HAS_L3=mosaic_has_l3,
+        MOSAIC_L3_TILE_Y=mosaic_l3_tile_y,
+        MOSAIC_L3_TILE_X=mosaic_l3_tile_x,
+        MOSAIC_L3_ORDERING=mosaic_l3_ordering,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -460,14 +593,14 @@ def streamk_matmul_lt(
     return c
 
 def matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False, mosaic_config: Optional[Dict] = None
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector)
+        return streamk_matmul_lt(a, b, c, selector, mosaic_config=mosaic_config)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, c, selector, mosaic_config=mosaic_config)
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
@@ -485,6 +618,7 @@ def matmul(
     c: torch.Tensor,
     enable_streamk=False,
     sk_grid=None,
+    mosaic_config: Optional[Dict] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -492,9 +626,9 @@ def matmul(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
+        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, mosaic_config=mosaic_config)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, c, selector, mosaic_config=mosaic_config)
 
 def matmul_a8w8(
     a: torch.Tensor,

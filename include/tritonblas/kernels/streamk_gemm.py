@@ -38,6 +38,16 @@ def streamk_matmul(
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    # Mosaic scheduling parameters (for API compatibility, not used in streamk yet)
+    MOSAIC_MODE: tl.constexpr = 0,
+    MOSAIC_META_ORDERING: tl.constexpr = 0,
+    MOSAIC_L2_TILE_Y: tl.constexpr = 1,
+    MOSAIC_L2_TILE_X: tl.constexpr = 1,
+    MOSAIC_L2_ORDERING: tl.constexpr = 0,
+    MOSAIC_HAS_L3: tl.constexpr = False,
+    MOSAIC_L3_TILE_Y: tl.constexpr = 1,
+    MOSAIC_L3_TILE_X: tl.constexpr = 1,
+    MOSAIC_L3_ORDERING: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:

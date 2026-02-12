@@ -21,64 +21,78 @@ from .matrix_view import InputView
 class GemmContext:
     """
     GEMM context with all configuration parameters and accumulator management.
-    
+
     Bundles together all compile-time GEMM parameters:
     - Block sizes (M, N, K)
     - Hardware configuration (NUM_SMS, NUM_XCDS)
     - Scheduling parameters (GROUP_SIZE_M, CHUNK_SIZE)
     - Cache modifiers
     - Computation options (acc_dtype, allow_tf32, even_k, quantized)
-    
+    - Mosaic scheduling parameters (mode, layout configuration)
+
     Provides two execution modes:
     - reduce_tile(): Single BLOCK_K iteration (one dot product)
     - reduce_axis(): Full K loop
-    
+
     TILE CREATION CONVENTION:
     -------------------------
     For A [M, K] and B [K, N]:
     - A tiles: (pid_m, k_idx) with shape (BLOCK_M, BLOCK_K)
     - B tiles: (k_idx, pid_n) with shape (BLOCK_K, BLOCK_N)
-    
+
     The InputView handles the pointer arithmetic based on its stored layout.
-    
+
     Example usage:
         tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
         tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
-        
+
         ctx = GemmContext(
             block_m=128, block_n=256, block_k=64,
             num_sms=NUM_SMS, num_xcds=NUM_XCDS,
             group_size_m=8, even_k=EVEN_K,
         )
-        
+
         # Use in ScheduleContext
         sched = ScheduleContext(M, N, K, ctx)
-        
+
         acc = ctx.reduce_axis(tensorA, tensorB, out_tile)
     """
-    
+
     # Block sizes
     block_m: tl.constexpr
     block_n: tl.constexpr
     block_k: tl.constexpr
-    
+
     # Hardware config
     num_sms: tl.constexpr
     num_xcds: tl.constexpr
-    
+
     # Scheduling
     group_size_m: tl.constexpr
     chunk_size: tl.constexpr
-    
+
     # Cache modifiers
     cache_modifier_a: tl.constexpr
     cache_modifier_b: tl.constexpr
-    
+
     # Computation options
     acc_dtype: tl.constexpr
     allow_tf32: tl.constexpr
     even_k: tl.constexpr
     quantized: tl.constexpr
+
+    # Mosaic scheduling parameters
+    mosaic_mode: tl.constexpr  # 0=baseline (wgm_transform), 1=mosaic (hierarchical), 2=default (row-major)
+    mosaic_meta_y: tl.constexpr
+    mosaic_meta_x: tl.constexpr
+    mosaic_meta_ordering: tl.constexpr
+    mosaic_l2_tile_y: tl.constexpr
+    mosaic_l2_tile_x: tl.constexpr
+    mosaic_l2_ordering: tl.constexpr
+    mosaic_has_l3: tl.constexpr
+    mosaic_l3_tile_y: tl.constexpr
+    mosaic_l3_tile_x: tl.constexpr
+    mosaic_l3_ordering: tl.constexpr
     
     @triton.constexpr_function
     def __init__(
@@ -96,10 +110,22 @@ class GemmContext:
         allow_tf32=True,
         even_k=True,
         quantized=False,
+        # Mosaic parameters
+        mosaic_mode=0,
+        mosaic_meta_y=1,
+        mosaic_meta_x=1,
+        mosaic_meta_ordering=0,
+        mosaic_l2_tile_y=1,
+        mosaic_l2_tile_x=1,
+        mosaic_l2_ordering=0,
+        mosaic_has_l3=False,
+        mosaic_l3_tile_y=1,
+        mosaic_l3_tile_x=1,
+        mosaic_l3_ordering=0,
     ):
         """
         Create a GEMM context with all configuration parameters.
-        
+
         Args:
             block_m: Block size M (constexpr)
             block_n: Block size N (constexpr)
@@ -107,13 +133,24 @@ class GemmContext:
             num_sms: Number of SMs/CUs (constexpr)
             num_xcds: Number of XCDs for chiplet transform (default: 1)
             group_size_m: Group size for tile scheduling (default: 8)
-            chunk_size: Chunk size for chiplet scheduling (default: 1)
+            chunk_size: Chunk size for chiplet scheduling (default: 1, 0 for non-chunked)
             cache_modifier_a: Cache modifier for A loads (default: ".cg")
             cache_modifier_b: Cache modifier for B loads (default: ".cg")
             acc_dtype: Accumulator dtype (default: tl.float32)
             allow_tf32: Allow TF32 for matmul (default: True)
             even_k: Whether K is evenly divisible by BLOCK_K (default: True)
             quantized: Use int32 accumulation for quantized inputs (default: False)
+            mosaic_mode: Scheduling mode - 0=baseline (wgm), 1=mosaic, 2=default (row-major)
+            mosaic_meta_y: Meta-level outer radix Y (number of tiles in Y)
+            mosaic_meta_x: Meta-level outer radix X (number of tiles in X)
+            mosaic_meta_ordering: Meta-level ordering (0=row-major, 1=col-major)
+            mosaic_l2_tile_y: L2 tile height
+            mosaic_l2_tile_x: L2 tile width
+            mosaic_l2_ordering: L2 ordering (0=row-major, 1=col-major)
+            mosaic_has_l3: Whether to use 3-level hierarchical layout
+            mosaic_l3_tile_y: L3 tile height (if has_l3=True)
+            mosaic_l3_tile_x: L3 tile width (if has_l3=True)
+            mosaic_l3_ordering: L3 ordering (0=row-major, 1=col-major)
         """
         self.block_m = tl.constexpr(block_m)
         self.block_n = tl.constexpr(block_n)
@@ -128,6 +165,19 @@ class GemmContext:
         self.allow_tf32 = tl.constexpr(allow_tf32)
         self.even_k = tl.constexpr(even_k)
         self.quantized = tl.constexpr(quantized)
+
+        # Mosaic scheduling parameters
+        self.mosaic_mode = tl.constexpr(mosaic_mode)
+        self.mosaic_meta_y = tl.constexpr(mosaic_meta_y)
+        self.mosaic_meta_x = tl.constexpr(mosaic_meta_x)
+        self.mosaic_meta_ordering = tl.constexpr(mosaic_meta_ordering)
+        self.mosaic_l2_tile_y = tl.constexpr(mosaic_l2_tile_y)
+        self.mosaic_l2_tile_x = tl.constexpr(mosaic_l2_tile_x)
+        self.mosaic_l2_ordering = tl.constexpr(mosaic_l2_ordering)
+        self.mosaic_has_l3 = tl.constexpr(mosaic_has_l3)
+        self.mosaic_l3_tile_y = tl.constexpr(mosaic_l3_tile_y)
+        self.mosaic_l3_tile_x = tl.constexpr(mosaic_l3_tile_x)
+        self.mosaic_l3_ordering = tl.constexpr(mosaic_l3_ordering)
     
     @triton.jit
     def init_accumulator(self):

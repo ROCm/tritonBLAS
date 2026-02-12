@@ -64,6 +64,16 @@ def fused_persistent_matmul(
     EVEN_K: tl.constexpr,
     SHOW_MAP: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    # Mosaic scheduling parameters (for API compatibility, not used in fused kernel yet)
+    MOSAIC_MODE: tl.constexpr = 0,
+    MOSAIC_META_ORDERING: tl.constexpr = 0,
+    MOSAIC_L2_TILE_Y: tl.constexpr = 1,
+    MOSAIC_L2_TILE_X: tl.constexpr = 1,
+    MOSAIC_L2_ORDERING: tl.constexpr = 0,
+    MOSAIC_HAS_L3: tl.constexpr = False,
+    MOSAIC_L3_TILE_Y: tl.constexpr = 1,
+    MOSAIC_L3_TILE_X: tl.constexpr = 1,
+    MOSAIC_L3_ORDERING: tl.constexpr = 0,
 ):
     """
     Fused persistent GEMM kernel for chained matrix multiplications.

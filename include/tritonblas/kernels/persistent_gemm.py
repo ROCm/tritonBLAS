@@ -13,8 +13,8 @@ import triton.language as tl
 import torch
 
 from tritonblas.kernels.stages import (
-    ScheduleContext, 
-    GemmContext, 
+    ScheduleContext,
+    GemmContext,
     make_input_view,
     make_output_view,
     make_scale_view,
@@ -54,6 +54,18 @@ def persistent_matmul(
     EVEN_K: tl.constexpr,
     QUANTIZED: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    # Mosaic scheduling parameters
+    MOSAIC_MODE: tl.constexpr = 0,
+    MOSAIC_META_Y: tl.constexpr = 1,
+    MOSAIC_META_X: tl.constexpr = 1,
+    MOSAIC_META_ORDERING: tl.constexpr = 0,
+    MOSAIC_L2_TILE_Y: tl.constexpr = 1,
+    MOSAIC_L2_TILE_X: tl.constexpr = 1,
+    MOSAIC_L2_ORDERING: tl.constexpr = 0,
+    MOSAIC_HAS_L3: tl.constexpr = False,
+    MOSAIC_L3_TILE_Y: tl.constexpr = 1,
+    MOSAIC_L3_TILE_X: tl.constexpr = 1,
+    MOSAIC_L3_ORDERING: tl.constexpr = 0,
 ):
     """
     Persistent GEMM kernel using GemmContext aggregate.
@@ -97,6 +109,13 @@ def persistent_matmul(
         GROUP_SIZE_M, CHUNK_SIZE,
         CACHE_MODIFIER_A, CACHE_MODIFIER_B,
         acc_dtype, ALLOW_TF32, EVEN_K, QUANTIZED,
+        # Mosaic parameters
+        MOSAIC_MODE,
+        MOSAIC_META_Y, MOSAIC_META_X,
+        MOSAIC_META_ORDERING,
+        MOSAIC_L2_TILE_Y, MOSAIC_L2_TILE_X, MOSAIC_L2_ORDERING,
+        MOSAIC_HAS_L3,
+        MOSAIC_L3_TILE_Y, MOSAIC_L3_TILE_X, MOSAIC_L3_ORDERING,
     )
     
     # ════════════════════════════════════════════════════════════════════════
@@ -110,7 +129,7 @@ def persistent_matmul(
     start_tile, total_tiles, stride = sched.persistent_tile_range()
     for tile_id in range(start_tile, total_tiles, stride):
         # ════════════════════════════════════════════════════
-        # Get schedule aware output tile to be processed this loop iteration
+        # Compute tile coordinates based on scheduling mode
         # ════════════════════════════════════════════════════
         out_tile = sched.get_tile_from_idx(tile_id)
         
