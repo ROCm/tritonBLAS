@@ -52,6 +52,8 @@ def main():
     parser.add_argument("--torch", type=str, help="torch.mm CSV")
     parser.add_argument("-o", "--output", type=str, default="cu_sweep_plot.png",
                         help="Output image path (default: cu_sweep_plot.png)")
+    parser.add_argument("--title", type=str, default=None,
+                        help="Custom plot title (default: auto-generated)")
     args = parser.parse_args()
 
     fig, ax = plt.subplots(figsize=(14, 8))
@@ -95,7 +97,8 @@ def main():
 
     ax.set_xlabel("Active CUs", fontsize=13)
     ax.set_ylabel("GFLOPS", fontsize=13)
-    ax.set_title("8192x8192x8192 FP16 GEMM — CU Sweep (MI300X)", fontsize=15)
+    title = args.title if args.title else "FP16 GEMM — CU Sweep (MI300X)"
+    ax.set_title(title, fontsize=15)
     ax.legend(fontsize=11, loc="upper left", ncol=2)
     ax.set_xticks(np.arange(32, 312, 8))
     ax.set_xlim(32, 312)

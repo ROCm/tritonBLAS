@@ -37,9 +37,9 @@ def build_balanced_hex_mask(remove_per_xcd: int, num_xcds: int, cus_per_xcd: int
         return ""
     total_cus = num_xcds * cus_per_xcd
     mask = (1 << total_cus) - 1
-    for xcd in range(num_xcds):
-        base = xcd * cus_per_xcd
-        for i in range(remove_per_xcd):
-            bit = base + cus_per_xcd - 1 - i
+    for i in range(remove_per_xcd):
+        base = num_xcds * i
+        for xcd in range(num_xcds):
+            bit = base + xcd
             mask &= ~(1 << bit)
     return f"0x{mask:x}"
