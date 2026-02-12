@@ -35,15 +35,17 @@ from tritonblas.utils import generate_matmul_inputs, str_to_dtype, _is_float8_li
 
 
 def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk,
-                work_stealing=False, init_type="randn"):
+                work_stealing=False, init_type="randn", total_cus=None,
+                global_atomic=False):
     """Test matmul with proper input generation - handles both quantized and non-quantized dtypes"""
 
     inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
     selector = tritonblas.OrigamiMatmulSelector(
         m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
-        streamk=enable_streamk,
+        streamk=enable_streamk, total_cus=total_cus,
     )
     cfg = tritonblas.matmul_preamble(selector)
+    cfg.global_atomic = global_atomic
 
     if inputs.is_quantized:
         tritonblas.matmul_a8w8_lt(
@@ -250,7 +252,9 @@ def bench_matmul(
         if check_correctness:
             print("correctness: ", end=" ", flush=True)
             test_matmul(m, n, k, in_dtype, out_dtype, transA, transB,
-                        enable_streamk, work_stealing=work_stealing, init_type=init_type)
+                        enable_streamk, work_stealing=work_stealing,
+                        init_type=init_type, total_cus=total_cus,
+                        global_atomic=global_atomic)
 
     return benchmark_results
 
@@ -399,6 +403,13 @@ if __name__ == "__main__":
         sys.exit(0)
 
     is_worker = args._active_cus is not None
+
+    # Suppress prints when running as a CU-sweep subprocess so they
+    # don't corrupt the JSON payload sent back to the parent.
+    if is_worker:
+        import io
+        sys.stdout = io.StringIO()
+
     benchmark_results = bench_matmul(
         args.input_yaml,
         args.init_type,
@@ -415,6 +426,7 @@ if __name__ == "__main__":
     )
 
     if is_worker:
+        sys.stdout = sys.__stdout__
         # Tag each result with CU count and dump JSON to stdout for parent
         for row in benchmark_results:
             row["active_cus"] = args._active_cus
