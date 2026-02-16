@@ -3,7 +3,7 @@ import triton
 import random
 import functools
 import time
-from .kernels import persistent_matmul, streamk_matmul, fused_persistent_matmul
+from .kernels import persistent_matmul, streamk_matmul, fused_persistent_matmul, persistent_wg_mapping
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from typing import Dict, Tuple, Optional
@@ -190,6 +190,138 @@ def persistent_matmul_lt(
     )
 
     return c
+
+
+def get_persistent_wg_mapping(
+    M: int,
+    N: int,
+    K: int,
+    selector,
+    mosaic_config: Optional[Dict] = None,
+    device: Optional[torch.device] = None,
+) -> list:
+    """
+    Compute workgroup -> (tile_m, tile_n) mapping using the same scheduling
+    logic as persistent_matmul_lt. Returns a list of dicts suitable for
+    JSON serialization, matching C++ extractor format: one entry per workgroup
+    with keys wgid, tile_m, tile_n.
+    """
+    if device is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+
+    BLK_M = selector.block_m
+    BLK_N = selector.block_n
+    BLK_K = selector.block_k
+    gsize_m = selector.group_m
+    num_xcds = selector.num_sms
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = total_tiles
+    even_k = K % BLK_K == 0
+
+    num_stages = 2
+    num_warps = 8
+    waves_per_eu = 0
+    mfmaInstrSize = 16
+    kpack = 1
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
+
+    grids = total_tiles
+
+    chunk_size = gsize_m * gsize_m
+    chunk_size = min(chunk_size, total_programs // num_xcds)
+
+    mosaic_mode = 0
+    mosaic_meta_y = 1
+    mosaic_meta_x = 1
+    mosaic_meta_ordering = 0
+    mosaic_l2_tile_y = 1
+    mosaic_l2_tile_x = 1
+    mosaic_l2_ordering = 0
+    mosaic_has_l3 = False
+    mosaic_l3_tile_y = 1
+    mosaic_l3_tile_x = 1
+    mosaic_l3_ordering = 0
+
+    if mosaic_config is not None:
+        mode = mosaic_config.get("mode", "baseline")
+
+        if mode == "default":
+            mosaic_mode = 2
+            chunk_size = 0
+
+        elif mode == "mosaic":
+            mosaic_mode = 1
+            mosaic_meta_ordering = mosaic_config.get("meta_ordering", 0)
+            mosaic_l2_tile_y = mosaic_config.get("l2_tile_y", 1)
+            mosaic_l2_tile_x = mosaic_config.get("l2_tile_x", 1)
+            mosaic_l2_ordering = mosaic_config.get("l2_ordering", 0)
+            mosaic_has_l3 = mosaic_config.get("has_l3_tiling", False)
+
+            if mosaic_has_l3:
+                mosaic_l3_tile_y = mosaic_config.get("l3_tile_y", 1)
+                mosaic_l3_tile_x = mosaic_config.get("l3_tile_x", 1)
+                mosaic_l3_ordering = mosaic_config.get("l3_ordering", 0)
+                mosaic_meta_y = total_blocks_M // (mosaic_l3_tile_y * mosaic_l2_tile_y)
+                mosaic_meta_x = total_blocks_N // (mosaic_l3_tile_x * mosaic_l2_tile_x)
+            else:
+                mosaic_meta_y = total_blocks_M // mosaic_l2_tile_y
+                mosaic_meta_x = total_blocks_N // mosaic_l2_tile_x
+
+            if "chunk_size" in mosaic_config:
+                chunk_size = mosaic_config["chunk_size"]
+                if chunk_size > 0:
+                    chunk_size = min(chunk_size, total_programs // num_xcds)
+
+    tile_m_out = torch.empty((grids,), dtype=torch.int32, device=device)
+    tile_n_out = torch.empty((grids,), dtype=torch.int32, device=device)
+
+    persistent_wg_mapping[(grids,)](
+        tile_m_out,
+        tile_n_out,
+        M,
+        N,
+        K,
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=total_programs,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        EVEN_K=even_k,
+        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+        QUANTIZED=False,
+        MOSAIC_MODE=mosaic_mode,
+        MOSAIC_META_Y=mosaic_meta_y,
+        MOSAIC_META_X=mosaic_meta_x,
+        MOSAIC_META_ORDERING=mosaic_meta_ordering,
+        MOSAIC_L2_TILE_Y=mosaic_l2_tile_y,
+        MOSAIC_L2_TILE_X=mosaic_l2_tile_x,
+        MOSAIC_L2_ORDERING=mosaic_l2_ordering,
+        MOSAIC_HAS_L3=mosaic_has_l3,
+        MOSAIC_L3_TILE_Y=mosaic_l3_tile_y,
+        MOSAIC_L3_TILE_X=mosaic_l3_tile_x,
+        MOSAIC_L3_ORDERING=mosaic_l3_ordering,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu,
+        matrix_instr_nonkdim=mfmaInstrSize,
+        kpack=kpack,
+    )
+
+    tile_m_cpu = tile_m_out.cpu()
+    tile_n_cpu = tile_n_out.cpu()
+
+    mapping = [
+        {"wgid": wgid, "tile_m": int(tile_m_cpu[wgid].item()), "tile_n": int(tile_n_cpu[wgid].item())}
+        for wgid in range(grids)
+    ]
+    return mapping
 
 
 def fused_matmul_lt(

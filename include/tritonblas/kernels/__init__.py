@@ -32,7 +32,17 @@ from .fp4_matmul import fp4_matmul
 # Fused persistent GEMM kernel
 from .fused_persistent_gemm import fused_persistent_matmul
 
+# Workgroup-to-tile mapping kernel (same scheduling logic as persistent_gemm, no GEMM)
+from .persistent_wg_mapping import persistent_wg_mapping
+
 # Export stages submodule
 from . import stages
 
-__all__ = ['persistent_matmul', 'streamk_matmul', 'fp4_matmul', 'fused_persistent_matmul', 'stages']
+__all__ = [
+    'persistent_matmul',
+    'streamk_matmul',
+    'fp4_matmul',
+    'fused_persistent_matmul',
+    'persistent_wg_mapping',
+    'stages',
+]
