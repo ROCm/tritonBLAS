@@ -24,6 +24,8 @@ class OrigamiMatmulSelector:
     if hasattr(torch, "float8_e4m3fnuz"):
         dtype_to_str[torch.float8_e4m3fnuz] = "f8"
 
+    COUNTERS_PER_XCD = 16  # work-stealing: atomic counter slots per XCD
+
     def __init__(
         self,
         m: int,
@@ -35,6 +37,7 @@ class OrigamiMatmulSelector:
         device: torch.device,
         mx_block_size=0,
         streamk=False,
+        total_cus: int = None,
     ):
         # Save tensor sizes
         self._m = m
@@ -89,6 +92,11 @@ class OrigamiMatmulSelector:
 
         # Get hardware info from Origami
         self._hardware = origami.get_hardware_for_device(device.index)
+        # When running under a CU mask (e.g. cu-sweep), the GPU reports a
+        # reduced N_CU.  Override with the real total so architecture
+        # detection and config generation use the correct value.
+        if total_cus is not None:
+            self._hardware.N_CU = total_cus
         self._N_CU = self._hardware.N_CU
 
         # Create list of Origami config_t objects from defaults.
@@ -105,24 +113,33 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
+        # Heuristic to favor 256x256x64 tile when close~
+        if((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
+           (self._result.config.mt.m != 256 and self._result.config.mt.n == 256)):
+            self._result.config.mt.m = 256
+            self._result.config.mt.n = 256
+            self._result.config.mt.k = 64
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
             self._grid = self._hardware.N_CU
 
-        # Try both workgroup mapping modes for compatibility with Origami Versions
-        try:
-            _mapping_mode, self._xcc_workgroup_mapping, self._workgroup_mapping = (
-                origami.select_workgroup_mapping(
-                    self._problem, self._hardware, self._result.config, self._grid
-                )
-            )
-        except ValueError:
-            self._xcc_workgroup_mapping, self._workgroup_mapping = (
-                origami.select_workgroup_mapping(
-                    self._problem, self._hardware, self._result.config, self._grid
-                )
-            )
+        # Handle different origami API versions for workgroup mapping
+        _wg_result = origami.select_workgroup_mapping(
+            self._problem, self._hardware, self._result.config, self._grid
+        )
+        if isinstance(_wg_result, tuple):
+            # Older origami: returns (mode, xcc_mapping, mapping) or (xcc_mapping, mapping)
+            if len(_wg_result) == 3:
+                _, self._xcc_workgroup_mapping, self._workgroup_mapping = _wg_result
+            else:
+                self._xcc_workgroup_mapping, self._workgroup_mapping = _wg_result
+        else:
+            # origami >= 0.1.0: returns workgroup_mapping_t object
+            self._xcc_workgroup_mapping = _wg_result.wgmxcc
+            self._workgroup_mapping = _wg_result.wgm
+
     @property
     def block_m(self):
         return self._result.config.mt.m
@@ -377,7 +394,8 @@ class OrigamiMatmulSelector:
         # Architecture Detected is not valid
         if mi_dim == None:
             raise ValueError(
-                f"No Valid Matrix Instruction integrated for {element_size_A}-bit or {element_size_B}-bit datatypes"
+                f"No Valid Matrix Instruction for {self._a_dtype_bitsize}-bit/{self._b_dtype_bitsize}-bit dtypes "
+                f"on hardware with N_CU={self._hardware.N_CU}"
             )
 
         return mi_dim
