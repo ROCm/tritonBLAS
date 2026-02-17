@@ -59,6 +59,7 @@ def persistent_matmul_lt(
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
+    trace: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -95,6 +96,80 @@ def persistent_matmul_lt(
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, total_programs // num_xcds)
 
+    if trace:
+        # Tracing always uses the monolithic kernel (has inline instrumentation)
+        from .kernels.persistent_gemm_monolithic import persistent_matmul as traced_kernel
+
+        device = a.device
+        trace_start = torch.zeros(total_tiles, dtype=torch.int64, device=device)
+        trace_end = torch.zeros(total_tiles, dtype=torch.int64, device=device)
+        trace_pid = torch.zeros(total_tiles, dtype=torch.int32, device=device)
+        trace_xcd = torch.zeros(total_tiles, dtype=torch.int32, device=device)
+
+        wrap_triton(traced_kernel)[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,
+            b_scale if quantized else None,
+            bias if bias is not None else None,
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            bias.stride(0) if bias is not None else 0,
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=total_programs,
+            NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size,
+            BIAS=bias is not None,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            trace_start_ptr=trace_start,
+            trace_end_ptr=trace_end,
+            trace_pid_ptr=trace_pid,
+            trace_xcd_ptr=trace_xcd,
+            TRACE=True,
+        )
+
+        torch.cuda.synchronize()
+        trace_data = {
+            "start": trace_start.cpu(),
+            "end": trace_end.cpu(),
+            "pid": trace_pid.cpu(),
+            "xcd": trace_xcd.cpu(),
+            "total_tiles": total_tiles,
+            "total_programs": total_programs,
+            "num_pid_m": total_blocks_M,
+            "num_pid_n": total_blocks_N,
+            "M": M,
+            "N": N,
+            "K": K,
+            "BLOCK_SIZE_M": BLK_M,
+            "BLOCK_SIZE_N": BLK_N,
+            "BLOCK_SIZE_K": BLK_K,
+            "GROUP_SIZE_M": gsize_m,
+            "NUM_XCDS": num_xcds,
+        }
+        return c, trace_data
+
+    # Non-tracing path: use whichever kernel __init__ selected
     # TODO: Support other matmul algs.
     #kk = persistent_matmul[(grids,)](
     kk = wrap_triton(persistent_matmul)[(grids,)](
