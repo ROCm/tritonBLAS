@@ -29,6 +29,7 @@ from .api import (
     matmul_workgroup_shuffle,
     matmul_hierarchical,
     compute_workgroup_map,
+    get_wg_mapping,
 )
 from .config import HierarchicalPersistentConfig
 from .utils import choose_lcg_shuffle_params
@@ -38,6 +39,7 @@ __all__ = [
     'matmul_workgroup_shuffle',
     'matmul_hierarchical',
     'compute_workgroup_map',
+    'get_wg_mapping',
     'HierarchicalPersistentConfig',
     'choose_lcg_shuffle_params',
 ]

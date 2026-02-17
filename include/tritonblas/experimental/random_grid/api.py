@@ -421,3 +421,51 @@ def compute_workgroup_map(
 
     # Reshape to 2D grid
     return workgroup_map.view(num_pid_m, num_pid_n)
+
+
+def get_wg_mapping(
+    m: int,
+    n: int,
+    k: int,
+    dtype: torch.dtype = torch.bfloat16,
+    schedule_mode: str = "random",
+    shuffle_seed: Optional[int] = None,
+    hierarchical_config: Optional[HierarchicalPersistentConfig] = None,
+    selector=None,
+) -> list:
+    """
+    Compute workgroup -> (tile_m, tile_n) mapping for random-grid strategies.
+
+    Returns a list of dicts suitable for JSON serialization, matching the format
+    of ``get_persistent_wg_mapping`` from ``tritonblas.matmul``: one entry per
+    workgroup with keys wgid, tile_m, tile_n.
+
+    Args:
+        m, n, k: Matrix dimensions
+        dtype: Data type for selector creation
+        schedule_mode: One of "random", "workgroup_shuffle", "hierarchical"
+        shuffle_seed: Random seed (for random/workgroup_shuffle modes)
+        hierarchical_config: Config object (for hierarchical mode)
+        selector: Optional pre-created selector
+
+    Returns:
+        List[Dict] with entries {"wgid": int, "tile_m": int, "tile_n": int},
+        one per workgroup, ordered by wgid.
+    """
+    wg_map_2d = compute_workgroup_map(
+        m, n, k, dtype, schedule_mode,
+        shuffle_seed, hierarchical_config, selector,
+    )
+    num_pid_m, num_pid_n = wg_map_2d.shape
+    wg_map_flat = wg_map_2d.flatten().cpu()
+    total = wg_map_flat.numel()
+
+    mapping = [None] * total
+    for lin_idx in range(total):
+        wgid = int(wg_map_flat[lin_idx].item())
+        mapping[wgid] = {
+            "wgid": wgid,
+            "tile_m": lin_idx // num_pid_n,
+            "tile_n": lin_idx % num_pid_n,
+        }
+    return mapping
