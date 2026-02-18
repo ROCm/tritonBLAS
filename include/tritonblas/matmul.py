@@ -56,6 +56,7 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     mosaic_config: Optional[Dict] = None,
+    trace: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -140,6 +141,19 @@ def persistent_matmul_lt(
                 if chunk_size > 0:
                     chunk_size = min(chunk_size, total_programs // num_xcds)
 
+    # Allocate trace buffers if tracing is enabled
+    device = a.device
+    if trace:
+        trace_start = torch.zeros(total_tiles, dtype=torch.int64, device=device)
+        trace_end = torch.zeros(total_tiles, dtype=torch.int64, device=device)
+        trace_pid = torch.zeros(total_tiles, dtype=torch.int32, device=device)
+        trace_xcd = torch.zeros(total_tiles, dtype=torch.int32, device=device)
+    else:
+        trace_start = None
+        trace_end = None
+        trace_pid = None
+        trace_xcd = None
+
     # TODO: Support other matmul algs.
     kk = persistent_matmul[(grids,)](
         a,
@@ -158,6 +172,10 @@ def persistent_matmul_lt(
         c.stride(0),  # stride_cm
         c.stride(1),  # stride_cn
         0,  # stride_bias (TODO: Enable bias stride)
+        trace_start,
+        trace_end,
+        trace_pid,
+        trace_xcd,
         BLOCK_SIZE_M=BLK_M,
         BLOCK_SIZE_N=BLK_N,
         BLOCK_SIZE_K=BLK_K,
@@ -182,12 +200,35 @@ def persistent_matmul_lt(
         MOSAIC_L3_TILE_Y=mosaic_l3_tile_y,
         MOSAIC_L3_TILE_X=mosaic_l3_tile_x,
         MOSAIC_L3_ORDERING=mosaic_l3_ordering,
+        TRACE=trace,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
         matrix_instr_nonkdim=mfmaInstrSize,
         kpack=kpack,
     )
+
+    if trace:
+        torch.cuda.synchronize()
+        trace_data = {
+            "start": trace_start.cpu(),
+            "end": trace_end.cpu(),
+            "pid": trace_pid.cpu(),
+            "xcd": trace_xcd.cpu(),
+            "total_tiles": total_tiles,
+            "total_programs": total_programs,
+            "num_pid_m": total_blocks_M,
+            "num_pid_n": total_blocks_N,
+            "M": M,
+            "N": N,
+            "K": K,
+            "BLOCK_SIZE_M": BLK_M,
+            "BLOCK_SIZE_N": BLK_N,
+            "BLOCK_SIZE_K": BLK_K,
+            "GROUP_SIZE_M": gsize_m,
+            "NUM_XCDS": num_xcds,
+        }
+        return c, trace_data
 
     return c
 
@@ -725,14 +766,14 @@ def streamk_matmul_lt(
     return c
 
 def matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False, mosaic_config: Optional[Dict] = None
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False, mosaic_config: Optional[Dict] = None, trace: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, mosaic_config=mosaic_config)
     else:
-        return persistent_matmul_lt(a, b, c, selector, mosaic_config=mosaic_config)
+        return persistent_matmul_lt(a, b, c, selector, mosaic_config=mosaic_config, trace=trace)
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
@@ -751,6 +792,7 @@ def matmul(
     enable_streamk=False,
     sk_grid=None,
     mosaic_config: Optional[Dict] = None,
+    trace: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -760,7 +802,7 @@ def matmul(
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, mosaic_config=mosaic_config)
     else:
-        return persistent_matmul_lt(a, b, c, selector, mosaic_config=mosaic_config)
+        return persistent_matmul_lt(a, b, c, selector, mosaic_config=mosaic_config, trace=trace)
 
 def matmul_a8w8(
     a: torch.Tensor,

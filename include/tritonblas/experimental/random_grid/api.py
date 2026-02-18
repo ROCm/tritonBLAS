@@ -84,6 +84,10 @@ def _make_kernel_kwargs(a, b, c, M, N, K, BLK_M, BLK_N, BLK_K, num_sms, even_k):
         "stride_cm": c.stride(0),
         "stride_cn": c.stride(1),
         "stride_bias": 0,
+        "trace_start_ptr": None,
+        "trace_end_ptr": None,
+        "trace_pid_ptr": None,
+        "trace_xcd_ptr": None,
         "stride_ak": a.stride(1),
         "stride_bk": b.stride(0),
         "BLOCK_SIZE_M": BLK_M,
@@ -96,12 +100,47 @@ def _make_kernel_kwargs(a, b, c, M, N, K, BLK_M, BLK_N, BLK_K, num_sms, even_k):
     }
 
 
+def _setup_trace_buffers(device, total_tiles):
+    """Allocate device buffers for kernel tracing."""
+    return {
+        "trace_start_ptr": torch.zeros(total_tiles, dtype=torch.int64, device=device),
+        "trace_end_ptr": torch.zeros(total_tiles, dtype=torch.int64, device=device),
+        "trace_pid_ptr": torch.zeros(total_tiles, dtype=torch.int32, device=device),
+        "trace_xcd_ptr": torch.zeros(total_tiles, dtype=torch.int32, device=device),
+    }
+
+
+def _collect_trace_data(trace_bufs, total_tiles, total_programs, total_blocks_M, total_blocks_N,
+                        M, N, K, BLK_M, BLK_N, BLK_K, gsize_m, num_xcds=8):
+    """Synchronize and collect trace data from device buffers into a host dict."""
+    torch.cuda.synchronize()
+    return {
+        "start": trace_bufs["trace_start_ptr"].cpu(),
+        "end": trace_bufs["trace_end_ptr"].cpu(),
+        "pid": trace_bufs["trace_pid_ptr"].cpu(),
+        "xcd": trace_bufs["trace_xcd_ptr"].cpu(),
+        "total_tiles": total_tiles,
+        "total_programs": total_programs,
+        "num_pid_m": total_blocks_M,
+        "num_pid_n": total_blocks_N,
+        "M": M,
+        "N": N,
+        "K": K,
+        "BLOCK_SIZE_M": BLK_M,
+        "BLOCK_SIZE_N": BLK_N,
+        "BLOCK_SIZE_K": BLK_K,
+        "GROUP_SIZE_M": gsize_m,
+        "NUM_XCDS": num_xcds,
+    }
+
+
 def matmul_random(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
     selector=None,
     shuffle_seed: Optional[int] = None,
+    trace: bool = False,
     **kwargs,
 ):
     """
@@ -118,10 +157,11 @@ def matmul_random(
         selector: Optional OrigamiMatmulSelector for tile configuration.
                   If None, auto-created based on problem size.
         shuffle_seed: Random seed for reproducible shuffling. If None, uses default RNG.
+        trace: If True, collect per-tile timing/wgid/xcd data. Returns (c, trace_data).
         **kwargs: Additional kernel arguments (for future extensions)
 
     Returns:
-        Output tensor c
+        Output tensor c, or (c, trace_data) when trace=True
 
     Raises:
         ValueError: If the grid has fewer than 2 L2 tiles in quantized region
@@ -166,6 +206,11 @@ def matmul_random(
     kernel_kwargs = _make_kernel_kwargs(a, b, c, M, N, K, BLK_M, BLK_N, BLK_K, total_tiles, even_k)
     kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg, "GROUP_SIZE_M": gsize_m})
 
+    if trace:
+        trace_bufs = _setup_trace_buffers(a.device, total_tiles)
+        kernel_kwargs.update(trace_bufs)
+        kernel_kwargs["TRACE"] = True
+
     # Launch kernel
     persistent_matmul_shuffled[(total_tiles,)](
         **kernel_kwargs,
@@ -176,6 +221,13 @@ def matmul_random(
         kpack=1,
     )
 
+    if trace:
+        trace_data = _collect_trace_data(
+            trace_bufs, total_tiles, total_tiles, total_blocks_M, total_blocks_N,
+            M, N, K, BLK_M, BLK_N, BLK_K, gsize_m,
+        )
+        return c, trace_data
+
     return c
 
 
@@ -185,6 +237,7 @@ def matmul_workgroup_shuffle(
     c: torch.Tensor,
     selector=None,
     shuffle_seed: Optional[int] = None,
+    trace: bool = False,
     **kwargs,
 ):
     """
@@ -199,10 +252,11 @@ def matmul_workgroup_shuffle(
         c: Output matrix C (M x N), will be overwritten
         selector: Optional OrigamiMatmulSelector for tile configuration
         shuffle_seed: Random seed for reproducible shuffling
+        trace: If True, collect per-tile timing/wgid/xcd data. Returns (c, trace_data).
         **kwargs: Additional kernel arguments
 
     Returns:
-        Output tensor c
+        Output tensor c, or (c, trace_data) when trace=True
 
     Example:
         >>> a = torch.randn(1024, 1024, dtype=torch.bfloat16, device='cuda')
@@ -236,6 +290,11 @@ def matmul_workgroup_shuffle(
     kernel_kwargs = _make_kernel_kwargs(a, b, c, M, N, K, BLK_M, BLK_N, BLK_K, total_tiles, even_k)
     kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg, "GROUP_SIZE_M": gsize_m})
 
+    if trace:
+        trace_bufs = _setup_trace_buffers(a.device, total_tiles)
+        kernel_kwargs.update(trace_bufs)
+        kernel_kwargs["TRACE"] = True
+
     # Launch kernel
     persistent_matmul_workgroup_shuffled[(total_tiles,)](
         **kernel_kwargs,
@@ -246,6 +305,13 @@ def matmul_workgroup_shuffle(
         kpack=1,
     )
 
+    if trace:
+        trace_data = _collect_trace_data(
+            trace_bufs, total_tiles, total_tiles, total_blocks_M, total_blocks_N,
+            M, N, K, BLK_M, BLK_N, BLK_K, gsize_m,
+        )
+        return c, trace_data
+
     return c
 
 
@@ -255,6 +321,7 @@ def matmul_hierarchical(
     c: torch.Tensor,
     config: HierarchicalPersistentConfig,
     selector=None,
+    trace: bool = False,
     **kwargs,
 ):
     """
@@ -269,10 +336,11 @@ def matmul_hierarchical(
         c: Output matrix C (M x N), will be overwritten
         config: HierarchicalPersistentConfig specifying the hierarchy parameters
         selector: Optional OrigamiMatmulSelector for tile configuration
+        trace: If True, collect per-tile timing/wgid/xcd data. Returns (c, trace_data).
         **kwargs: Additional kernel arguments
 
     Returns:
-        Output tensor c
+        Output tensor c, or (c, trace_data) when trace=True
 
     Example:
         >>> from tritonblas.experimental.random_grid import HierarchicalPersistentConfig
@@ -308,6 +376,11 @@ def matmul_hierarchical(
     kernel_kwargs = _make_kernel_kwargs(a, b, c, M, N, K, BLK_M, BLK_N, BLK_K, total_tiles, even_k)
     kernel_kwargs.update(config.to_kernel_kwargs())
 
+    if trace:
+        trace_bufs = _setup_trace_buffers(a.device, total_tiles)
+        kernel_kwargs.update(trace_bufs)
+        kernel_kwargs["TRACE"] = True
+
     # Launch kernel
     persistent_matmul_hierarchical[(total_tiles,)](
         **kernel_kwargs,
@@ -317,6 +390,13 @@ def matmul_hierarchical(
         matrix_instr_nonkdim=16,
         kpack=1,
     )
+
+    if trace:
+        trace_data = _collect_trace_data(
+            trace_bufs, total_tiles, total_tiles, total_blocks_M, total_blocks_N,
+            M, N, K, BLK_M, BLK_N, BLK_K, gsize_m,
+        )
+        return c, trace_data
 
     return c
 

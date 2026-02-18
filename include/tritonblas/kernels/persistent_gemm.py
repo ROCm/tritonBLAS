@@ -22,6 +22,36 @@ from tritonblas.kernels.stages import (
 )
 
 
+@triton.jit
+def _read_realtime():
+    """Read GPU wall clock timestamp from s_memrealtime (100MHz constant clock)."""
+    tmp = tl.inline_asm_elementwise(
+        asm="""s_waitcnt vmcnt(0)
+        s_memrealtime $0
+        s_waitcnt lgkmcnt(0)""",
+        constraints=("=s"),
+        args=[],
+        dtype=tl.int64,
+        is_pure=False,
+        pack=1,
+    )
+    return tmp
+
+
+@triton.jit
+def _get_xcc_id():
+    """Get XCC (GPU chiplet) ID for the current workgroup."""
+    xcc_id = tl.inline_asm_elementwise(
+        asm="s_getreg_b32 $0, hwreg(HW_REG_XCC_ID, 0, 16)",
+        constraints=("=s"),
+        args=[],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
+    return xcc_id
+
+
 @triton.jit()
 def persistent_matmul(
     A,
@@ -40,6 +70,11 @@ def persistent_matmul(
     stride_cm,
     stride_cn,
     stride_bias,
+    # Trace buffers (None when TRACE is False)
+    trace_start_ptr,
+    trace_end_ptr,
+    trace_pid_ptr,
+    trace_xcd_ptr,
     # Performance parameters (used to construct GemmContext on device)
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -66,6 +101,8 @@ def persistent_matmul(
     MOSAIC_L3_TILE_Y: tl.constexpr = 1,
     MOSAIC_L3_TILE_X: tl.constexpr = 1,
     MOSAIC_L3_ORDERING: tl.constexpr = 0,
+    # Trace flag (compile-time: zero overhead when False)
+    TRACE: tl.constexpr = False,
 ):
     """
     Persistent GEMM kernel using GemmContext aggregate.
@@ -132,6 +169,13 @@ def persistent_matmul(
         # Compute tile coordinates based on scheduling mode
         # ════════════════════════════════════════════════════
         out_tile = sched.get_tile_from_idx(tile_id)
+
+        if TRACE:
+            num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+            flat_tile_id = out_tile.pid_m * num_pid_n + out_tile.pid_n
+            tl.store(trace_start_ptr + flat_tile_id, _read_realtime())
+            tl.store(trace_pid_ptr + flat_tile_id, tl.program_id(0))
+            tl.store(trace_xcd_ptr + flat_tile_id, _get_xcc_id())
         
         # ════════════════════════════════════════════════════════════════════
         # COMPUTE GEMM: K-loop handled by GemmContext
@@ -143,3 +187,6 @@ def persistent_matmul(
         # Store Accumulator to output matrix C at pointers defined by out_tile
         # ════════════════════════════════════════════════════════════════════
         tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
+
+        if TRACE:
+            tl.store(trace_end_ptr + flat_tile_id, _read_realtime())

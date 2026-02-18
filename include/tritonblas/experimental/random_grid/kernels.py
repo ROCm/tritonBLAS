@@ -15,6 +15,36 @@ import torch
 
 
 @triton.jit
+def _read_realtime():
+    """Read GPU wall clock timestamp from s_memrealtime (100MHz constant clock)."""
+    tmp = tl.inline_asm_elementwise(
+        asm="""s_waitcnt vmcnt(0)
+        s_memrealtime $0
+        s_waitcnt lgkmcnt(0)""",
+        constraints=("=s"),
+        args=[],
+        dtype=tl.int64,
+        is_pure=False,
+        pack=1,
+    )
+    return tmp
+
+
+@triton.jit
+def _get_xcc_id():
+    """Get XCC (GPU chiplet) ID for the current workgroup."""
+    xcc_id = tl.inline_asm_elementwise(
+        asm="s_getreg_b32 $0, hwreg(HW_REG_XCC_ID, 0, 16)",
+        constraints=("=s"),
+        args=[],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
+    return xcc_id
+
+
+@triton.jit
 def compute_level_index(
     index,
     level_x_radix,
@@ -250,6 +280,10 @@ def persistent_matmul_hierarchical(
     stride_cm,
     stride_cn,
     stride_bias,
+    trace_start_ptr,
+    trace_end_ptr,
+    trace_pid_ptr,
+    trace_xcd_ptr,
     stride_ak: tl.constexpr,
     stride_bk: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -268,6 +302,7 @@ def persistent_matmul_hierarchical(
     EVEN_K: tl.constexpr,
     chunk_size: tl.constexpr,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    TRACE: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -307,6 +342,12 @@ def persistent_matmul_hierarchical(
         pid_n = transformed_pid % num_pid_n
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
+
+        if TRACE:
+            flat_tile_id = pid_m * num_pid_n + pid_n
+            tl.store(trace_start_ptr + flat_tile_id, _read_realtime())
+            tl.store(trace_pid_ptr + flat_tile_id, tl.program_id(0))
+            tl.store(trace_xcd_ptr + flat_tile_id, _get_xcc_id())
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
@@ -371,6 +412,9 @@ def persistent_matmul_hierarchical(
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
 
+        if TRACE:
+            tl.store(trace_end_ptr + flat_tile_id, _read_realtime())
+
 
 
 
@@ -388,6 +432,10 @@ def persistent_matmul_shuffled(
     stride_cm,
     stride_cn,
     stride_bias,
+    trace_start_ptr,
+    trace_end_ptr,
+    trace_pid_ptr,
+    trace_xcd_ptr,
     stride_ak: tl.constexpr,
     stride_bk: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -401,6 +449,7 @@ def persistent_matmul_shuffled(
     LCG_A,
     LCG_C,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    TRACE: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -445,6 +494,12 @@ def persistent_matmul_shuffled(
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
+        if TRACE:
+            flat_tile_id = pid_m * num_pid_n + pid_n
+            tl.store(trace_start_ptr + flat_tile_id, _read_realtime())
+            tl.store(trace_pid_ptr + flat_tile_id, tl.program_id(0))
+            tl.store(trace_xcd_ptr + flat_tile_id, _get_xcc_id())
+
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rk = tl.arange(0, BLOCK_SIZE_K)
@@ -508,6 +563,9 @@ def persistent_matmul_shuffled(
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
 
+        if TRACE:
+            tl.store(trace_end_ptr + flat_tile_id, _read_realtime())
+
 
 
 
@@ -525,6 +583,10 @@ def persistent_matmul_workgroup_shuffled(
     stride_cm,
     stride_cn,
     stride_bias,
+    trace_start_ptr,
+    trace_end_ptr,
+    trace_pid_ptr,
+    trace_xcd_ptr,
     stride_ak: tl.constexpr,
     stride_bk: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -538,6 +600,7 @@ def persistent_matmul_workgroup_shuffled(
     LCG_A,
     LCG_C,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    TRACE: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -567,6 +630,12 @@ def persistent_matmul_workgroup_shuffled(
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
+        if TRACE:
+            flat_tile_id = pid_m * num_pid_n + pid_n
+            tl.store(trace_start_ptr + flat_tile_id, _read_realtime())
+            tl.store(trace_pid_ptr + flat_tile_id, tl.program_id(0))
+            tl.store(trace_xcd_ptr + flat_tile_id, _get_xcc_id())
+
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rk = tl.arange(0, BLOCK_SIZE_K)
@@ -629,6 +698,9 @@ def persistent_matmul_workgroup_shuffled(
         c_mask = (rm[:, None] < M) & (rn[None, :] < N)
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
+
+        if TRACE:
+            tl.store(trace_end_ptr + flat_tile_id, _read_realtime())
 
 
 
