@@ -86,8 +86,8 @@ def persistent_matmul_lt(
     if work_stealing:
         # Work-stealing: launch grid = num CUs, tiles assigned dynamically
         # via per-XCD atomic counters.
-        grids = selector._hardware.N_CU
-        # grids = total_tiles
+        # grids = selector._hardware.N_CU
+        grids = total_tiles
 
         kk = ws_persistent_matmul[(grids,)](
             a,

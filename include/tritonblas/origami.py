@@ -24,7 +24,7 @@ class OrigamiMatmulSelector:
     if hasattr(torch, "float8_e4m3fnuz"):
         dtype_to_str[torch.float8_e4m3fnuz] = "f8"
 
-    COUNTERS_PER_XCD = 16  # work-stealing: atomic counter slots per XCD
+    COUNTERS_PER_XCD = 1  # work-stealing: atomic counter slots per XCD
 
     def __init__(
         self,
@@ -92,6 +92,12 @@ class OrigamiMatmulSelector:
 
         # Get hardware info from Origami
         self._hardware = origami.get_hardware_for_device(device.index)
+        
+        # The GPU-reported N_CU reflects any active CU mask.  Save it
+        # before overriding so Stream-K can size its grid to the real
+        # number of schedulable CUs.
+        self._active_cus = self._hardware.N_CU
+        
         # When running under a CU mask (e.g. cu-sweep), the GPU reports a
         # reduced N_CU.  Override with the real total so architecture
         # detection and config generation use the correct value.
