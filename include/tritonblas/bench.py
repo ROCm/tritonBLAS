@@ -1,6 +1,8 @@
 import math
 import statistics
 import torch
+import triton
+import triton.language as tl
 
 
 def _get_empty_cache_for_benchmark():
@@ -8,8 +10,21 @@ def _get_empty_cache_for_benchmark():
     return torch.empty(int(cache_size // 4), dtype=torch.int, device="cuda")
 
 
+@triton.jit
+def _clear_cache_kernel(ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    # Force read and write to evict cache lines
+    data = tl.load(ptr + offsets, mask=mask)
+    tl.store(ptr + offsets, data + 1, mask=mask)
+
+
 def _clear_cache(cache):
-    cache.zero_()
+    n_elements = cache.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+    _clear_cache_kernel[grid](cache, n_elements, BLOCK_SIZE=1024)
 
 
 def _quantile(a, q):
