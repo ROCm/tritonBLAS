@@ -459,13 +459,6 @@ def persistent_matmul_shuffled(
             NUM_XCDS=NUM_XCDS,
             CHUNK_SIZE=GROUP_SIZE_M * GROUP_SIZE_M,
         )
-    if NUM_XCDS != 1:
-        pid = remap_xcd_chunked(
-            pid,
-            NUM_SMS,
-            NUM_XCDS=NUM_XCDS,
-            CHUNK_SIZE=GROUP_SIZE_M * GROUP_SIZE_M,
-        )
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
