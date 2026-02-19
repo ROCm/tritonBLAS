@@ -253,8 +253,10 @@ class OrigamiMatmulSelector:
           2. Re-select from the constrained set using Origami's latency model
         """
         lds_capacity = self._hardware.lds_capacity
-        elem_bytes_a = origami.datatype_to_bits(self._problem.a_dtype) // 8
-        elem_bytes_b = origami.datatype_to_bits(self._problem.b_dtype) // 8
+        elem_bits_a = origami.datatype_to_bits(self._problem.a_dtype)
+        elem_bits_b = origami.datatype_to_bits(self._problem.b_dtype)
+        elem_bytes_a = (elem_bits_a + 7) // 8
+        elem_bytes_b = (elem_bits_b + 7) // 8
 
         mt = self._result.config.mt
         estimated_lds = self.estimate_triton_lds(
