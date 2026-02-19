@@ -68,11 +68,14 @@ class Tile:
         """
         Compute row and column indices for this tile.
         
+        Uses int64 promotion on pid_m/pid_n to avoid int32 overflow when
+        indices are later multiplied by strides for pointer computation.
+
         Returns:
             rm, rn: Row indices [BLOCK_M], column indices [BLOCK_N]
         """
-        rm = self.pid_m * self.block_m + tl.arange(0, self.block_m)
-        rn = self.pid_n * self.block_n + tl.arange(0, self.block_n)
+        rm = self.pid_m.to(tl.int64) * self.block_m + tl.arange(0, self.block_m)
+        rn = self.pid_n.to(tl.int64) * self.block_n + tl.arange(0, self.block_n)
         return rm, rn
     
     @triton.jit
