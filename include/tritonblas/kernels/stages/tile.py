@@ -67,7 +67,7 @@ class Tile:
     def indices(self):
         """
         Compute row and column indices for this tile.
-        
+
         Returns:
             rm, rn: Row indices [BLOCK_M], column indices [BLOCK_N]
         """
