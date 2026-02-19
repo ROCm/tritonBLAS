@@ -36,6 +36,7 @@ class OrigamiMatmulSelector:
         device: torch.device,
         mx_block_size=0,
         streamk=False,
+        num_stages=2,
     ):
         # Save tensor sizes
         self._m = m
@@ -106,16 +107,9 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Validate selected tile fits in Triton's shared memory budget.
-        # Triton uses async_copy with software pipelining (num_stages buffers)
-        # and LDS padding, which increases shared memory beyond Origami's estimate.
-        # If the tile exceeds the limit, re-select with constrained configs.
-        self._num_stages = 2  # default used by matmul.py
+        self._num_stages = num_stages
         self._validate_lds_usage()
 
-        # Detect NonTemporal cache hints based on problem shape and selected tile.
-        # Must be done after select_config (needs tile sizes) and before
-        # select_workgroup_mapping (AutoWGM uses cache hints for NT-aware mapping).
         hints_a, hints_b = self._detect_cache_hints()
         self._result.config.cache_hints_a = hints_a
         self._result.config.cache_hints_b = hints_b
@@ -180,78 +174,47 @@ class OrigamiMatmulSelector:
     def sk_grid(self):
         return self._grid
 
+    @property
+    def num_stages(self):
+        return self._num_stages
+
     @staticmethod
     def _cache_hints_to_modifier(cache_hints):
-        """Map Origami cache_hints integer to Triton cache_modifier string.
-
-        The Origami/Tensile NonTemporal value is a bitmask: [bit2=NT][bit1=SLC][bit0=GLC].
-        Triton on AMD exposes three cache modifiers that control GLC/SLC bits:
-            .ca  (None) - cache at all levels         (GLC=0, SLC=0)
-            .cg         - cache at global level only  (GLC=1, SLC=0)
-            .cs         - cache streaming / nontemporal (GLC=1, SLC=1)
-        """
+        """Map Origami cache_hints to Triton cache_modifier. See docs/ORIGAMI_NONTEMPORAL_CACHE_HINTS.md."""
         if cache_hints == 0:
-            return None   # default (.ca) - cache at all levels
+            return None
         elif cache_hints == 1:
-            return ".cg"  # GLC only - cache at global/L2 level, bypass L1
+            return ".cg"
         else:
-            return ".cs"  # SLC or NT set - streaming / nontemporal
+            return ".cs"
 
     @staticmethod
     def estimate_triton_lds(block_m, block_n, block_k, elem_bytes_a, elem_bytes_b, num_stages):
         """Estimate Triton's shared memory (LDS) usage for a GEMM tile.
 
-        Triton's software pipelining with async_copy allocates multiple buffers
-        in shared memory.  Each buffer is padded to avoid LDS bank conflicts.
-
-        From empirical measurement on AMD CDNA GPUs:
-          - num_stages=2: actual LDS ≈ 2.10× Origami's single-buffer estimate
-          - num_stages=3: actual LDS ≈ 3.15× Origami's single-buffer estimate
-
-        The formula accounts for:
-          - Multi-buffering: num_stages buffers for async_copy pipelining
-          - LDS padding: ~5-7% overhead per buffer for bank-conflict avoidance
-            (CDNA uses paddingInterval=512 elements with 8-32 elements padding)
-          - Alignment overhead
-
-        Args:
-            block_m: Tile size M
-            block_n: Tile size N
-            block_k: Tile size K
-            elem_bytes_a: Bytes per element of operand A
-            elem_bytes_b: Bytes per element of operand B
-            num_stages: Number of software pipeline stages (typically 2 or 3)
-
-        Returns:
-            int: Estimated shared memory usage in bytes.
+        See docs/TRITON_LDS_ESTIMATION.md for detailed explanation.
         """
-        # Single-buffer raw size (same as Origami's check_lds_capacity)
-        raw_a = block_m * block_k * elem_bytes_a
-        raw_b = block_k * block_n * elem_bytes_b
-        raw_total = raw_a + raw_b
+        PADDING_INTERVAL = 512
+        PADDING_ELEMENTS = 16
 
-        # Apply multi-buffering and padding overhead.
-        # Padding adds ~5-7% per buffer; use 1.10 as a conservative multiplier
-        # to account for padding variance across MFMA shapes and K-contiguity.
-        padding_factor = 1.10
-        estimated = int(num_stages * raw_total * padding_factor)
+        def padded_buffer_size(rows, cols, elem_bytes):
+            raw_elements = rows * cols
+            raw_bytes = raw_elements * elem_bytes
+            num_padding_rows = raw_elements // PADDING_INTERVAL
+            padding_bytes = num_padding_rows * PADDING_ELEMENTS * elem_bytes
+            return raw_bytes + padding_bytes
 
-        # Align to 256 bytes (Triton aligns shared memory allocations)
+        padded_a = padded_buffer_size(block_m, block_k, elem_bytes_a)
+        padded_b = padded_buffer_size(block_k, block_n, elem_bytes_b)
+
+        total_per_stage = padded_a + padded_b
+        estimated = num_stages * total_per_stage
         estimated = ((estimated + 255) // 256) * 256
 
         return estimated
 
     def _validate_lds_usage(self):
-        """Validate that the selected tile fits in Triton's shared memory budget.
-
-        If the Origami-selected tile exceeds the hardware's LDS capacity when
-        accounting for Triton's async_copy multi-buffering and padding, this
-        method re-runs config selection with constrained tile sizes.
-
-        The reduction strategy:
-          1. Filter out configs whose estimated Triton LDS exceeds the limit
-          2. Re-select from the constrained set using Origami's latency model
-        """
+        """Validate and re-select tile if it exceeds Triton's LDS budget."""
         lds_capacity = self._hardware.lds_capacity
         elem_bits_a = origami.datatype_to_bits(self._problem.a_dtype)
         elem_bits_b = origami.datatype_to_bits(self._problem.b_dtype)
