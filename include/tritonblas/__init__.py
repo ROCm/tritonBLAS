@@ -4,3 +4,4 @@ from .matmul import matmul_fp4
 from .config import MatmulConfig, matmul_preamble
 from .bench import do_bench
 from .origami import OrigamiMatmulSelector
+from .tracing import plot_gemm_trace

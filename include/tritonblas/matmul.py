@@ -8,6 +8,7 @@ from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 from typing import Dict, Tuple, Optional
+from torch.library import triton_op, wrap_triton
 
 _tensor_cache = {}
 
@@ -49,6 +50,7 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    trace: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -83,7 +85,86 @@ def persistent_matmul_lt(
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
 
-    if work_stealing:
+    if work_stealing and trace:
+        from .kernels.persistent_gemm_work_stealing import ws_persistent_matmul as traced_kernel
+
+        device = a.device
+        trace_start = torch.zeros(total_tiles, dtype=torch.int64, device=device)
+        trace_end = torch.zeros(total_tiles, dtype=torch.int64, device=device)
+        trace_pid = torch.zeros(total_tiles, dtype=torch.int32, device=device)
+        trace_xcd = torch.zeros(total_tiles, dtype=torch.int32, device=device)
+
+        # Work-stealing: launch grid = num CUs, tiles assigned dynamically
+        # via per-XCD atomic counters.
+        grids = selector._hardware.N_CU
+        # grids = total_tiles
+
+        wrap_triton(traced_kernel)[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,  # A_scale_ptr
+            b_scale if quantized else None,  # B_scale_ptr
+            None,  # TODO: Enable bias.
+            cfg.tile_counter,  # Per-XCD×slot tile counters
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            0,  # TODO: Enable bias stride.
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=grids,
+            NUM_XCDS=num_xcds,
+            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
+            COUNTER_STRIDE=COUNTER_STRIDE,
+            BIAS=False,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            GLOBAL_ATOMIC=cfg.global_atomic,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+            trace_start_ptr=trace_start,
+            trace_end_ptr=trace_end,
+            trace_pid_ptr=trace_pid,
+            trace_xcd_ptr=trace_xcd,
+            TRACE=True,
+        )
+
+        torch.cuda.synchronize()
+        trace_data = {
+            "start": trace_start.cpu(),
+            "end": trace_end.cpu(),
+            "pid": trace_pid.cpu(),
+            "xcd": trace_xcd.cpu(),
+            "total_tiles": total_tiles,
+            "total_programs": total_programs,
+            "num_pid_m": total_blocks_M,
+            "num_pid_n": total_blocks_N,
+            "M": M,
+            "N": N,
+            "K": K,
+            "BLOCK_SIZE_M": BLK_M,
+            "BLOCK_SIZE_N": BLK_N,
+            "BLOCK_SIZE_K": BLK_K,
+            "GROUP_SIZE_M": gsize_m,
+            "NUM_XCDS": num_xcds,
+        }
+        return c, trace_data
+
+    elif work_stealing:
         # Work-stealing: launch grid = num CUs, tiles assigned dynamically
         # via per-XCD atomic counters.
         grids = selector._hardware.N_CU
@@ -275,14 +356,14 @@ def streamk_matmul_lt(
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
-    enable_streamk=False, work_stealing=False,
+    enable_streamk=False, work_stealing=False, trace=False
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing, trace=trace)
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,

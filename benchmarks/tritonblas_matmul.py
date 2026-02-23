@@ -128,6 +128,7 @@ def bench_matmul(
     total_cus=None,
     counters_per_xcd=None,
     global_atomic=False,
+    trace=False,
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -196,6 +197,7 @@ def bench_matmul(
             matmul = lambda: tritonblas.matmul_lt(
                 inputs.A, inputs.B, inputs.C, selector, cfg,
                 enable_streamk, work_stealing=work_stealing,
+                trace=trace,
             )
 
         reset = lambda: cfg.reset(streamk=enable_streamk, work_stealing=work_stealing)
@@ -363,6 +365,11 @@ if __name__ == "__main__":
         help="Use a single device-wide atomic counter instead of per-XCD counters "
              "(only meaningful with --work-stealing).",
     )
+    parser.add_argument(
+        "--trace", action="store_true",
+        help="Trace the execution of WGs"
+             "(only meaningful with --work-stealing).",
+    )
 
     # Hidden: used by cu-sweep parent to tag subprocess results
     parser.add_argument("--_active-cus", type=int, default=None, help=argparse.SUPPRESS)
@@ -423,6 +430,7 @@ if __name__ == "__main__":
         total_cus=args._total_cus,
         counters_per_xcd=args.counters_per_xcd,
         global_atomic=args.global_atomic,
+        trace=args.trace,
     )
 
     if is_worker:

@@ -27,6 +27,35 @@ import torch
 
 from .stages.indexing.pid_transforms import chiplet_transform
 
+@triton.jit
+def _read_realtime():
+    """Read GPU wall clock timestamp from s_memrealtime (100MHz constant clock)."""
+    tmp = tl.inline_asm_elementwise(
+        asm="""s_waitcnt vmcnt(0)
+        s_memrealtime $0
+        s_waitcnt lgkmcnt(0)""",
+        constraints=("=s"),
+        args=[],
+        dtype=tl.int64,
+        is_pure=False,
+        pack=1,
+    )
+    return tmp
+
+
+@triton.jit
+def _get_xcc_id():
+    """Get XCC (GPU chiplet) ID for the current workgroup."""
+    xcc_id = tl.inline_asm_elementwise(
+        asm="s_getreg_b32 $0, hwreg(HW_REG_XCC_ID, 0, 16)",
+        constraints=("=s"),
+        args=[],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
+    return xcc_id
+
 
 @triton.jit()
 def ws_persistent_matmul(
@@ -62,6 +91,11 @@ def ws_persistent_matmul(
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
     GLOBAL_ATOMIC: tl.constexpr = False,  # True: single device-wide counter
+    trace_start_ptr=None,
+    trace_end_ptr=None,
+    trace_pid_ptr=None,
+    trace_xcd_ptr=None,
+    TRACE: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     xcd_id = pid % NUM_XCDS
@@ -112,6 +146,11 @@ def ws_persistent_matmul(
             tile_id = chiplet_transform(raw_idx, total_tiles, NUM_XCDS)
         else:
             tile_id = xcd_base + slot_base + raw_idx
+
+        if TRACE:
+            tl.store(trace_start_ptr + tile_id, _read_realtime())
+            tl.store(trace_pid_ptr + tile_id, pid)
+            tl.store(trace_xcd_ptr + tile_id, _get_xcc_id())
 
         # GROUP_SIZE_M swizzle → (pid_m, pid_n)
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -206,5 +245,8 @@ def ws_persistent_matmul(
         c_mask = (rm[:, None] < M) & (rn[None, :] < N)
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
+
+        if TRACE:
+            tl.store(trace_end_ptr + tile_id, _read_realtime())
 
         raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
