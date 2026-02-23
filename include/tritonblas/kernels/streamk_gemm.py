@@ -60,7 +60,6 @@ def streamk_matmul(
     stride_bn_i64 = tl.cast(stride_bn, tl.int64)
     stride_cm_i64 = tl.cast(stride_cm, tl.int64)
     stride_cn_i64 = tl.cast(stride_cn, tl.int64)
-    stride_bias_i64 = tl.cast(stride_bias, tl.int64)
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
