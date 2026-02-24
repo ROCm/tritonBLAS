@@ -54,6 +54,13 @@ def streamk_matmul(
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
 
+    # Cast strides to int64 to avoid int32 overflow for large tensors.
+    # See https://github.com/ROCm/aiter/pull/597 for rationale.
+    stride_am_i64 = tl.cast(stride_am, tl.int64)
+    stride_bn_i64 = tl.cast(stride_bn, tl.int64)
+    stride_cm_i64 = tl.cast(stride_cm, tl.int64)
+    stride_cn_i64 = tl.cast(stride_cn, tl.int64)
+
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
     # Full tiles loop
@@ -67,13 +74,13 @@ def streamk_matmul(
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        rm = (pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        rn = (pid_n.to(tl.int64) * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rk = tl.arange(0, BLOCK_SIZE_K)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-        B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+        A_BASE = A + rm[:, None] * stride_am_i64 + rk[None, :] * stride_ak
+        B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn_i64
 
         if BIAS:
             bias_ = bias_ptr + rn * stride_bias
@@ -107,8 +114,8 @@ def streamk_matmul(
         if not EVEN_K:
             k = loop_k
             rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+            A_BASE = A + rm[:, None] * stride_am_i64 + rk[None, :] * stride_ak
+            B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn_i64
             if stride_ak == 1:
                 A_BASE = tl.multiple_of(A_BASE, (1, 16))
             else:
@@ -149,12 +156,12 @@ def streamk_matmul(
         else:
             c = acc.to(C.type.element_ty)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        rm = (pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        rn = (pid_n.to(tl.int64) * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         mask = (rm[:, None] < M) & (rn[None, :] < N)
-        C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        C_ = C + rm[:, None] * stride_cm_i64 + rn[None, :] * stride_cn_i64
         tl.store(C_, c, mask=mask)
 
     if STREAMK_TILES == 0:
@@ -194,13 +201,13 @@ def streamk_matmul(
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        rm = (pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        rn = (pid_n.to(tl.int64) * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rk = tl.arange(0, BLOCK_SIZE_K)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak + BLOCK_SIZE_K * stride_ak * remainder
-        B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn + BLOCK_SIZE_K * stride_bk * remainder
+        A_BASE = A + rm[:, None] * stride_am_i64 + rk[None, :] * stride_ak + BLOCK_SIZE_K * stride_ak * remainder
+        B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn_i64 + BLOCK_SIZE_K * stride_bk * remainder
         if stride_ak == 1:
             A_BASE = tl.multiple_of(A_BASE, (1, 16))
         else:
@@ -359,26 +366,26 @@ def streamk_matmul(
             c10 = acc10.to(C.type.element_ty)
             c11 = acc11.to(C.type.element_ty)
 
-            # Store all 4 quadrants
-            rm_top = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M // 2)) % M
-            rm_bottom = (pid_m * BLOCK_SIZE_M + tl.arange(BLOCK_SIZE_M // 2, BLOCK_SIZE_M)) % M
-            rn_left = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N // 2)) % N
-            rn_right = (pid_n * BLOCK_SIZE_N + tl.arange(BLOCK_SIZE_N // 2, BLOCK_SIZE_N)) % N
+            # Store all 4 quadrants (use int64 offsets to avoid overflow on large shapes)
+            rm_top = (pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M // 2)) % M
+            rm_bottom = (pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(BLOCK_SIZE_M // 2, BLOCK_SIZE_M)) % M
+            rn_left = (pid_n.to(tl.int64) * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N // 2)) % N
+            rn_right = (pid_n.to(tl.int64) * BLOCK_SIZE_N + tl.arange(BLOCK_SIZE_N // 2, BLOCK_SIZE_N)) % N
 
             # Store quadrant 00 (top-left)
             mask00 = (rm_top < M)[:, None] & (rn_left < N)[None, :]
-            tl.store(C + rm_top[:, None] * stride_cm + rn_left[None, :] * stride_cn, c00, mask=mask00)
+            tl.store(C + rm_top[:, None] * stride_cm_i64 + rn_left[None, :] * stride_cn_i64, c00, mask=mask00)
 
             # Store quadrant 01 (top-right)
             mask01 = (rm_top < M)[:, None] & (rn_right < N)[None, :]
-            tl.store(C + rm_top[:, None] * stride_cm + rn_right[None, :] * stride_cn, c01, mask=mask01)
+            tl.store(C + rm_top[:, None] * stride_cm_i64 + rn_right[None, :] * stride_cn_i64, c01, mask=mask01)
 
             # Store quadrant 10 (bottom-left)
             mask10 = (rm_bottom < M)[:, None] & (rn_left < N)[None, :]
-            tl.store(C + rm_bottom[:, None] * stride_cm + rn_left[None, :] * stride_cn, c10, mask=mask10)
+            tl.store(C + rm_bottom[:, None] * stride_cm_i64 + rn_left[None, :] * stride_cn_i64, c10, mask=mask10)
 
             # Store quadrant 11 (bottom-right)
             mask11 = (rm_bottom < M)[:, None] & (rn_right < N)[None, :]
-            tl.store(C + rm_bottom[:, None] * stride_cm + rn_right[None, :] * stride_cn, c11, mask=mask11)
+            tl.store(C + rm_bottom[:, None] * stride_cm_i64 + rn_right[None, :] * stride_cn_i64, c11, mask=mask11)
 
         start_iter = end_iter

@@ -36,6 +36,7 @@ class OrigamiMatmulSelector:
         device: torch.device,
         mx_block_size=0,
         streamk=False,
+        num_stages=2,
     ):
         # Save tensor sizes
         self._m = m
@@ -106,6 +107,13 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
+        self._num_stages = num_stages
+        self._validate_lds_usage()
+
+        hints_a, hints_b = self._detect_cache_hints()
+        self._result.config.cache_hints_a = hints_a
+        self._result.config.cache_hints_b = hints_b
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -153,8 +161,144 @@ class OrigamiMatmulSelector:
         return math.gcd(self._k, self.block_k) == self.block_k
 
     @property
+    def cache_modifier_a(self):
+        """Triton cache_modifier string for operand A loads, or None for default."""
+        return self._cache_hints_to_modifier(self._result.config.cache_hints_a)
+
+    @property
+    def cache_modifier_b(self):
+        """Triton cache_modifier string for operand B loads, or None for default."""
+        return self._cache_hints_to_modifier(self._result.config.cache_hints_b)
+
+    @property
     def sk_grid(self):
         return self._grid
+
+    @property
+    def num_stages(self):
+        return self._num_stages
+
+    @staticmethod
+    def _cache_hints_to_modifier(cache_hints):
+        """Map Origami cache_hints to Triton cache_modifier. See docs/ORIGAMI_NONTEMPORAL_CACHE_HINTS.md."""
+        if cache_hints == 0:
+            return None
+        elif cache_hints == 1:
+            return ".cg"
+        else:
+            return ".cs"
+
+    @staticmethod
+    def estimate_triton_lds(block_m, block_n, block_k, elem_bytes_a, elem_bytes_b, num_stages):
+        """Estimate Triton's shared memory (LDS) usage for a GEMM tile.
+
+        See docs/TRITON_LDS_ESTIMATION.md for detailed explanation.
+        """
+        PADDING_INTERVAL = 512
+        PADDING_ELEMENTS = 16
+
+        def padded_buffer_size(rows, cols, elem_bytes):
+            raw_elements = rows * cols
+            raw_bytes = raw_elements * elem_bytes
+            num_padding_rows = raw_elements // PADDING_INTERVAL
+            padding_bytes = num_padding_rows * PADDING_ELEMENTS * elem_bytes
+            return raw_bytes + padding_bytes
+
+        padded_a = padded_buffer_size(block_m, block_k, elem_bytes_a)
+        padded_b = padded_buffer_size(block_k, block_n, elem_bytes_b)
+
+        total_per_stage = padded_a + padded_b
+        estimated = num_stages * total_per_stage
+        estimated = ((estimated + 255) // 256) * 256
+
+        return estimated
+
+    def _validate_lds_usage(self):
+        """Validate and re-select tile if it exceeds Triton's LDS budget."""
+        lds_capacity = self._hardware.lds_capacity
+        elem_bits_a = origami.datatype_to_bits(self._problem.a_dtype)
+        elem_bits_b = origami.datatype_to_bits(self._problem.b_dtype)
+        elem_bytes_a = (elem_bits_a + 7) // 8
+        elem_bytes_b = (elem_bits_b + 7) // 8
+
+        mt = self._result.config.mt
+        estimated_lds = self.estimate_triton_lds(
+            mt.m, mt.n, mt.k, elem_bytes_a, elem_bytes_b, self._num_stages
+        )
+
+        if estimated_lds <= lds_capacity:
+            return  # Current tile is fine
+
+        # Current tile exceeds LDS budget — filter configs and re-select
+        constrained_configs = []
+        for cfg in self._configs:
+            est = self.estimate_triton_lds(
+                cfg.mt.m, cfg.mt.n, cfg.mt.k,
+                elem_bytes_a, elem_bytes_b, self._num_stages
+            )
+            if est <= lds_capacity:
+                constrained_configs.append(cfg)
+
+        if not constrained_configs:
+            # No valid config found; keep the original and let Triton handle the error
+            return
+
+        # Re-select with constrained configs
+        self._result = origami.select_config(
+            self._problem, self._hardware, constrained_configs
+        )
+
+    def _detect_cache_hints(self):
+        """Detect NonTemporal cache hints for A and B based on problem shape
+        and the selected tile sizes.
+
+        This mirrors the short-circuit logic in Origami's compute_total_latency
+        (gemm.cpp) which decides when nontemporal loads are beneficial:
+          - NTB when M is small relative to tile, B not transposed, and N >> M
+          - NTA when N is small relative to tile, A transposed, and M >> N
+          - Both require K and MT_K to be 128-byte aligned
+
+        Returns:
+            tuple[int, int]: (cache_hints_a, cache_hints_b) where 0 = default,
+                4 = nontemporal.
+        """
+        M, N, K = self._m, self._n, self._k
+        MT_M = self._result.config.mt.m
+        MT_N = self._result.config.mt.n
+        MT_K = self._result.config.mt.k
+
+        a_bits = origami.datatype_to_bits(self._problem.a_dtype)
+        b_bits = origami.datatype_to_bits(self._problem.b_dtype)
+
+        a_trans = self._problem.a_transpose == origami.transpose_t.T
+        b_trans = self._problem.b_transpose == origami.transpose_t.T
+
+        cache_hints_a = 0
+        cache_hints_b = 0
+
+        # K and MT_K must be 128-byte aligned (1024 bits) for nontemporal loads
+        K_mod_128bytes = (K * a_bits) % 1024
+        MT_K_mod_128bytes = (MT_K * a_bits) % 1024
+
+        if K_mod_128bytes == 0 and MT_K_mod_128bytes == 0:
+            if (
+                M <= MT_M * 2
+                and not b_trans
+                and M * a_bits > 0
+                and (N * b_bits) // (M * a_bits) > 5
+            ):
+                # Skinny-M: B data is accessed with poor reuse → nontemporal B
+                cache_hints_b = 4
+            elif (
+                N <= MT_N * 2
+                and a_trans
+                and N * b_bits > 0
+                and (M * a_bits) // (N * b_bits) > 5
+            ):
+                # Skinny-N: A data is accessed with poor reuse → nontemporal A
+                cache_hints_a = 4
+
+        return cache_hints_a, cache_hints_b
 
     def _compute_sk_grid(self):
         # Grid model constants for StreamK
