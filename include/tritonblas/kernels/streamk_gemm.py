@@ -167,6 +167,8 @@ def streamk_matmul(
     rn1 = tl.max_contiguous(tl.multiple_of(rn1, BLOCK_SIZE_N), BLOCK_SIZE_N)
     P_ = P + pid * BLOCK_SIZE_M * BLOCK_SIZE_N + rm1[:, None] * BLOCK_SIZE_N + rn1[None, :]
     tl.store(P_, 0.0, cache_modifier=".wt")
+    # keep P_ and locks init in order
+    tl.debug_barrier()
     tl.store(locks + pid, 0, cache_modifier=".wt")
 
     tl.assume(pid >= 0)
