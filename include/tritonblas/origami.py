@@ -5,6 +5,20 @@ import math
 from math import ceil
 
 
+def _padded_size_32_4(unpadded_size: int) -> int:
+    """
+    Fast path: Triton [[32, 4]] PaddedSharedEncoding pattern.
+    Inserts 4 padding elements after every 32 elements for bank-conflict avoidance.
+    interval=32 (log2=5), padding=4 (log2=2).
+    """
+    # Number of 32-element blocks × 4 padding per block
+    block_padding = (unpadded_size >> 5) << 2
+    # Triton subtracts one padding block when size is exactly divisible by 32
+    if (unpadded_size & 31) == 0 and block_padding >= 4:
+        block_padding -= 4
+    return unpadded_size + block_padding
+
+
 def _padded_size_elements_pow2(unpadded_size: int, intervals: list[tuple[int, int]]) -> int:
     """
     Triton PaddedSharedEncodingAttr.getPaddedSize - exact C++ equivalent.
@@ -12,8 +26,7 @@ def _padded_size_elements_pow2(unpadded_size: int, intervals: list[tuple[int, in
     """
     total_padding = 0
     for interval, padding in intervals:
-        # (unpaddedSize >> Log2_32(interval)) << Log2_32(padding)
-        log2_interval = (interval - 1).bit_length()  # 32 -> 5, 4 -> 2
+        log2_interval = (interval - 1).bit_length()
         log2_padding = (padding - 1).bit_length() if padding else 0
         block_padding = (unpadded_size >> log2_interval) << log2_padding
         if unpadded_size % interval == 0 and block_padding >= padding:
@@ -52,20 +65,18 @@ def estimate_triton_lds_bytes(
     elem_a = block_m * block_k
     elem_b = block_k * block_n
 
-    # Triton uses both patterns; take max for conservative estimate:
-    # - [[32, 4]]: common in gfx1250/TDM, wins for large tiles
-    # - [[block_k, 8]] for A, [[block_n, 8]] for B: wins for small tiles (Triton AMD tests)
-    padded_a_32_4 = _padded_size_elements_pow2(elem_a, [(32, 4)])
-    padded_b_32_4 = _padded_size_elements_pow2(elem_b, [(32, 4)])
-
-    padded_elems_a = padded_a_32_4
-    padded_elems_b = padded_b_32_4
-    if block_k > 0 and (block_k & (block_k - 1)) == 0:  # power of 2
-        padded_a_bk_8 = _padded_size_elements_pow2(elem_a, [(block_k, 8)])
-        padded_elems_a = max(padded_elems_a, padded_a_bk_8)
-    if block_n > 0 and (block_n & (block_n - 1)) == 0:  # power of 2
-        padded_b_bn_8 = _padded_size_elements_pow2(elem_b, [(block_n, 8)])
-        padded_elems_b = max(padded_elems_b, padded_b_bn_8)
+    # Fast path: [[32, 4]] (no list alloc, no loop)
+    padded_elems_a = _padded_size_32_4(elem_a)
+    padded_elems_b = _padded_size_32_4(elem_b)
+    # [[block_k, 8]] / [[block_n, 8]] for small tiles (Triton AMD tests)
+    if block_k & (block_k - 1) == 0:  # power of 2
+        padded_a_bk = _padded_size_elements_pow2(elem_a, [(block_k, 8)])
+        if padded_a_bk > padded_elems_a:
+            padded_elems_a = padded_a_bk
+    if block_n & (block_n - 1) == 0:
+        padded_b_bn = _padded_size_elements_pow2(elem_b, [(block_n, 8)])
+        if padded_b_bn > padded_elems_b:
+            padded_elems_b = padded_b_bn
     padded_per_stage = padded_elems_a * bytes_a + padded_elems_b * bytes_b
 
     return num_stages * padded_per_stage
@@ -81,6 +92,9 @@ def check_triton_lds_capacity(
     num_stages: int = 2,
 ) -> bool:
     """Return True if estimated Triton LDS usage fits within lds_capacity."""
+    raw = (block_m * block_k * bytes_a + block_k * block_n * bytes_b) * num_stages
+    if raw > lds_capacity:
+        return False
     usage = estimate_triton_lds_bytes(
         block_m, block_n, block_k, bytes_a, bytes_b, num_stages
     )
@@ -88,6 +102,20 @@ def check_triton_lds_capacity(
 
 
 class OrigamiMatmulSelector:
+    @staticmethod
+    def estimate_triton_lds(
+        block_m: int,
+        block_n: int,
+        block_k: int,
+        bytes_a: int,
+        bytes_b: int,
+        num_stages: int = 2,
+    ) -> int:
+        """Class-level wrapper for estimate_triton_lds_bytes."""
+        return estimate_triton_lds_bytes(
+            block_m, block_n, block_k, bytes_a, bytes_b, num_stages
+        )
+
     # https://docs.pytorch.org/docs/stable/tensors.html
     dtype_to_str = {
         torch.float32: "f32",
@@ -118,12 +146,14 @@ class OrigamiMatmulSelector:
         device: torch.device,
         mx_block_size=0,
         streamk=False,
+        num_stages: int = 2,
     ):
         # Save tensor sizes
         self._m = m
         self._n = n
         self._k = k
         self.streamk = streamk
+        self._num_stages = num_stages
         # Save tensor dtypes as strings
         self._a_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
         self._b_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, b_dtype)
@@ -189,12 +219,11 @@ class OrigamiMatmulSelector:
         bytes_a = self._a_dtype_bitsize // 8
         bytes_b = self._b_dtype_bitsize // 8
         lds_cap = self._hardware.lds_capacity
-        num_stages = 2  # persistent_matmul/streamk_matmul use num_stages=2
         self._configs = [
             c
             for c in self._configs
             if check_triton_lds_capacity(
-                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, num_stages
+                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, self._num_stages
             )
         ]
         if not self._configs:
@@ -256,12 +285,16 @@ class OrigamiMatmulSelector:
         return self._xcc_workgroup_mapping
 
     @property
+    def num_stages(self):
+        return self._num_stages
+
+    @property
     def waves_per_eu(self):
         return self._result.config.occupancy
 
     @property
     def even_k(self):
-        return math.gcd(self._k, self.block_k) == self.block_k
+        return self._k % self.block_k == 0
 
     @property
     def sk_grid(self):
