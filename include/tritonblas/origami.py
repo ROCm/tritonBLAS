@@ -264,6 +264,7 @@ class OrigamiMatmulSelector:
         )
         self._xcc_workgroup_mapping = wgm_result.wgmxcc
         self._workgroup_mapping = abs(wgm_result.wgm)  # wgm can be negative for M-major
+
     @property
     def block_m(self):
         return self._result.config.mt.m
