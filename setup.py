@@ -40,6 +40,9 @@ class CustomBuildExt(build_ext):
                 "_origami",
             ]
         )
+        # Pin to commit with workgroup_mapping_t API (select_workgroup_mapping returns
+        # object with wgmxcc, wgm, wgmxccchunk). Older 4fc354a18f returned std::tuple.
+        ORIGAMI_COMMIT = "d46ec4cca7e71594705a0fadc1b50f27a277fb24"
         subprocess.check_call(
             [
                 "git",
@@ -47,7 +50,7 @@ class CustomBuildExt(build_ext):
                 "--depth",
                 "1",
                 "origin",
-                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+                ORIGAMI_COMMIT,
             ],
             cwd="_origami",
         )
@@ -55,7 +58,7 @@ class CustomBuildExt(build_ext):
             [
                 "git",
                 "checkout",
-                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+                ORIGAMI_COMMIT,
             ],
             cwd="_origami",
         )
