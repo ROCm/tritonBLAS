@@ -5,7 +5,117 @@ import math
 from math import ceil
 
 
+def _padded_size_32_4(unpadded_size: int) -> int:
+    """
+    Fast path: Triton [[32, 4]] PaddedSharedEncoding pattern.
+    Inserts 4 padding elements after every 32 elements for bank-conflict avoidance.
+    interval=32 (log2=5), padding=4 (log2=2).
+    """
+    # Number of 32-element blocks × 4 padding per block
+    block_padding = (unpadded_size >> 5) << 2
+    # Triton subtracts one padding block when size is exactly divisible by 32
+    if (unpadded_size & 31) == 0 and block_padding >= 4:
+        block_padding -= 4
+    return unpadded_size + block_padding
+
+
+def _padded_size_elements_pow2(unpadded_size: int, intervals: list[tuple[int, int]]) -> int:
+    """
+    Triton PaddedSharedEncodingAttr.getPaddedSize - exact C++ equivalent.
+    interval and padding must be powers of two. Uses bit ops for efficiency.
+    """
+    total_padding = 0
+    for interval, padding in intervals:
+        log2_interval = (interval - 1).bit_length()
+        log2_padding = (padding - 1).bit_length() if padding else 0
+        block_padding = (unpadded_size >> log2_interval) << log2_padding
+        if unpadded_size % interval == 0 and block_padding >= padding:
+            block_padding -= padding
+        total_padding += block_padding
+    return unpadded_size + total_padding
+
+
+def estimate_triton_lds_bytes(
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    bytes_a: int,
+    bytes_b: int,
+    num_stages: int = 2,
+) -> int:
+    """
+    Estimate Triton kernel LDS (shared memory) usage in bytes.
+
+    Triton uses async_copy by default for matmul, which applies
+    PaddedSharedEncoding for bank-conflict avoidance. This function uses the
+    exact Triton formula.
+
+    PipeliningUtility.createAlloc: num_stages buffers per tile.
+    PaddedSharedEncoding [[32, 4]]: insert 4 elements after every 32
+    (Dialect.cpp getPaddedSize).
+
+    Args:
+        block_m, block_n, block_k: Tile dimensions (MT_M, MT_N, MT_K).
+        bytes_a, bytes_b: Bytes per element for A and B (e.g. 2 for bf16/fp16).
+        num_stages: Pipeline stages (2 or 3); Triton matmul uses 2 by default.
+
+    Returns:
+        Estimated total LDS usage in bytes.
+    """
+    elem_a = block_m * block_k
+    elem_b = block_k * block_n
+
+    # Fast path: [[32, 4]] (no list alloc, no loop)
+    padded_elems_a = _padded_size_32_4(elem_a)
+    padded_elems_b = _padded_size_32_4(elem_b)
+    # [[block_k, 8]] / [[block_n, 8]] for small tiles (Triton AMD tests)
+    if block_k & (block_k - 1) == 0:  # power of 2
+        padded_a_bk = _padded_size_elements_pow2(elem_a, [(block_k, 8)])
+        if padded_a_bk > padded_elems_a:
+            padded_elems_a = padded_a_bk
+    if block_n & (block_n - 1) == 0:
+        padded_b_bn = _padded_size_elements_pow2(elem_b, [(block_n, 8)])
+        if padded_b_bn > padded_elems_b:
+            padded_elems_b = padded_b_bn
+    padded_per_stage = padded_elems_a * bytes_a + padded_elems_b * bytes_b
+
+    return num_stages * padded_per_stage
+
+
+def check_triton_lds_capacity(
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    bytes_a: int,
+    bytes_b: int,
+    lds_capacity: int,
+    num_stages: int = 2,
+) -> bool:
+    """Return True if estimated Triton LDS usage fits within lds_capacity."""
+    raw = (block_m * block_k * bytes_a + block_k * block_n * bytes_b) * num_stages
+    if raw > lds_capacity:
+        return False
+    usage = estimate_triton_lds_bytes(
+        block_m, block_n, block_k, bytes_a, bytes_b, num_stages
+    )
+    return usage <= lds_capacity
+
+
 class OrigamiMatmulSelector:
+    @staticmethod
+    def estimate_triton_lds(
+        block_m: int,
+        block_n: int,
+        block_k: int,
+        bytes_a: int,
+        bytes_b: int,
+        num_stages: int = 2,
+    ) -> int:
+        """Class-level wrapper for estimate_triton_lds_bytes."""
+        return estimate_triton_lds_bytes(
+            block_m, block_n, block_k, bytes_a, bytes_b, num_stages
+        )
+
     # https://docs.pytorch.org/docs/stable/tensors.html
     dtype_to_str = {
         torch.float32: "f32",
@@ -36,12 +146,14 @@ class OrigamiMatmulSelector:
         device: torch.device,
         mx_block_size=0,
         streamk=False,
+        num_stages: int = 2,
     ):
         # Save tensor sizes
         self._m = m
         self._n = n
         self._k = k
         self.streamk = streamk
+        self._num_stages = num_stages
         # Save tensor dtypes as strings
         self._a_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
         self._b_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, b_dtype)
@@ -98,8 +210,43 @@ class OrigamiMatmulSelector:
         self._kernel_occupancy_range = [1]
         self._configs = self._generate_default_configs()
 
-        # Create Origami problem_t based on problem metadata
+        # Create Origami problem_t based on problem metadata (needed for fallback)
         self._problem = self._make_problem()
+
+        # Filter configs by Triton LDS capacity (async_copy + num_stages + padding).
+        # Origami's check_lds_capacity uses raw tile size only; Triton allocates
+        # num_stages buffers with padding for bank conflicts.
+        bytes_a = self._a_dtype_bitsize // 8
+        bytes_b = self._b_dtype_bitsize // 8
+        lds_cap = self._hardware.lds_capacity
+        self._configs = [
+            c
+            for c in self._configs
+            if check_triton_lds_capacity(
+                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, self._num_stages
+            )
+        ]
+        if not self._configs:
+            # Fallback: allow at least origami's raw check (no Triton multiplier)
+            self._configs = self._generate_default_configs()
+            self._configs = [
+                c
+                for c in self._configs
+                if origami.check_lds_capacity(
+                    self._hardware, c.mt, self._problem.a_dtype, self._problem.b_dtype
+                )
+            ]
+        if not self._configs:
+            # Last resort: use minimal tile (16x16x16) so selection can proceed
+            minimal = origami.config_t()
+            minimal.mt = origami.dim3_t(16, 16, 16)
+            minimal.mi = self._infer_matrix_instruction_dimensions()
+            minimal.occupancy = 1
+            minimal.grid_selection = (
+                origami.grid_selection_t.k_split_aware if self.streamk
+                else origami.grid_selection_t.data_parallel
+            )
+            self._configs = [minimal]
 
         # Run Origami solution selection
         self._result = origami.select_config(
@@ -111,19 +258,12 @@ class OrigamiMatmulSelector:
         else:
             self._grid = self._hardware.N_CU
 
-        # Try both workgroup mapping modes for compatibility with Origami Versions
-        try:
-            _mapping_mode, self._xcc_workgroup_mapping, self._workgroup_mapping = (
-                origami.select_workgroup_mapping(
-                    self._problem, self._hardware, self._result.config, self._grid
-                )
-            )
-        except ValueError:
-            self._xcc_workgroup_mapping, self._workgroup_mapping = (
-                origami.select_workgroup_mapping(
-                    self._problem, self._hardware, self._result.config, self._grid
-                )
-            )
+        # select_workgroup_mapping returns workgroup_mapping_t (wgmxccchunk, wgmxcc, wgm)
+        wgm_result = origami.select_workgroup_mapping(
+            self._problem, self._hardware, self._result.config, self._grid
+        )
+        self._xcc_workgroup_mapping = wgm_result.wgmxcc
+        self._workgroup_mapping = abs(wgm_result.wgm)  # wgm can be negative for M-major
     @property
     def block_m(self):
         return self._result.config.mt.m
@@ -145,12 +285,16 @@ class OrigamiMatmulSelector:
         return self._xcc_workgroup_mapping
 
     @property
+    def num_stages(self):
+        return self._num_stages
+
+    @property
     def waves_per_eu(self):
         return self._result.config.occupancy
 
     @property
     def even_k(self):
-        return math.gcd(self._k, self.block_k) == self.block_k
+        return self._k % self.block_k == 0
 
     @property
     def sk_grid(self):
