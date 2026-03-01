@@ -216,6 +216,7 @@ class OrigamiMatmulSelector:
         # Filter configs by Triton LDS capacity (async_copy + num_stages + padding).
         # Origami's check_lds_capacity uses raw tile size only; Triton allocates
         # num_stages buffers with padding for bank conflicts.
+        # LDS issues only affect largest tiles; smaller configs should always pass.
         bytes_a = self._a_dtype_bitsize // 8
         bytes_b = self._b_dtype_bitsize // 8
         lds_cap = self._hardware.lds_capacity
@@ -227,7 +228,8 @@ class OrigamiMatmulSelector:
             )
         ]
         if not self._configs:
-            # Fallback: allow at least origami's raw check (no Triton multiplier)
+            # Fallback: origami's raw check (no Triton padding/stages) is more permissive.
+            # Used when Triton filter is overly conservative; smaller tiles should pass.
             self._configs = self._generate_default_configs()
             self._configs = [
                 c
@@ -237,16 +239,10 @@ class OrigamiMatmulSelector:
                 )
             ]
         if not self._configs:
-            # Last resort: use minimal tile (16x16x16) so selection can proceed
-            minimal = origami.config_t()
-            minimal.mt = origami.dim3_t(16, 16, 16)
-            minimal.mi = self._infer_matrix_instruction_dimensions()
-            minimal.occupancy = 1
-            minimal.grid_selection = (
-                origami.grid_selection_t.k_split_aware if self.streamk
-                else origami.grid_selection_t.data_parallel
+            # Should not happen on supported hardware (64KB+ LDS); small tiles always fit.
+            raise RuntimeError(
+                "No configs passed LDS checks; unexpected for supported hardware"
             )
-            self._configs = [minimal]
 
         # Run Origami solution selection
         self._result = origami.select_config(
