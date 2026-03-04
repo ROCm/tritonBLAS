@@ -346,6 +346,12 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--cu-sweep", action="store_true",
+        help="Run a balanced CU sweep (MI300X).  Uses the same --input-yaml "
+             "shapes and kernel mode.  Re-invokes this script as subprocesses; "
+             "results include an active_cus column.",
+    )
+    parser.add_argument(
+        "--cu-mask", action="store_true",
         help="Run a balanced CU-mask sweep (MI300X).  Uses the same --input-yaml "
              "shapes and kernel mode.  Re-invokes this script as subprocesses with "
              "ROC_GLOBAL_CU_MASK set; results include an active_cus column.",
@@ -378,13 +384,14 @@ if __name__ == "__main__":
 
         for r in range(max_remove + 1):
             active = full_cus - r * num_xcds
-            mask = build_balanced_hex_mask(r, num_xcds, cus_per_xcd)
+            if args.cu_mask:
+                mask = build_balanced_hex_mask(r, num_xcds, cus_per_xcd)
 
             child_cmd = child_base + ["--_active-cus", str(active),
                                       "--_total-cus", str(full_cus)]
 
             env = os.environ.copy()
-            if mask:
+            if args.cu_mask:
                 env["ROC_GLOBAL_CU_MASK"] = mask
 
             proc = subprocess.run(
