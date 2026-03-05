@@ -9,7 +9,7 @@ on:
 
 jobs:
   test:
-    runs-on: [linux-mi325-8gpu-ossci-rad, amd-gpu]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
     
     container:
       image: rocm/dev-ubuntu-24.04:7.2-complete
