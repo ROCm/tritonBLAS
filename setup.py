@@ -24,8 +24,8 @@ class CustomBuildExt(build_ext):
             print("Removing existing _origami directory...")
             shutil.rmtree("_origami")
 
-        # Clone hipBLASLt repo
-        print("Cloning hipBLASLt...")
+        # Clone origami from rocm-libraries
+        print("Cloning rocm-libraries (origami)...")
         subprocess.check_call(
             [
                 "git",
@@ -35,29 +35,10 @@ class CustomBuildExt(build_ext):
                 "--filter=blob:none",
                 "--sparse",
                 "--branch",
-                "develop",
-                "https://github.com/ROCm/rocm-libraries.git",
+                "users/pghysels/origami_gfx1250",
+                "git@github.com:AMD-ROCm-Internal/rocm-libraries.git",
                 "_origami",
             ]
-        )
-        subprocess.check_call(
-            [
-                "git",
-                "fetch",
-                "--depth",
-                "1",
-                "origin",
-                "4fc354a18fbed563d66f347a699f77b9ce52043a",
-            ],
-            cwd="_origami",
-        )
-        subprocess.check_call(
-            [
-                "git",
-                "checkout",
-                "4fc354a18fbed563d66f347a699f77b9ce52043a",
-            ],
-            cwd="_origami",
         )
 
         # Use custom chdir context manager to run sparse-checkout
