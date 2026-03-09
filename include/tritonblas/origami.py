@@ -38,6 +38,7 @@ class OrigamiMatmulSelector:
         mx_block_size=0,
         streamk=False,
         total_cus: int = None,
+        active_cus: int = None,
     ):
         # Save tensor sizes
         self._m = m
@@ -104,6 +105,7 @@ class OrigamiMatmulSelector:
         if total_cus is not None:
             self._hardware.N_CU = total_cus
         self._N_CU = self._hardware.N_CU
+        self._ACTIVE_CU = active_cus
 
         # Create list of Origami config_t objects from defaults.
         self._block_mn_range = [16, 32, 64, 128, 256]

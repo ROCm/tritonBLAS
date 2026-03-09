@@ -49,6 +49,7 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    active_cus: int = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -84,6 +85,11 @@ def persistent_matmul_lt(
     chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
 
     if work_stealing:
+        device = a.device
+        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
+        for i in range(selector._ACTIVE_CU, len(mask), 1):
+            mask[i] = 0
+
         # Work-stealing: launch grid = num CUs, tiles assigned dynamically
         # via per-XCD atomic counters.
         # grids = selector._hardware.N_CU
@@ -126,6 +132,7 @@ def persistent_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            mask_ptr=mask,
         )
     else:
         # Default: data-parallel mode – one WG per tile.
@@ -275,14 +282,14 @@ def streamk_matmul_lt(
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
-    enable_streamk=False, work_stealing=False,
+    enable_streamk=False, work_stealing=False, active_cus=None
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing, active_cus=active_cus)
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,

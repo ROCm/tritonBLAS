@@ -62,9 +62,14 @@ def ws_persistent_matmul(
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
     GLOBAL_ATOMIC: tl.constexpr = False,  # True: single device-wide counter
+    mask_ptr=None,
 ):
     pid = tl.program_id(0)
     xcd_id = pid % NUM_XCDS
+
+    mask = tl.load(mask_ptr + pid)
+    if mask == 0:
+        return
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)

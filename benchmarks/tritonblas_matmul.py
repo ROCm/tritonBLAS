@@ -128,6 +128,7 @@ def bench_matmul(
     total_cus=None,
     counters_per_xcd=None,
     global_atomic=False,
+    active_cus=None,
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -179,7 +180,7 @@ def bench_matmul(
 
         selector = tritonblas.OrigamiMatmulSelector(
             m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
-            streamk=enable_streamk, total_cus=total_cus,
+            streamk=enable_streamk, total_cus=total_cus, active_cus=active_cus
         )
         if counters_per_xcd is not None:
             selector.COUNTERS_PER_XCD = counters_per_xcd
@@ -195,7 +196,7 @@ def bench_matmul(
         else:
             matmul = lambda: tritonblas.matmul_lt(
                 inputs.A, inputs.B, inputs.C, selector, cfg,
-                enable_streamk, work_stealing=work_stealing,
+                enable_streamk, work_stealing=work_stealing, active_cus=active_cus
             )
 
         reset = lambda: cfg.reset(streamk=enable_streamk, work_stealing=work_stealing)
@@ -269,6 +270,8 @@ def _build_child_cmd(args):
         cmd.append("--shuffle-bench")
     if args.checkcorrectness:
         cmd.append("--checkcorrectness")
+    if args.cu_mask:
+        cmd.append("--cu-mask")
     if args.enable_streamk:
         cmd.append("--enable-streamk")
     elif args.work_stealing:
@@ -417,6 +420,8 @@ if __name__ == "__main__":
         import io
         sys.stdout = io.StringIO()
 
+    active_cus = args._total_cus if args.cu_mask else args._active_cus
+
     benchmark_results = bench_matmul(
         args.input_yaml,
         args.init_type,
@@ -430,6 +435,7 @@ if __name__ == "__main__":
         total_cus=args._total_cus,
         counters_per_xcd=args.counters_per_xcd,
         global_atomic=args.global_atomic,
+        active_cus=active_cus,
     )
 
     if is_worker:
