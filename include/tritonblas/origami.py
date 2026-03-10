@@ -111,19 +111,18 @@ class OrigamiMatmulSelector:
         else:
             self._grid = self._hardware.N_CU
 
-        # Try both workgroup mapping modes for compatibility with Origami Versions
-        try:
-            _mapping_mode, self._xcc_workgroup_mapping, self._workgroup_mapping = (
-                origami.select_workgroup_mapping(
-                    self._problem, self._hardware, self._result.config, self._grid
-                )
-            )
-        except ValueError:
-            self._xcc_workgroup_mapping, self._workgroup_mapping = (
-                origami.select_workgroup_mapping(
-                    self._problem, self._hardware, self._result.config, self._grid
-                )
-            )
+        # Handle different Origami API versions for workgroup mapping
+        wgm_result = origami.select_workgroup_mapping(
+            self._problem, self._hardware, self._result.config, self._grid
+        )
+        if hasattr(wgm_result, 'wgm'):
+            # Newer API: returns workgroup_mapping_t object
+            self._xcc_workgroup_mapping = wgm_result.wgmxcc
+            self._workgroup_mapping = wgm_result.wgm
+        elif isinstance(wgm_result, tuple) and len(wgm_result) == 3:
+            _mapping_mode, self._xcc_workgroup_mapping, self._workgroup_mapping = wgm_result
+        else:
+            self._xcc_workgroup_mapping, self._workgroup_mapping = wgm_result
     @property
     def block_m(self):
         return self._result.config.mt.m
@@ -375,10 +374,23 @@ class OrigamiMatmulSelector:
                 raise ValueError("MI200 doesn't support F8")
             if largest_bitsize < 8:
                 raise ValueError("MI200 doesn't support F4/F6")
+        # gfx1250 (96 CUs, WMMA instructions)
+        if self._hardware.N_CU == 96:
+            # FP16/BF16 — WMMA 16x16x32
+            if largest_bitsize == 16:
+                mi_dim = origami.dim3_t(16, 16, 32)
+            # FP32
+            elif largest_bitsize == 32:
+                mi_dim = origami.dim3_t(16, 16, 4)
+            else:
+                # Use hardware's recommendation as fallback
+                dt = origami.string_to_datatype(self.mi_dtype)
+                rec = self._hardware.get_recommended_matrix_instruction(dt)
+                mi_dim = origami.dim3_t(rec.m, rec.n, rec.k)
         # Architecture Detected is not valid
-        if mi_dim == None:
+        if mi_dim is None:
             raise ValueError(
-                f"No Valid Matrix Instruction integrated for {element_size_A}-bit or {element_size_B}-bit datatypes"
+                f"No Valid Matrix Instruction integrated for {self._a_dtype_bitsize}-bit or {self._b_dtype_bitsize}-bit datatypes"
             )
 
         return mi_dim

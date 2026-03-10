@@ -9,18 +9,30 @@ import triton
 
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.gluon import gluon_streamk_matmul
 from .origami import OrigamiMatmulSelector
 
 _tensor_cache = {}
-current_device_index = torch.cuda.current_device()
-current_device = torch.cuda.get_device_properties(current_device_index)
-MAX_SMS = current_device.multi_processor_count
-# TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
-MAX_BLOCK_SIZE = 65536
 
-# Global pre-allocated buffers
-_global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
-_global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+# Defer device queries to avoid segfaults on pre-silicon targets where
+# upstream PyTorch doesn't recognise the GPU architecture at import time.
+MAX_BLOCK_SIZE = 65536
+_device_info_initialised = False
+MAX_SMS = None
+_global_locks = None
+_global_P = None
+
+
+def _ensure_device_info():
+    global _device_info_initialised, MAX_SMS, _global_locks, _global_P
+    if _device_info_initialised:
+        return
+    current_device_index = torch.cuda.current_device()
+    current_device = torch.cuda.get_device_properties(current_device_index)
+    MAX_SMS = current_device.multi_processor_count
+    _global_locks = torch.empty(MAX_SMS, dtype=torch.uint8).cuda()
+    _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, dtype=torch.float32).cuda()
+    _device_info_initialised = True
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -137,16 +149,17 @@ def persistent_matmul_lt(
     return c
 
 def streamk_matmul_lt(
-    a: torch.Tensor, 
-    b: torch.Tensor, 
-    c: torch.Tensor, 
-    selector, 
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
     bias: Optional[torch.Tensor] = None,
     sk_grid: Optional[int] = None,
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
 ):
+    _ensure_device_info()
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -620,4 +633,74 @@ def addmm(
             "automatic differentiation, but one of the arguments requires grad."
         )
     return _addmm_out(bias, a, b, out, enable_streamk, sk_grid)
+
+
+def matmul_gluon(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+    num_warps: int = 4,
+    num_buffers: Optional[int] = None,
+    use_prefetch: bool = False,
+) -> torch.Tensor:
+    """
+    Matrix multiply using the gfx1250 gluon StreamK kernel with Origami
+    tile selection.
+
+    A (M, K) @ B (K, N) -> C (M, N)
+
+    Accepts fp16/bf16 inputs. Output is float32. B is internally transposed
+    to match the kernel's expected layout. Tile sizes (block_m, block_n,
+    block_k) and grid parameters are selected by Origami for gfx1250.
+
+    Args:
+        a: (M, K) tensor, fp16 or bf16.
+        b: (K, N) tensor, fp16 or bf16.
+        out: Optional pre-allocated (M, N) float32 output tensor.
+        num_warps: 4 or 8.
+        num_buffers: Pipeline buffers (default: 2 for 4-warp, 3 for 8-warp).
+        use_prefetch: Use prefetch kernel variant (4-warp only).
+
+    Returns:
+        (M, N) float32 tensor.
+    """
+    assert a.shape[1] == b.shape[0], f"Incompatible dimensions: A {a.shape}, B {b.shape}"
+    M, K = a.shape
+    N = b.shape[1]
+
+    # Query Origami for tile selection
+    selector = _make_matmul_selector(
+        M, N, K, a.dtype, b.dtype, torch.float32, a.device, streamk=True
+    )
+
+    block_m = selector.block_m
+    block_n = selector.block_n
+    block_k = selector.block_k
+    group_size_m = selector.group_m
+    num_sms = selector.num_sms
+
+    if num_buffers is None:
+        num_buffers = 3 if num_warps == 8 else 2
+
+    # The gluon kernel expects B transposed (N, K) layout.
+    # Transpose on CPU to avoid segfaults on pre-silicon targets where
+    # upstream PyTorch can't run CUDA kernels (e.g. contiguous()).
+    b_t = b.cpu().T.contiguous().cuda()
+
+    if out is None:
+        out = torch.zeros((M, N), dtype=torch.float32).cuda()
+
+    gluon_streamk_matmul(
+        a, b_t, out,
+        block_m=block_m,
+        block_n=block_n,
+        block_k=block_k,
+        num_buffers=num_buffers,
+        num_warps=num_warps,
+        num_sms=num_sms,
+        transpose_b=True,
+        use_prefetch=use_prefetch,
+        group_size_m=group_size_m,
+    )
+    return out
 
