@@ -36,13 +36,13 @@ from tritonblas.utils import generate_matmul_inputs, str_to_dtype, _is_float8_li
 
 def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk,
                 work_stealing=False, init_type="randn", total_cus=None,
-                global_atomic=False):
+                active_cus=None, global_atomic=False):
     """Test matmul with proper input generation - handles both quantized and non-quantized dtypes"""
 
     inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
     selector = tritonblas.OrigamiMatmulSelector(
         m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
-        streamk=enable_streamk, total_cus=total_cus,
+        streamk=enable_streamk, total_cus=total_cus, active_cus=active_cus
     )
     cfg = tritonblas.matmul_preamble(selector)
     cfg.global_atomic = global_atomic
@@ -55,7 +55,7 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk,
     else:
         tritonblas.matmul_lt(
             inputs.A, inputs.B, inputs.C, selector, cfg,
-            enable_streamk, work_stealing=work_stealing,
+            enable_streamk, work_stealing=work_stealing, active_cus=active_cus
         )
 
     if inputs.is_quantized:
@@ -126,9 +126,9 @@ def bench_matmul(
     work_stealing=False,
     check_correctness=False,
     total_cus=None,
+    active_cus=None,
     counters_per_xcd=None,
     global_atomic=False,
-    active_cus=None,
 ):
     with open(input_yaml, "r") as f:
         dataset = yaml.safe_load(f)
@@ -180,7 +180,7 @@ def bench_matmul(
 
         selector = tritonblas.OrigamiMatmulSelector(
             m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
-            streamk=enable_streamk, total_cus=total_cus, active_cus=active_cus
+            streamk=enable_streamk, total_cus=active_cus, active_cus=active_cus
         )
         if counters_per_xcd is not None:
             selector.COUNTERS_PER_XCD = counters_per_xcd
@@ -196,7 +196,7 @@ def bench_matmul(
         else:
             matmul = lambda: tritonblas.matmul_lt(
                 inputs.A, inputs.B, inputs.C, selector, cfg,
-                enable_streamk, work_stealing=work_stealing, active_cus=active_cus
+                enable_streamk, work_stealing=work_stealing
             )
 
         reset = lambda: cfg.reset(streamk=enable_streamk, work_stealing=work_stealing)
@@ -255,7 +255,7 @@ def bench_matmul(
             test_matmul(m, n, k, in_dtype, out_dtype, transA, transB,
                         enable_streamk, work_stealing=work_stealing,
                         init_type=init_type, total_cus=total_cus,
-                        global_atomic=global_atomic)
+                        active_cus=active_cus, global_atomic=global_atomic)
 
     return benchmark_results
 
@@ -420,7 +420,8 @@ if __name__ == "__main__":
         import io
         sys.stdout = io.StringIO()
 
-    active_cus = args._total_cus if args.cu_mask else args._active_cus
+    total_cus, num_xcds, cus_per_xcd = get_cu_info()
+    active_cus = args._active_cus if not args.cu_mask else total_cus
 
     benchmark_results = bench_matmul(
         args.input_yaml,
@@ -433,9 +434,9 @@ if __name__ == "__main__":
         work_stealing=args.work_stealing,
         check_correctness=args.checkcorrectness,
         total_cus=args._total_cus,
+        active_cus=active_cus,
         counters_per_xcd=args.counters_per_xcd,
         global_atomic=args.global_atomic,
-        active_cus=active_cus,
     )
 
     if is_worker:

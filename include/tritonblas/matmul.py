@@ -49,7 +49,6 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
-    active_cus: int = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -92,8 +91,8 @@ def persistent_matmul_lt(
 
         # Work-stealing: launch grid = num CUs, tiles assigned dynamically
         # via per-XCD atomic counters.
-        # grids = selector._hardware.N_CU
-        grids = total_tiles
+        grids = selector._hardware.N_CU
+        #grids = total_tiles
 
         kk = ws_persistent_matmul[(grids,)](
             a,
@@ -282,14 +281,14 @@ def streamk_matmul_lt(
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
-    enable_streamk=False, work_stealing=False, active_cus=None
+    enable_streamk=False, work_stealing=False
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing, active_cus=active_cus)
+        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,

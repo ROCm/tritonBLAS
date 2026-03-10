@@ -97,7 +97,7 @@ class OrigamiMatmulSelector:
         # The GPU-reported N_CU reflects any active CU mask.  Save it
         # before overriding so Stream-K can size its grid to the real
         # number of schedulable CUs.
-        self._active_cus = self._hardware.N_CU
+        self._active_cus = active_cus
         
         # When running under a CU mask (e.g. cu-sweep), the GPU reports a
         # reduced N_CU.  Override with the real total so architecture
@@ -340,7 +340,7 @@ class OrigamiMatmulSelector:
 
         mi_dim = None
         # gfx950
-        if self._hardware.N_CU == 256:
+        if self._hardware.arch.name == "gfx950":
             # FP32
             if largest_bitsize == 32:
                 mi_dim = origami.dim3_t(16, 16, 4)
@@ -356,8 +356,7 @@ class OrigamiMatmulSelector:
                 self._block_mn_range = [32, 64, 128, 256]
                 mi_dim = origami.dim3_t(16, 16, 128)
         # gfx942 (304 CUs full, 80 CUs partitioned, 64 CUs)
-        is_gfx942 = self._hardware.N_CU in [304, 80, 64]
-        if is_gfx942:
+        if self._hardware.arch.name == "gfx942":
             # FP32
             if largest_bitsize == 32:
                 mi_dim = origami.dim3_t(16, 16, 4)
@@ -388,7 +387,7 @@ class OrigamiMatmulSelector:
             if largest_bitsize < 8:
                 raise ValueError("MI300A doesn't support F4/F6")
         # gfx90a
-        if self._hardware.N_CU == 104:
+        if self._hardware.arch.name == "gfx90a":
             # FP32
             if largest_bitsize == 32:
                 mi_dim = origami.dim3_t(16, 16, 4)

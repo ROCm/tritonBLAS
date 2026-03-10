@@ -64,6 +64,15 @@ class CustomBuildExt(build_ext):
         with chdir("_origami"):
             subprocess.check_call(["git", "sparse-checkout", "set", "shared/origami"])
 
+        subprocess.check_call(
+            [
+                "git",
+                "apply",
+                "../arch.diff",
+            ],
+            cwd="_origami",
+        )
+
         # Build the nested origami setup.py
         origami_setup_path = os.path.join("_origami", "shared", "origami", "python")
         print(f"Building origami setup.py in {origami_setup_path}...")
