@@ -55,7 +55,7 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk,
     else:
         tritonblas.matmul_lt(
             inputs.A, inputs.B, inputs.C, selector, cfg,
-            enable_streamk, work_stealing=work_stealing, active_cus=active_cus
+            enable_streamk, work_stealing=work_stealing
         )
 
     if inputs.is_quantized:
@@ -274,7 +274,7 @@ def _build_child_cmd(args):
         cmd.append("--cu-mask")
     if args.enable_streamk:
         cmd.append("--enable-streamk")
-    elif args.work_stealing:
+    if args.work_stealing:
         cmd.append("--work-stealing")
     if args.counters_per_xcd is not None:
         cmd += ["--counters-per-xcd", str(args.counters_per_xcd)]
@@ -337,12 +337,11 @@ if __name__ == "__main__":
         help="Check result correctness",
     )
 
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
+    parser.add_argument(
         "--enable-streamk", action="store_true",
         help="Enable Stream-K mode for matrix multiplication.",
     )
-    mode_group.add_argument(
+    parser.add_argument(
         "--work-stealing", action="store_true",
         help="Enable work-stealing persistent GEMM with per-XCD atomic counters.",
     )
@@ -400,6 +399,7 @@ if __name__ == "__main__":
             proc = subprocess.run(
                 child_cmd, capture_output=True, text=True, env=env,
             )
+            print(f"[active_cus={active}] {proc.stderr}", file=sys.stderr)
             if proc.returncode != 0:
                 print(f"[active_cus={active}] subprocess failed:", file=sys.stderr)
                 sys.stderr.write(proc.stderr[-500:] if len(proc.stderr) > 500 else proc.stderr)

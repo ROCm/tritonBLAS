@@ -30,10 +30,15 @@ from .persistent_gemm_work_stealing import ws_persistent_matmul
 # Stream-K kernel is always the same
 from .streamk_gemm import streamk_matmul
 
+# Work-stealing kernel (opt-in via work_stealing=True in matmul calls)
+from .streamk_gemm_work_stealing import ws_streamk_matmul
+
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
 # Export stages submodule
 from . import stages
 
-__all__ = ['persistent_matmul', 'ws_persistent_matmul', 'streamk_matmul', 'fp4_matmul', 'stages']
+__all__ = ['persistent_matmul', 'ws_persistent_matmul',
+           'streamk_matmul', 'ws_streamk_matmul',
+           'fp4_matmul', 'stages']

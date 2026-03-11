@@ -3,7 +3,8 @@ import triton
 import random
 import functools
 import time
-from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul
+import sys
+from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
@@ -185,6 +186,7 @@ def streamk_matmul_lt(
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
+    work_stealing: bool = False,
 ):
     cfg = config
 
@@ -206,7 +208,10 @@ def streamk_matmul_lt(
     ##
     # Grid Size
     ##
-    total_programs_streamk = selector.sk_grid
+    if work_stealing:
+        total_programs_streamk = selector._hardware.N_CU
+    else:
+        total_programs_streamk = selector.sk_grid
 
     if total_programs_streamk > 0:  # Stream-K
         total_tiles_streamk = total_tiles % total_programs_streamk
@@ -237,44 +242,95 @@ def streamk_matmul_lt(
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, grids // num_xcds) 
 
-    kk = streamk_matmul[(grids,)](
-        a,
-        b,
-        c,
-        a_scale if quantized else None,  # A_scale_ptr
-        b_scale if quantized else None,  # B_scale_ptr
-        None,  # TODO: Enable bias.
-        P,
-        locks,
-        M,
-        N,
-        K,
-        a.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        0,  # TODO: Enable bias stride.
-        stride_ak=a.stride(1),
-        stride_bk=b.stride(0),
-        BLOCK_SIZE_M=BLK_M,
-        BLOCK_SIZE_N=BLK_N,
-        BLOCK_SIZE_K=BLK_K,
-        GROUP_SIZE_M=gsize_m,
-        NUM_SMS=grids,
-        NUM_XCDS=num_xcds,
-        CHUNK_SIZE=chunk_size,
-        STREAMK_TILES=total_tiles_streamk,
-        BIAS=False,
-        EVEN_K=even_k,
-        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
-        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
-        QUANTIZED=quantized,
-        num_stages=num_stages,
-        num_warps=num_warps,
-        waves_per_eu=waves_per_eu,
-        matrix_instr_nonkdim=mfmaInstrSize,
-        kpack=kpack,
-    )
+    if work_stealing:
+        device = a.device
+        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
+        for i in range(selector._ACTIVE_CU, len(mask), 1):
+            mask[i] = 0
+
+        kk = ws_streamk_matmul[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,  # A_scale_ptr
+            b_scale if quantized else None,  # B_scale_ptr
+            None,  # TODO: Enable bias.
+            cfg.tile_counter,  # Per-XCD×slot tile counters
+            cfg.streamk_tile_counter,  # Per-XCD×slot StreamK tile counters
+            P,
+            locks,
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            0,  # TODO: Enable bias stride.
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=selector._ACTIVE_CU,
+            NUM_XCDS=num_xcds,
+            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
+            COUNTER_STRIDE=COUNTER_STRIDE,
+            CHUNK_SIZE=chunk_size,
+            STREAMK_TILES=total_tiles_streamk,
+            BIAS=False,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            GLOBAL_ATOMIC=cfg.global_atomic,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+            mask_ptr=mask,
+        )
+    else:
+        kk = streamk_matmul[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,  # A_scale_ptr
+            b_scale if quantized else None,  # B_scale_ptr
+            None,  # TODO: Enable bias.
+            P,
+            locks,
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            0,  # TODO: Enable bias stride.
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=grids,
+            NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size,
+            STREAMK_TILES=total_tiles_streamk,
+            BIAS=False,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+        )
 
     return c
 
@@ -286,7 +342,7 @@ def matmul_lt(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, config)
+        return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
     else:
         return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
 

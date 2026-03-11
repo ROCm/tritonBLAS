@@ -128,10 +128,7 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
-        if streamk:
-            self._grid = self._compute_sk_grid()
-        else:
-            self._grid = self._hardware.N_CU
+        self._grid = self._hardware.N_CU
 
         # Handle different origami API versions for workgroup mapping
         _wg_result = origami.select_workgroup_mapping(
