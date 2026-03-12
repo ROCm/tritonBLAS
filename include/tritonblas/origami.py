@@ -39,10 +39,10 @@ def estimate_triton_lds_bytes(
     block_m: int,
     block_n: int,
     block_k: int,
-    bytes_a: int,
-    bytes_b: int,
+    bytes_a: float,
+    bytes_b: float,
     num_stages: int = 2,
-) -> int:
+) -> float:
     """
     Estimate Triton kernel LDS (shared memory) usage in bytes.
 
@@ -86,8 +86,8 @@ def check_triton_lds_capacity(
     block_m: int,
     block_n: int,
     block_k: int,
-    bytes_a: int,
-    bytes_b: int,
+    bytes_a: float,
+    bytes_b: float,
     lds_capacity: int,
     num_stages: int = 2,
 ) -> bool:
@@ -107,10 +107,10 @@ class OrigamiMatmulSelector:
         block_m: int,
         block_n: int,
         block_k: int,
-        bytes_a: int,
-        bytes_b: int,
+        bytes_a: float,
+        bytes_b: float,
         num_stages: int = 2,
-    ) -> int:
+    ) -> float:
         """Class-level wrapper for estimate_triton_lds_bytes."""
         return estimate_triton_lds_bytes(
             block_m, block_n, block_k, bytes_a, bytes_b, num_stages
@@ -180,8 +180,8 @@ class OrigamiMatmulSelector:
                 return torch.iinfo(dtype).bits
 
         self._a_dtype_bitsize = get_dtype_bits(a_dtype)
-        self._b_dtype_bitsize = get_dtype_bits(a_dtype)
-        self._out_dtype_bitsize = get_dtype_bits(a_dtype)
+        self._b_dtype_bitsize = get_dtype_bits(b_dtype)
+        self._out_dtype_bitsize = get_dtype_bits(out_dtype)
 
         # For matrix instruction latency lookup, use input dtype (not output dtype)
         # because the matrix instruction type is determined by input operand types
@@ -217,8 +217,8 @@ class OrigamiMatmulSelector:
         # Origami's check_lds_capacity uses raw tile size only; Triton allocates
         # num_stages buffers with padding for bank conflicts.
         # LDS issues only affect largest tiles; smaller configs should always pass.
-        bytes_a = self._a_dtype_bitsize // 8
-        bytes_b = self._b_dtype_bitsize // 8
+        bytes_a = self._a_dtype_bitsize / 8
+        bytes_b = self._b_dtype_bitsize / 8
         lds_cap = self._hardware.lds_capacity
         self._configs = [
             c
