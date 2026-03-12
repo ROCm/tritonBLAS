@@ -13,7 +13,8 @@ import triton.language as tl
 import torch
 
 from tritonblas.kernels.stages import (
-    ScheduleContext, 
+    ScheduleContext,
+    make_schedule_context,
     GemmContext, 
     make_input_view,
     make_output_view,
@@ -52,7 +53,7 @@ def persistent_matmul(
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
     QUANTIZED: tl.constexpr = False,
-    ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    ALLOW_TF32: tl.constexpr = True,
 ):
     """
     Persistent GEMM kernel using GemmContext aggregate.
@@ -85,7 +86,7 @@ def persistent_matmul(
     # CREATE EPILOGUE VIEWS (optional scale and bias)
     # ════════════════════════════════════════════════════════════════════════
     scale_view = make_scale_view(A_scale_ptr, B_scale_ptr, M, N) if A_scale_ptr is not None else None
-    bias_view = make_bias_view(bias_ptr, M, stride_bias) if BIAS else None
+    bias_view = make_bias_view(bias_ptr, N, stride_bias) if BIAS else None
     
     # ════════════════════════════════════════════════════════════════════════
     # CONSTRUCT GEMM CONTEXT TO MANAGE MATH RELEVANT CONTEXT
@@ -101,7 +102,7 @@ def persistent_matmul(
     # ════════════════════════════════════════════════════════════════════════
     # CREATE SCHEDULE CONTEXT FROM GEMM CONTEXT TO MANAGE OUTER LOOP ITERATION
     # ════════════════════════════════════════════════════════════════════════
-    sched = ScheduleContext(M, N, K, ctx)
+    sched = make_schedule_context(M, N, K, ctx)
     
     # ════════════════════════════════════════════════════════════════════════
     # PERSISTENT LOOP: Process multiple tiles per workgroup
