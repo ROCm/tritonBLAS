@@ -63,11 +63,6 @@ jobs:
           ruff check include/ tests/ --output-format=github
         continue-on-error: true
 
-      - name: Run LDS estimation tests
-        run: |
-          export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
-          pytest tests/test_lds_estimation.py -v --tb=short --color=yes
-        
       - name: Run tests
         run: |
           export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
