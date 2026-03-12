@@ -159,16 +159,22 @@ class TestEstimateTritonLdsBytes:
         # A uses max(2300, 2552)=2552, B uses max(2300, 2296)=2300. per_stage=9704, total=19408
         assert lds == 19408
 
-    def test_fp16_same_as_bf16(self):
-        """FP16 and BF16 both use 2 bytes per element."""
-        block_m, block_n, block_k = 64, 64, 32
-        lds_bf16 = estimate_triton_lds_bytes(64, 64, 32, 2, 2, 2)
-        lds_fp16 = estimate_triton_lds_bytes(64, 64, 32, 2, 2, 2)
-        assert lds_bf16 == lds_fp16
+    def test_mixed_ab_dtypes(self):
+        """Mixed A/B byte sizes (e.g. f8 A with bf16 B) should differ from uniform."""
+        lds_uniform = estimate_triton_lds_bytes(64, 64, 32, 2, 2, 2)
+        lds_mixed = estimate_triton_lds_bytes(64, 64, 32, 1, 2, 2)
+        assert lds_mixed < lds_uniform
+        assert lds_mixed > 0
+
+    def test_sub_byte_dtype(self):
+        """Sub-byte types (e.g. f4 = 0.5 bytes) must produce non-zero LDS estimates."""
+        lds = estimate_triton_lds_bytes(128, 128, 64, 0.5, 0.5, 2)
+        assert lds > 0
+        lds_bf16 = estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2)
+        assert lds == lds_bf16 / 4
 
     def test_fp32_doubles_bf16(self):
         """FP32 uses 4 bytes, so LDS ~2x bf16 for same tile."""
-        block_m, block_n, block_k = 64, 64, 32
         lds_bf16 = estimate_triton_lds_bytes(64, 64, 32, 2, 2, 2)
         lds_fp32 = estimate_triton_lds_bytes(64, 64, 32, 4, 4, 2)
         assert lds_fp32 == lds_bf16 * 2
@@ -199,6 +205,11 @@ class TestCheckTritonLdsCapacity:
         fits_4 = check_triton_lds_capacity(128, 128, 64, 2, 2, 100000, 4)
         assert fits_2 is True
         assert fits_4 is False
+
+    def test_sub_byte_dtype_not_free(self):
+        """Sub-byte types (0.5 bytes/elem) must not pass capacity=0; LDS > 0."""
+        assert check_triton_lds_capacity(128, 128, 64, 0.5, 0.5, 0, 2) is False
+        assert check_triton_lds_capacity(256, 256, 128, 0.5, 0.5, 65536, 2) is False
 
 
 # N_CU -> expected LDS capacity (from origami common.hpp / hardware)
