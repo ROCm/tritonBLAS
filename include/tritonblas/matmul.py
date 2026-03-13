@@ -190,13 +190,14 @@ def streamk_matmul_lt(
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
 
-    # Use global buffers with optimized zeroing
-    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+    # Reuse pre-allocated global buffers at runtime, but allocate fresh during
+    # torch.compile tracing (FakeTensorMode cannot slice real tensors).
+    if not torch.compiler.is_compiling() and grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
         locks = _global_locks[:grids]
         P = _global_P[:grids, :block_size]
     else:
-        locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
-        P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
+        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
