@@ -190,9 +190,8 @@ def streamk_matmul_lt(
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
 
-    # Reuse pre-allocated global buffers at runtime, but allocate fresh during
-    # torch.compile tracing (FakeTensorMode cannot slice real tensors).
-    if not torch.compiler.is_compiling() and grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+    # Use global buffers with optimized zeroing
+    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
         locks = _global_locks[:grids]
         P = _global_P[:grids, :block_size]
     else:
