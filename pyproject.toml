@@ -21,6 +21,11 @@ dependencies = [
     "llnl-hatchet",
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "performance: marks tests as performance benchmarks (deselect with '-m \"not performance\"')",
+]
+
 [tool.ruff]
 line-length = 120
 exclude = ["reference"]
