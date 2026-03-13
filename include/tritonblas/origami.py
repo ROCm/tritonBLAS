@@ -1,7 +1,9 @@
-import torch
 import itertools
-from math import ceil
+import torch
 import origami
+import math
+from math import ceil
+
 
 # https://docs.pytorch.org/docs/stable/tensors.html
 dtype_to_str = {
@@ -16,9 +18,128 @@ dtype_to_str = {
     torch.float8_e5m2: "f8",
     torch.float8_e4m3fn: "f8",
 }
+# Add FP8 FNUZ variants if available (for non-gfx950 architectures)
+if hasattr(torch, "float8_e5m2fnuz"):
+    dtype_to_str[torch.float8_e5m2fnuz] = "f8"
+if hasattr(torch, "float8_e4m3fnuz"):
+    dtype_to_str[torch.float8_e4m3fnuz] = "f8"
+
+
+def _get_dtype_bits(dtype):
+    """Get bit size for both float and int dtypes."""
+    try:
+        return torch.finfo(dtype).bits
+    except TypeError:
+        return torch.iinfo(dtype).bits
+
+
+def _infer_mi_dimensions(hardware, a_bitsize, b_bitsize, block_mn_range, block_k_range):
+    """Infer matrix instruction dimensions and adjust block ranges based on hardware and dtype.
+
+    Returns (mi_dim, block_mn_range, block_k_range).
+    """
+    largest_bitsize = max(a_bitsize, b_bitsize)
+    mi_dim = None
+
+    # gfx950 (MI350X/MI355X)
+    if hardware.N_CU == 256:
+        if largest_bitsize == 32:
+            mi_dim = origami.dim3_t(16, 16, 4)
+        elif largest_bitsize == 16:
+            mi_dim = origami.dim3_t(16, 16, 32)
+        elif largest_bitsize <= 8:
+            mi_dim = origami.dim3_t(16, 16, 128)
+
+    # gfx942 (MI300X: 304 CUs, partitioned: 80/64 CUs)
+    is_gfx942 = hardware.N_CU in [304, 80, 64]
+    if is_gfx942:
+        if largest_bitsize == 32:
+            mi_dim = origami.dim3_t(16, 16, 4)
+        elif largest_bitsize == 16:
+            mi_dim = origami.dim3_t(16, 16, 16)
+        elif largest_bitsize == 8:
+            block_mn_range = block_mn_range + [512]
+            block_k_range = block_k_range + [128, 256]
+            mi_dim = origami.dim3_t(16, 16, 32)
+        elif largest_bitsize < 8:
+            raise ValueError("gfx942 doesn't support F4/F6")
+
+    # MI300A (228 CUs)
+    if hardware.N_CU == 228:
+        if largest_bitsize == 32:
+            mi_dim = origami.dim3_t(16, 16, 4)
+        elif largest_bitsize == 16:
+            mi_dim = origami.dim3_t(16, 16, 16)
+        elif largest_bitsize == 8:
+            block_mn_range = block_mn_range + [512]
+            block_k_range = block_k_range + [128, 256]
+            mi_dim = origami.dim3_t(16, 16, 32)
+        elif largest_bitsize < 8:
+            raise ValueError("MI300A doesn't support F4/F6")
+
+    # gfx90a (MI200)
+    if hardware.N_CU == 104:
+        if largest_bitsize == 32:
+            mi_dim = origami.dim3_t(16, 16, 4)
+        elif largest_bitsize == 16:
+            mi_dim = origami.dim3_t(16, 16, 16)
+        elif largest_bitsize == 8:
+            raise ValueError("MI200 doesn't support F8")
+        elif largest_bitsize < 8:
+            raise ValueError("MI200 doesn't support F4/F6")
+
+    if mi_dim is None:
+        raise ValueError(
+            f"No valid matrix instruction for {a_bitsize}-bit/{b_bitsize}-bit dtypes"
+        )
+
+    return mi_dim, block_mn_range, block_k_range
+
+
+def _generate_configs(block_mn_range, block_k_range, mi_dim, occupancy_range=None, streamk=False):
+    """Generate a list of origami config_t objects from block size ranges."""
+    if occupancy_range is None:
+        occupancy_range = [1]
+    configs = []
+    for blk_m, blk_n, blk_k, occ in itertools.product(
+        block_mn_range, block_mn_range, block_k_range, occupancy_range
+    ):
+        cfg = origami.config_t()
+        cfg.mt = origami.dim3_t(blk_m, blk_n, blk_k)
+        cfg.mi = mi_dim
+        cfg.occupancy = occ
+        if streamk:
+            cfg.grid_selection = origami.grid_selection_t.k_split_aware
+        else:
+            cfg.grid_selection = origami.grid_selection_t.data_parallel
+        configs.append(cfg)
+    return configs
+
+
+def _make_problem(m, n, k, a_dtype_str, b_dtype_str, out_dtype_str, mx_block_size=0):
+    """Create an origami problem_t from shape and dtype strings."""
+    problem = origami.problem_t()
+    problem.size = origami.dim3_t(m, n, k)
+    problem.batch = 1
+    problem.a_transpose = origami.transpose_t.T
+    problem.b_transpose = origami.transpose_t.N
+    problem.a_dtype = origami.string_to_datatype(a_dtype_str)
+    problem.b_dtype = origami.string_to_datatype(b_dtype_str)
+    problem.c_dtype = origami.string_to_datatype(out_dtype_str)
+    problem.d_dtype = origami.string_to_datatype(out_dtype_str)
+    problem.mi_dtype = origami.string_to_datatype(out_dtype_str)
+    problem.a_mx_block_size = mx_block_size
+    problem.b_mx_block_size = mx_block_size
+    return problem
 
 
 class MatmulHeuristicResult:
+    """Analytical GEMM config selector using the modern origami API.
+
+    Wraps origami.select_config() and origami.select_workgroup_mapping() to choose
+    optimal tile sizes (block_m/n/k) and workgroup mapping for a single GEMM problem.
+    """
+
     def __init__(
         self,
         m,
@@ -27,214 +148,71 @@ class MatmulHeuristicResult:
         a_dtype,
         b_dtype,
         c_dtype,
-        MI_dim=None,
-        mx_block_size=0,  # Number of MX datatype elements that share a scale
+        device_index=0,
+        mx_block_size=0,
         streamk=True,
     ):
-
-        # Set Instance Variables
         self.m = m
         self.n = n
         self.k = k
 
-        # Instantiate hardare information object
-        self.hardware = origami.get_hardware_for_device(0)
-        self.block_mn_range = [16, 32, 64, 128, 256]
-        self.block_k_range = [16, 32, 64, 128, 256, 512]
+        self.hardware = origami.get_hardware_for_device(device_index)
 
-        # Helper function to get bits for both float and int dtypes
-        def get_dtype_bits(dtype):
-            try:
-                return torch.finfo(dtype).bits
-            except TypeError:
-                return torch.iinfo(dtype).bits
-        
-        self.element_size_A = get_dtype_bits(a_dtype)
-        self.element_size_B = get_dtype_bits(b_dtype)
-        self.element_size_out = get_dtype_bits(c_dtype)
-        self.mi_dtype = dtype_to_str.get(c_dtype)
+        self.element_size_A = _get_dtype_bits(a_dtype)
+        self.element_size_B = _get_dtype_bits(b_dtype)
+        self.element_size_out = _get_dtype_bits(c_dtype)
 
-        # Infer Matrix Instruction Dimensions from datatypes
-        self.MI_dim = self._infer_matrix_instruction_dimensions(
-            self.element_size_A, self.element_size_B
-        )
+        # Resolve MI dtype for instruction lookup (use narrower input)
+        input_dtype_for_mi = a_dtype if self.element_size_A <= self.element_size_B else b_dtype
+        self.mi_dtype = dtype_to_str.get(input_dtype_for_mi, dtype_to_str.get(c_dtype))
+        self._out_dtype_str = dtype_to_str.get(c_dtype)
+        self._a_dtype_str = dtype_to_str.get(a_dtype)
+        self._b_dtype_str = dtype_to_str.get(b_dtype)
 
-        self.kernel_occupancy = [1]  # Number of WG possibly co-resident in a CU
         self.mx_block_size = mx_block_size
 
-        self.config = self._prepare_config()
+        # Infer MI dimensions and adjust block ranges
+        block_mn_range = [16, 32, 64, 128, 256]
+        block_k_range = [16, 32, 64, 128, 256, 512]
+        mi_dim, block_mn_range, block_k_range = _infer_mi_dimensions(
+            self.hardware, self.element_size_A, self.element_size_B,
+            block_mn_range, block_k_range
+        )
+
+        # Generate configs and select best
+        configs = _generate_configs(block_mn_range, block_k_range, mi_dim, streamk=streamk)
+        problem = _make_problem(m, n, k, self._a_dtype_str, self._b_dtype_str,
+                                self._out_dtype_str, mx_block_size)
+
+        self._result = origami.select_config(problem, self.hardware, configs)
 
         # Grid model constants
         self.split_factors = [8, 6, 4, 3, 2, 1]
-
-        self.tile_fractions = [
-            0.0,
-            1.0 / 2.0,
-            1.0 / 8.0,
-            1.0 / 5.0,
-            1.0 / 4.0,
-            1.0 / 3.0,
-        ]
+        self.tile_fractions = [0.0, 0.5, 0.125, 0.2, 0.25, 1.0 / 3.0]
         self.max_workspace = 128 * 1024 * 1024
 
+        # Compute workgroup mapping
         if streamk:
-            self.grid = self.compute_sk_grid()
+            self.grid = self._compute_sk_grid()
         else:
             self.grid = self.hardware.N_CU
 
-    def _infer_matrix_instruction_dimensions(self, element_size_A, element_size_B):
-        """
-        Infers the matrix instruction dimensions based on the hardware configuration
-        and the sizes of the input data types.
-
-        Parameters:
-            element_size_A (int): The size (in bits) of the elements in matrix A.
-            element_size_B (int): The size (in bits) of the elements in matrix B.
-
-        Returns:
-            list[int]: A list representing the matrix instruction dimensions [M, N, K].
-
-        Raises:
-            ValueError: If the hardware architecture is unsupported or if the data type
-            sizes are not compatible with the detected hardware.
-        """
-        MI_dim = None
-        # gfx950
-        if self.hardware.N_CU == 256:
-            # FP32
-            if max(element_size_A, element_size_B) == 32:
-                MI_dim = [16, 16, 4]
-            # FP16/BF16
-            if max(element_size_A, element_size_B) == 16:
-                MI_dim = [16, 16, 32]
-            # F4F6F8
-            if max(element_size_A, element_size_B) <= 8:
-                MI_dim = [16, 16, 128]
-        # gfx942
-        if self.hardware.N_CU == 304:
-            # FP32
-            if max(element_size_A, element_size_B) == 32:
-                MI_dim = [16, 16, 4]
-            # FP16/BF16
-            if max(element_size_A, element_size_B) == 16:
-                MI_dim = [16, 16, 16]
-            # F8
-            if max(element_size_A, element_size_B) == 8:
-                MI_dim = [16, 16, 32]
-                self.block_mn_range = self.block_mn_range + [512]
-                self.block_k_range = self.block_k_range + [128, 256]
-
-            # F4F6 -> Unsupported on MI300X
-            if max(element_size_A, element_size_B) < 8:
-                raise ValueError("MI300X doesn't support F4/F6")
-
-        if self.hardware.N_CU == 228:
-            # FP32
-            if max(element_size_A, element_size_B) == 32:
-                MI_dim = [16, 16, 4]
-            # FP16/BF16
-            if max(element_size_A, element_size_B) == 16:
-                MI_dim = [16, 16, 16]
-            # F8
-            if max(element_size_A, element_size_B) == 8:
-                MI_dim = [16, 16, 32]
-                self.block_mn_range = self.block_mn_range + [512]
-                self.block_k_range = self.block_k_range + [128, 256]
-
-            # F4F6 -> Unsupported on MI300A
-            if max(element_size_A, element_size_B) < 8:
-                raise ValueError("MI300A doesn't support F4/F6")
-            
-        if self.hardware.N_CU == 104:
-            # FP32
-            if max(element_size_A, element_size_B) == 32:
-                MI_dim = [16, 16, 4]
-            # FP16/BF16
-            if max(element_size_A, element_size_B) == 16:
-                MI_dim = [16, 16, 16]
-            if max(element_size_A, element_size_B) == 8:
-                raise ValueError("MI200 doesn't support F8")
-
-            if max(element_size_A, element_size_B) < 8:
-                raise ValueError("MI200 doesn't support F4/F6")
-            
-        # Architecture Detected is not valid
-        if MI_dim == None:
-            raise ValueError(
-                f"No Valid Matrix Instruction integrated for {element_size_A}-bit or {element_size_B}-bit datatypes"
+        try:
+            _mode, self._xcc_wgm, self._wgm = origami.select_workgroup_mapping(
+                problem, self.hardware, self._result.config, self.grid
             )
-        return MI_dim
-
-    def _get_valid_tiles(self):
-        return list(
-            itertools.product(
-                self.block_mn_range,
-                self.block_mn_range,
-                self.block_k_range,
-                [self.MI_dim[0]],  # MI_M
-                [self.MI_dim[1]],  # MI_N
-                [self.MI_dim[2]],  # MI_K
-                self.kernel_occupancy,
+        except (ValueError, TypeError):
+            self._xcc_wgm, self._wgm = origami.select_workgroup_mapping(
+                problem, self.hardware, self._result.config, self.grid
             )
+
+        # Store as tuple for backward compatibility
+        self.config = (
+            self._result.config.mt.m,
+            self._result.config.mt.n,
+            self._result.config.mt.k,
+            self._wgm,
         )
-
-    def _get_gsize_m(self, BLK_M, BLK_N, BLK_K):
-        results = origami.select_best_wgm(
-            self.m,  # M
-            self.n,  # N
-            self.k,  # K
-            1,  # batch
-            self.hardware,  # Hardware
-            BLK_M,  # MT_M
-            BLK_N,  # MT_N
-            BLK_K,  # MT_K
-            self.MI_dim[0],  # MI_M
-            self.MI_dim[1],  # MI_N
-            self.MI_dim[2],  # MI_K
-            [1, 2, 4, 6, 8],  # WGM List
-            self.element_size_A,  # element size
-            0.8,  # H_L2
-            False,  # debug
-            False,  # Print
-        )
-        return results[1]
-
-    def _get_best_tile_size(self):
-        valid_tiles = self._get_valid_tiles()
-        results = origami.select_best_macro_tile_size(
-            self.m,  # M
-            self.n,  # N
-            self.k,  # K
-            1,  # Batch
-            True,  # transA
-            False,  # transB
-            self.hardware,  # Hardware
-            valid_tiles,  # Tile List
-            self.element_size_A,  # Element Size A
-            self.element_size_B,  # Element Size B
-            self.element_size_out,  # Element Size Out
-            origami.string_to_datatype(self.mi_dtype),  # MI Data Type
-            self.mx_block_size,  # MX Block Size
-            0.8,  # H_L2
-            False,  # debug
-            False,  # Print
-            6,  # WGM
-        )
-
-        best_result = results[0]
-
-        # Heuristic weightin to different tiles
-        if self.hardware.N_CU == 304:
-            if best_result[1] == 256 and best_result[2] == 256:
-                if results[0][0] * 1.00 > results[1][0]:
-                    best_result = results[1]
-
-        return (best_result[1], best_result[2], best_result[3])
-
-    def _prepare_config(self):
-        BLK_M, BLK_N, BLK_K = self._get_best_tile_size()
-        gsize_m = self._get_gsize_m(BLK_M, BLK_N, BLK_K)
-        return BLK_M, BLK_N, BLK_K, gsize_m
 
     def get_config(self):
         return self.config
@@ -242,89 +220,126 @@ class MatmulHeuristicResult:
     def get_grid(self):
         return self.grid
 
-    def partial_tile_size(self, sk_grid: int) -> int:
-        """
-        Python equivalent of ContractionSolution::partialTileSize.
+    @property
+    def block_m(self):
+        return self._result.config.mt.m
 
-        workspaceSizePerElemC = (element_size_out bits) / 8 → bytes per output element
+    @property
+    def block_n(self):
+        return self._result.config.mt.n
 
-        tileSize = BLK_M * BLK_N * workspaceSizePerElemC
-        return tileSize * sk_grid
-        """
-        # get the macro-tile dims you already compute
-        BLK_M, BLK_N, _, GSIZE = self.get_config()
+    @property
+    def block_k(self):
+        return self._result.config.mt.k
 
-        # bytes per C element
+    @property
+    def group_m(self):
+        return self._wgm
+
+    def partial_tile_size(self, sk_grid):
+        BLK_M, BLK_N = self.block_m, self.block_n
         bytes_per_elem = self.element_size_out // 8
+        return BLK_M * BLK_N * bytes_per_elem * sk_grid
 
-        # size of one partial tile per WG
-        tile_size = BLK_M * BLK_N * bytes_per_elem
-
-        # scale by the number of partial‑tiles per WG
-        return tile_size * sk_grid
-
-    def compute_sk_grid(self):
-        """
-        Implements the dynamic‐grid mode logic
-        """
-        config = self.config
+    def _compute_sk_grid(self):
+        M, N, K = self.m, self.n, self.k
+        BLK_M, BLK_N, BLK_K = self.block_m, self.block_n, self.block_k
         cu_count = self.hardware.N_CU
-        BLK_M = config[0]
-        BLK_N = config[1]
-        BLK_K = config[2]
-        # Fallback if no better fractional split is found
-        tiles = ceil(self.m / BLK_M) * ceil(self.n / BLK_N)
-        sk_grid = tiles
-        iters_per_tile = max(1, ceil(self.k / BLK_K))
 
-        # More tiles than CUs: try fractional splits to distribute work
+        tiles = ceil(M / BLK_M) * ceil(N / BLK_N)
+        sk_grid = tiles
+        iters_per_tile = max(1, ceil(K / BLK_K))
+
         if tiles > cu_count:
             virt_cu_count = cu_count
-            # if size_mapping.CUOccupancy > 1:
-            # virt_cu_count *= size_mapping.CUOccupancy
-
-            # Try these fractional denominators in order
-            tile_fractions = self.tile_fractions
             min_even_tiles = tiles / virt_cu_count
-
-            for frac in tile_fractions:
-                # Compute candidate grid with rounding
+            for frac in self.tile_fractions:
                 frac_grid = int((tiles / (min_even_tiles + frac)) + 0.5)
-
-                # Skip if this split leaves a remainder AND workspace is too large
-                if (
-                    tiles % frac_grid != 0
-                    and self.partial_tile_size(frac_grid) > self.max_workspace
-                ):
+                if tiles % frac_grid != 0 and self.partial_tile_size(frac_grid) > self.max_workspace:
                     continue
-
-                # Accept the first grid no larger than the virtual CU count
                 if frac_grid <= virt_cu_count:
                     sk_grid = frac_grid
                     break
-
-        # Fewer tiles than CUs: split along k-dimension up to some factor
         elif tiles < cu_count:
-            split_factors = self.split_factors
-            for factor in split_factors:
+            for factor in self.split_factors:
                 split_grid = tiles * factor
                 iters_per_cu = iters_per_tile // factor
-
                 if split_grid <= cu_count and iters_per_cu >= 8:
                     sk_grid = split_grid
                     break
 
-        # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
         if tiles % sk_grid != 0:
             sk_grid = tiles
 
-        if tiles >= self.hardware.N_CU:
-            last_wave_remainder = tiles % self.hardware.N_CU
-            last_wave_occupancy = last_wave_remainder / self.hardware.N_CU
+        if tiles >= cu_count:
+            last_wave_remainder = tiles % cu_count
+            is_gfx942 = cu_count in [304, 80, 64]
+            if last_wave_remainder < 128 and last_wave_remainder > 0 and is_gfx942:
+                sk_grid = 256 if cu_count == 304 else 64
 
-            # Really bad last wave, which would have originally been compensated for
-            # by changing tile size, but triton tile sizes are limited
-            if last_wave_remainder < 128 and last_wave_remainder > 0 and self.hardware.N_CU == 304:
-                sk_grid = 256
         return sk_grid
+
+
+class GroupedGemmSelector:
+    """Analytical config selector for grouped GEMM using origami's grouped prediction.
+
+    Uses origami.select_config_grouped() to find the optimal single tile configuration
+    across all groups in a grouped GEMM problem.
+    """
+
+    def __init__(self, group_shapes, a_dtype, b_dtype, c_dtype, device_index=0):
+        """
+        Args:
+            group_shapes: List of (M, N, K) tuples, one per group.
+            a_dtype: torch dtype for A matrices.
+            b_dtype: torch dtype for B matrices.
+            c_dtype: torch dtype for C matrices.
+            device_index: CUDA device index.
+        """
+        self.group_shapes = group_shapes
+        self.hardware = origami.get_hardware_for_device(device_index)
+
+        a_bits = _get_dtype_bits(a_dtype)
+        b_bits = _get_dtype_bits(b_dtype)
+
+        a_dtype_str = dtype_to_str.get(a_dtype)
+        b_dtype_str = dtype_to_str.get(b_dtype)
+        c_dtype_str = dtype_to_str.get(c_dtype)
+
+        # Infer MI dimensions
+        block_mn_range = [16, 32, 64, 128, 256]
+        block_k_range = [16, 32, 64, 128, 256, 512]
+        mi_dim, block_mn_range, block_k_range = _infer_mi_dimensions(
+            self.hardware, a_bits, b_bits, block_mn_range, block_k_range
+        )
+
+        # Generate configs
+        configs = _generate_configs(block_mn_range, block_k_range, mi_dim)
+
+        # Build grouped problem (assign list at once - nanobind returns a copy on .groups access)
+        grouped_problem = origami.grouped_problem_t()
+        problems = []
+        for m, n, k in group_shapes:
+            problems.append(_make_problem(m, n, k, a_dtype_str, b_dtype_str, c_dtype_str))
+        grouped_problem.groups = problems
+
+        # Select best config for the grouped problem
+        self._result = origami.select_config_grouped(
+            grouped_problem, self.hardware, configs
+        )
+
+    @property
+    def block_m(self):
+        return self._result.config.mt.m
+
+    @property
+    def block_n(self):
+        return self._result.config.mt.n
+
+    @property
+    def block_k(self):
+        return self._result.config.mt.k
+
+    def get_config(self):
+        """Return (BLK_M, BLK_N, BLK_K) tuple."""
+        return (self.block_m, self.block_n, self.block_k)

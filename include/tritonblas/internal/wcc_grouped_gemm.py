@@ -37,6 +37,7 @@ def accumulate_partials(
     tile_id,
     tile_offset,
     work_tile,
+    g_start,
     partials,
     P,
     locks,
@@ -56,7 +57,9 @@ def accumulate_partials(
         tl.store(locks + pid, 1, cache_modifier=".wt")
     # Only the pid processing the first tile does the reduction
     else:
-        tile_iter = tile_id * work_tile
+        # Convert local tile_id to global iteration range for consistent comparison
+        # with global PID start/end indices
+        tile_iter = tile_id * work_tile + g_start
         next_pid = pid + 1
         tile_iter_end = tile_iter + work_tile
         end = end_index
@@ -185,6 +188,7 @@ def wcc_groupgemm(
     GROUP_SIZE_M: tl.constexpr,
     NUM_PRGMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
+    MATMUL_DTYPE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -196,6 +200,7 @@ def wcc_groupgemm(
     for g in range(group_size):
         # Check to see if this pid needs to process the "g th" gemm
         g_val = tl.load(gemm_offsets + g + 1)
+        g_start = tl.load(gemm_offsets + g)
         if start_index < g_val and start_index != last_iter:
             # If it does, find the end of that gemm
             last_index = tl.minimum(last_iter, g_val)
@@ -206,9 +211,9 @@ def wcc_groupgemm(
                 N = tl.load(group_gemm_sizes + g * 3 + 1)
                 K = tl.load(group_gemm_sizes + g * 3 + 2)
 
-                A = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
-                B = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
-                C = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
+                A = tl.load(group_a_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
+                B = tl.load(group_b_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
+                C = tl.load(group_c_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
 
                 stride_am = tl.load(g_lds + g * 6)
                 stride_ak = tl.load(g_lds + g * 6 + 1)
@@ -221,48 +226,44 @@ def wcc_groupgemm(
                 num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
                 work_tile = tl.cdiv(K, BLOCK_SIZE_K)
 
-                acc_dtype = tl.float32  # if C.type.element_ty != tl.int8 else tl.int32
-                end_index, tile_id, tile_offset = per_iter_indices(start_index, last_index, work_tile)
+                acc_dtype = tl.float32
+                # Convert global start_index to group-local index for tile_id computation
+                local_start = start_index - g_start
+                local_last = last_index - g_start
+                end_index_local, tile_id, tile_offset = per_iter_indices(local_start, local_last, work_tile)
+                end_index = end_index_local + g_start
 
                 pid_m = tile_id // num_pid_n
                 pid_n = tile_id % num_pid_n
                 tl.assume(pid_m >= 0)
                 tl.assume(pid_n >= 0)
 
-                rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-                rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+                rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
                 rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
                 rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
                 rk = tl.arange(0, BLOCK_SIZE_K)
 
-                """
-                The following two lines, support all transpose types, however the triton compiler is unable to optimize
-                it, leading to 'short' loads rather than 'dwordx4' loads
-                A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak + BLOCK_SIZE_K * stride_ak * remainder
-                B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn + BLOCK_SIZE_K * stride_bk * remainder
-                """
+                mask_m = rm < M
+                mask_n = rn < N
+
                 A_BASE = A + rm[:, None] * stride_am + rk[None, :] + (BLOCK_SIZE_K * tile_offset)
                 B_BASE = B + rk[:, None] * stride_bk + rn[None, :] + (BLOCK_SIZE_K * stride_bk * tile_offset)
                 partials = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-                for current_iter in range(start_index, end_index):
-                    """
-                    The following masking logic is omitted because it leads to 'short' loads rather than 'dwordx4' loads
-                    However, it has been tested and can be added back anytime
-                    """
-                    # global_k_offset = (current_iter % work_tile) * BLOCK_SIZE_K
-                    # mask = global_k_offset + rk < K
+                for current_iter in range(local_start, end_index_local):
+                    k_offset = (current_iter % work_tile) * BLOCK_SIZE_K
+                    mask_k = k_offset + rk < K
+                    a_mask = mask_m[:, None] & mask_k[None, :]
+                    b_mask = mask_k[:, None] & mask_n[None, :]
                     A_BASE = tl.multiple_of(A_BASE, (16, 16))
                     B_BASE = tl.multiple_of(B_BASE, (16, 16))
-                    a = tl.load(A_BASE)
-                    b = tl.load(B_BASE)
-                    # do the actual gemm computation
+                    a = tl.load(A_BASE, mask=a_mask, other=0.0)
+                    b = tl.load(B_BASE, mask=b_mask, other=0.0)
                     partials += tl.dot(a, b)
-                    # The following line has been omitted to make sure loads are 'dwordx4'
-                    # A_BASE += BLOCK_SIZE_K * stride_ak
                     A_BASE += BLOCK_SIZE_K
                     B_BASE += BLOCK_SIZE_K * stride_bk
 
-                # work_fixup()
+                # Stream-K partial accumulation
                 partials = accumulate_partials(
                     pid,
                     start_index,
@@ -270,6 +271,7 @@ def wcc_groupgemm(
                     tile_id,
                     tile_offset,
                     work_tile,
+                    g_start,
                     partials,
                     P,
                     locks,
@@ -279,22 +281,17 @@ def wcc_groupgemm(
                     streamk_tiles_pcu,
                     streamk_remainder_tiles,
                 )
-                # Only the pid which does the first chunk of the tiles, stores the whole tile to output
+                # Only the pid which does the first chunk of the tile stores to output
                 if tile_offset == 0:
                     c = partials.to(C.type.element_ty)
-                    rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-                    rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+                    rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                    rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
                     rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
                     rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-                    C_ = C + rm[:, None] * stride_cm + rn[None, :]
-                    """
-                    The following two lines are omitted because they cause the stores to be 'short' rather than
-                    'dwordx2', however, they are tested and can be added back anytime
                     C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-                    mask = (rm < M)[:, None] & (rn < N)[None, :]
-                    """
+                    c_mask = (rm < M)[:, None] & (rn < N)[None, :]
                     C_ = tl.multiple_of(C_, (16, 16))
-                    tl.store(C_, c)
+                    tl.store(C_, c, mask=c_mask)
 
                 start_index = end_index
 
@@ -326,6 +323,7 @@ def grouped_matmul_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    MATMUL_DTYPE: tl.constexpr,
 ):
     tile_idx = tl.program_id(0)
     last_problem_end = 0
@@ -344,9 +342,9 @@ def grouped_matmul_kernel(
             lda = tl.load(g_lds + g * 3)
             ldb = tl.load(g_lds + g * 3 + 1)
             ldc = tl.load(g_lds + g * 3 + 2)
-            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
-            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
-            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
+            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
+            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
+            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
             # figure out tile coordinates
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
@@ -359,24 +357,25 @@ def grouped_matmul_kernel(
             a_ptrs = a_ptr + offs_am[:, None] * lda + offs_k[None, :]
             b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_bn[None, :]
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+            mask_m = offs_am < gm
+            mask_n = offs_bn < gn
             for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
                 # hint to Triton compiler to do proper loop pipelining
                 tl.multiple_of(a_ptrs, [16, 16])
                 tl.multiple_of(b_ptrs, [16, 16])
-                # assume full tile for now
-                a = tl.load(a_ptrs)
-                b = tl.load(b_ptrs)
+                mask_k = kk * BLOCK_SIZE_K + offs_k < k
+                a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+                b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
                 accumulator += tl.dot(a, b)
                 a_ptrs += BLOCK_SIZE_K
                 b_ptrs += BLOCK_SIZE_K * ldb
-            c = accumulator.to(tl.float16)
+            c = accumulator.to(MATMUL_DTYPE)
 
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
-
-            # assumes full tile for now
-            tl.store(c_ptrs, c)
+            c_mask = (offs_cm < gm)[:, None] & (offs_cn < gn)[None, :]
+            tl.store(c_ptrs, c, mask=c_mask)
 
             # go to the next tile by advancing NUM_SM
             tile_idx += NUM_SM
