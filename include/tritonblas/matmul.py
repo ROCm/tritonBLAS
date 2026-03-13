@@ -398,223 +398,208 @@ def matmul_a8w8(
     else:
         return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
 
+def persistent_matmul_fp4(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    selector,
+):
+    M, K_packed = a.shape
+    N = b.shape[0]
+    K = K_packed * 2
+
+    BLK_M    = selector.block_m
+    BLK_N    = selector.block_n
+    BLK_K    = selector.block_k
+    gsize_m  = max(1, selector.group_m)
+    num_xcds = max(1, selector.num_sms)
+    num_stages = getattr(selector, "num_stages", 2)
+
+    if BLK_M < M:
+        BLK_M = 128
+    if BLK_N < N:
+        BLK_N = 128
+    if BLK_K < K:
+        BLK_K = 128
+
+    assert b.shape[1] * 2 == K, f"Incompatible Dimensions: A has K={K}, B has K={b.shape[1] * 2}"
+    assert BLK_K % 64 == 0, "BLOCK_K must be multiple of 64 for FP4"
+
+    b = b.T
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+
+    chunk_size = gsize_m * gsize_m
+    chunk_size = min(chunk_size, max(1, total_tiles // max(1, num_xcds)))
+
+    fp4_matmul[(total_tiles,)](
+        a, b, c, a_scales, b_scales,
+        M, N, K,
+        a.stride(0), a.stride(1),
+        b.stride(0), b.stride(1),
+        c.stride(0), c.stride(1),
+        a_scales.stride(0), a_scales.stride(1),
+        b_scales.stride(0), b_scales.stride(1),
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=total_tiles,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        num_stages=num_stages,
+        num_warps=8,
+    )
+
+    return c
+
+
+def streamk_matmul_fp4(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    selector,
+    sk_grid: Optional[int] = None,
+):
+    M, K_packed = a.shape
+    N = b.shape[0]
+    K = K_packed * 2
+
+    BLK_M    = selector.block_m
+    BLK_N    = selector.block_n
+    BLK_K    = selector.block_k
+    gsize_m  = max(1, selector.group_m)
+    num_xcds = max(1, selector.num_sms)
+    num_stages = getattr(selector, "num_stages", 2)
+
+    if BLK_M < M:
+        BLK_M = 128
+    if BLK_N < N:
+        BLK_N = 128
+    if BLK_K < K:
+        BLK_K = 128
+
+    assert b.shape[1] * 2 == K, f"Incompatible Dimensions: A has K={K}, B has K={b.shape[1] * 2}"
+    assert BLK_K % 64 == 0, "BLOCK_K must be multiple of 64 for FP4"
+
+    b = b.T
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+
+    chunk_size = gsize_m * gsize_m
+    chunk_size = min(chunk_size, max(1, total_tiles // max(1, num_xcds)))
+
+    total_programs_streamk = sk_grid if sk_grid is not None else selector.sk_grid
+    total_tiles_streamk = total_tiles % total_programs_streamk
+
+    # Fall back to standard kernel when Stream-K overhead outweighs benefit
+    REMAINDER_THRESHOLD = 32
+    small_remainder = (
+        sk_grid is None
+        and total_tiles_streamk > 0
+        and total_tiles_streamk < REMAINDER_THRESHOLD
+    )
+    if total_tiles_streamk == 0 or small_remainder:
+        fp4_matmul[(total_tiles,)](
+            a, b, c, a_scales, b_scales,
+            M, N, K,
+            a.stride(0), a.stride(1),
+            b.stride(0), b.stride(1),
+            c.stride(0), c.stride(1),
+            a_scales.stride(0), a_scales.stride(1),
+            b_scales.stride(0), b_scales.stride(1),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=total_tiles,
+            NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size,
+            num_stages=num_stages,
+            num_warps=8,
+        )
+        return c
+
+    grids = total_programs_streamk
+    block_size = BLK_M * BLK_N
+
+    if not torch.compiler.is_compiling() and grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+        locks = _global_locks[:grids]
+        P = _global_P[:grids, :block_size]
+    else:
+        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
+
+    streamk_chunk_size = min(chunk_size, max(1, grids // max(1, num_xcds)))
+
+    fp4_streamk_matmul[(grids,)](
+        a, b, c, a_scales, b_scales,
+        P, locks,
+        M, N, K,
+        a.stride(0), a.stride(1),
+        b.stride(0), b.stride(1),
+        c.stride(0), c.stride(1),
+        a_scales.stride(0), a_scales.stride(1),
+        b_scales.stride(0), b_scales.stride(1),
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=grids,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=streamk_chunk_size,
+        STREAMK_TILES=total_tiles_streamk,
+        EVEN_K=(K % BLK_K == 0),
+        num_stages=num_stages,
+        num_warps=8,
+    )
+
+    return c
+
+
 def matmul_fp4(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
     a_scales: torch.Tensor,
     b_scales: torch.Tensor,
-    block_m: int = None, #Overrides Origami value
-    block_n: int = None, #Overrides Origami value
-    block_k: int = None, #Overrides Origami value
-    group_size_m: int = 8, #Overrides Origami value
-    num_warps: int = 8,
-    num_stages: int = 2,
     enable_streamk: bool = False,
     sk_grid: Optional[int] = None,
 ):
     """
     FP4 matrix multiplication: C = A @ B
-    
+
     Args:
         a: Input matrix A in FP4 format (M, K//2), packed 2 elements per uint8
         b: Input matrix B in FP4 format (N, K//2), packed 2 elements per uint8
         c: Output matrix C (M, N) in bfloat16 or float16
         a_scales: Scales for A in e8m0 format (M, K // 32)
         b_scales: Scales for B in e8m0 format (N, K // 32)
-        block_m: Block size for M dimension
-        block_n: Block size for N dimension
-        block_k: Block size for K dimension (must be multiple of 64 for FP4)
-        group_size_m: Group size for M dimension tiling
-        num_warps: Number of warps per thread block (default: 8)
-        num_stages: Number of pipeline stages (default: 2)
-        enable_streamk: Use Stream-K load balancing for partial tiles (default: False)
+        enable_streamk: Use Stream-K load balancing (default: False)
         sk_grid: Override Stream-K grid size when enable_streamk=True
-    
-    Returns:
-        Output matrix C
     """
-
     M, K_packed = a.shape
-    _, N = b.shape
-    K = K_packed * 2  # Unpacked K dimension for selector
-    
-    num_xcds = 8
-    num_stages = 2
+    N = b.shape[0]
+    K = K_packed * 2
 
-    if(block_m == None):
-        selector = _make_matmul_selector(
-            M, N, K, "f4", "f4", c.dtype, a.device,
-            mx_block_size=32,
-            streamk=enable_streamk,
-        )
-        block_m      = selector.block_m
-        block_n      = selector.block_n
-        block_k      = selector.block_k
-        group_size_m = max(1, selector.group_m)
-        num_xcds     = max(1, selector.num_sms)
-        num_stages   = getattr(selector, "num_stages", 2)
-        if(block_m < M):
-            block_m=128
-        if(block_n < N):
-            block_n=128
-        if(block_k < K):
-            block_k=128
-        #print(f"Selected {block_m}x{block_n}x{block_k}")
-    # M, N, K already set (K is unpacked)
-    N = b.shape[0]  # B has shape (N, K//2)
-    
-    # Verify dimensions are compatible
-    assert b.shape[1] * 2 == K, f"Incompatible Dimensions: A has K={K}, B has K={b.shape[1] * 2}"
-    
-    # Transpose B to match kernel expectations (kernel expects B as K x N)
-    b = b.T
-    
-    # Ensure block_k is appropriate for FP4 (must be multiple of 64)
-    assert block_k % 64 == 0, "BLOCK_K must be multiple of 64 for FP4"
-    
-    total_blocks_M = triton.cdiv(M, block_m)
-    total_blocks_N = triton.cdiv(N, block_n)
-    total_tiles = total_blocks_M * total_blocks_N
-    
-    # Set chunk size to same area as L2 tiles
-    chunk_size = group_size_m * group_size_m
-    chunk_size = min(chunk_size, max(1, total_tiles // max(1, num_xcds)))
-    
+    selector = _make_matmul_selector(
+        M, N, K, "f4", "f4", c.dtype, a.device,
+        mx_block_size=32,
+        streamk=enable_streamk,
+    )
+
     if enable_streamk:
-        if sk_grid is not None:
-            total_programs_streamk = sk_grid
-        elif block_m is not None:
-            # User provided blocks - use heuristic (selector has different block sizes)
-            total_programs_streamk = min(total_tiles, MAX_SMS)
-        else:
-            total_programs_streamk = selector.sk_grid
-        total_tiles_streamk = total_tiles % total_programs_streamk
-
-        # Use standard kernel when Stream-K partial-tile overhead outweighs benefit:
-        # - No remainder: standard has same parallelism, no P/locks/aggregation overhead
-        # - Small remainder (<32 tiles): P buffer, locks, aggregation overhead dominates
-        # Skip when user explicitly passed sk_grid (e.g. for testing Stream-K path)
-        REMAINDER_THRESHOLD = 32
-        small_remainder = (
-            sk_grid is None
-            and total_tiles_streamk > 0
-            and total_tiles_streamk < REMAINDER_THRESHOLD
-        )
-        if total_tiles_streamk == 0 or small_remainder:
-            grid = (total_tiles,)
-            fp4_matmul[grid](
-                a,
-                b,
-                c,
-                a_scales,
-                b_scales,
-                M,
-                N,
-                K,
-                a.stride(0),
-                a.stride(1),
-                b.stride(0),
-                b.stride(1),
-                c.stride(0),
-                c.stride(1),
-                a_scales.stride(0),
-                a_scales.stride(1),
-                b_scales.stride(0),
-                b_scales.stride(1),
-                BLOCK_SIZE_M=block_m,
-                BLOCK_SIZE_N=block_n,
-                BLOCK_SIZE_K=block_k,
-                GROUP_SIZE_M=group_size_m,
-                NUM_SMS=total_tiles,
-                NUM_XCDS=num_xcds,
-                CHUNK_SIZE=chunk_size,
-                num_stages=num_stages,
-                num_warps=8,
-            )
-            return c
-
-        grids = total_programs_streamk
-        block_size = block_m * block_n
-
-        if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
-            locks = _global_locks[:grids]
-            P = _global_P[:grids, :block_size]
-        else:
-            locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
-            P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
-
-        streamk_chunk_size = min(chunk_size, max(1, grids // max(1, num_xcds)))
-
-        num_stages = getattr(selector, "num_stages", 2) if block_m is None else 2
-        num_warps = 8
-
-        fp4_streamk_matmul[(grids,)](
-            a,
-            b,
-            c,
-            a_scales,
-            b_scales,
-            P,
-            locks,
-            M,
-            N,
-            K,
-            a.stride(0),
-            a.stride(1),
-            b.stride(0),
-            b.stride(1),
-            c.stride(0),
-            c.stride(1),
-            a_scales.stride(0),
-            a_scales.stride(1),
-            b_scales.stride(0),
-            b_scales.stride(1),
-            BLOCK_SIZE_M=block_m,
-            BLOCK_SIZE_N=block_n,
-            BLOCK_SIZE_K=block_k,
-            GROUP_SIZE_M=group_size_m,
-            NUM_SMS=grids,
-            NUM_XCDS=num_xcds,
-            CHUNK_SIZE=streamk_chunk_size,
-            STREAMK_TILES=total_tiles_streamk,
-            EVEN_K=(K % block_k == 0),
-            num_stages=num_stages,
-            num_warps=num_warps,
-        )
+        return streamk_matmul_fp4(a, b, c, a_scales, b_scales, selector, sk_grid=sk_grid)
     else:
-        grid = (total_tiles,)
-        fp4_matmul[grid](
-            a,
-            b,
-            c,
-            a_scales,
-            b_scales,
-            M,
-            N,
-            K,
-            a.stride(0),
-            a.stride(1),
-            b.stride(0),
-            b.stride(1),
-            c.stride(0),
-            c.stride(1),
-            a_scales.stride(0),
-            a_scales.stride(1),
-            b_scales.stride(0),
-            b_scales.stride(1),
-            BLOCK_SIZE_M=block_m,
-            BLOCK_SIZE_N=block_n,
-            BLOCK_SIZE_K=block_k,
-            GROUP_SIZE_M=group_size_m,
-            NUM_SMS=total_tiles,
-            NUM_XCDS=num_xcds,
-            CHUNK_SIZE=chunk_size,
-            num_stages=num_stages,
-            num_warps=num_warps,
-        )
-    
-    return c
+        return persistent_matmul_fp4(a, b, c, a_scales, b_scales, selector)
 
 
 @triton_op("tritonblas::_addmm", mutates_args={})
