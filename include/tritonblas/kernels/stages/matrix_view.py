@@ -358,8 +358,12 @@ def make_input_view(ptr, rows, cols, stride_row, stride_col):
     # ═══════════════════════════════════════════════════════════════════════
     rows_t = rows + 0 * rows
     cols_t = cols + 0 * rows
-    stride_row_t = stride_row + 0 * rows
-    stride_col_t = stride_col + 0 * rows
+    # Cast strides to int64 to avoid int32 overflow for large tensors.
+    # When max_row * stride_row > 2^31, int32 pointer arithmetic wraps around
+    # and causes GPU memory access faults.
+    # See https://github.com/ROCm/aiter/pull/597 for rationale on tl.cast.
+    stride_row_t = tl.cast(stride_row + 0 * rows, tl.int64)
+    stride_col_t = tl.cast(stride_col + 0 * rows, tl.int64)
     
     return InputView(ptr, rows_t, cols_t, stride_row_t, stride_col_t)
 
@@ -392,8 +396,10 @@ def make_output_view(ptr, rows, cols, stride_row, stride_col):
     # ═══════════════════════════════════════════════════════════════════════
     rows_t = rows + 0 * rows
     cols_t = cols + 0 * rows
-    stride_row_t = stride_row + 0 * rows
-    stride_col_t = stride_col + 0 * rows
+    # Cast strides to int64 to avoid int32 overflow for large tensors.
+    # See make_input_view() for detailed rationale.
+    stride_row_t = tl.cast(stride_row + 0 * rows, tl.int64)
+    stride_col_t = tl.cast(stride_col + 0 * rows, tl.int64)
     
     return OutputView(ptr, rows_t, cols_t, stride_row_t, stride_col_t)
 

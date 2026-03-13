@@ -25,6 +25,9 @@ _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.floa
 
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
+# Default num_stages for tritonBLAS kernels
+DEFAULT_NUM_STAGES = 2
+
 #@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
@@ -35,7 +38,8 @@ def _make_matmul_selector(
     c_dtype: torch.dtype,
     device: torch.device,
     mx_block_size = 0,
-    streamk = False
+    streamk = False,
+    num_stages = DEFAULT_NUM_STAGES
 ):
     # Run Heuristic Results (Only if key has not been seen before)
     return OrigamiMatmulSelector(
@@ -47,7 +51,8 @@ def _make_matmul_selector(
             c_dtype,
             device,
             mx_block_size=mx_block_size,
-            streamk=streamk)
+            streamk=streamk,
+            num_stages=num_stages)
 
 
 def persistent_matmul_lt(
@@ -79,14 +84,13 @@ def persistent_matmul_lt(
     # TODO: Separate these configs.
     # basica configs for most of compute bound sizes
     # TODO: set these values analytically?
-    num_stages = 2
+    num_stages = selector.num_stages
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
-    #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
-    CACHE_MODIFIER_A = None
-    CACHE_MODIFIER_B = None
+    CACHE_MODIFIER_A = selector.cache_modifier_a
+    CACHE_MODIFIER_B = selector.cache_modifier_b
 
     # Run in Data-parallel mode.
     grids = total_tiles
@@ -172,14 +176,13 @@ def streamk_matmul_lt(
     else:  # all tiles are computed using classical blocking
         total_tiles_streamk = 0
 
-    num_stages = 2
+    num_stages = selector.num_stages
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
-    #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
-    CACHE_MODIFIER_A = None
-    CACHE_MODIFIER_B = None
+    CACHE_MODIFIER_A = selector.cache_modifier_a
+    CACHE_MODIFIER_B = selector.cache_modifier_b
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid
@@ -240,6 +243,7 @@ def streamk_matmul_lt(
     )
 
     return c
+
 
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
