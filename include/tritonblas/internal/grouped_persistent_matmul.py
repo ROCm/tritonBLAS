@@ -79,17 +79,18 @@ def grouped_persistent_matmul(
         rk = tl.arange(0, BLOCK_SIZE_K)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
 
         A_BASE = A + rm[:, None] * stride_am + rk[None, :]
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :]
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-        # Main K-loop: unmasked
+        # Main K-loop: unmasked with strong alignment hints for vectorized loads
         loop_k = K // BLOCK_SIZE_K
         for k in range(0, loop_k):
-            a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
-            b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
+            a = tl.load(tl.multiple_of(A_BASE, (BLOCK_SIZE_M, BLOCK_SIZE_K)))
+            b = tl.load(tl.multiple_of(B_BASE, (BLOCK_SIZE_K, BLOCK_SIZE_N)))
             acc += tl.dot(a, b)
             A_BASE += BLOCK_SIZE_K
             B_BASE += BLOCK_SIZE_K * stride_bk
