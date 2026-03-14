@@ -40,6 +40,7 @@ class CustomBuildExt(build_ext):
                 "_origami",
             ]
         )
+        ORIGAMI_COMMIT = "4fc354a18fbed563d66f347a699f77b9ce52043a"
         subprocess.check_call(
             [
                 "git",
@@ -47,7 +48,7 @@ class CustomBuildExt(build_ext):
                 "--depth",
                 "1",
                 "origin",
-                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+                ORIGAMI_COMMIT,
             ],
             cwd="_origami",
         )
@@ -55,7 +56,7 @@ class CustomBuildExt(build_ext):
             [
                 "git",
                 "checkout",
-                "4fc354a18fbed563d66f347a699f77b9ce52043a",
+                ORIGAMI_COMMIT,
             ],
             cwd="_origami",
         )
