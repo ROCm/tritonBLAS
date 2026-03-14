@@ -86,11 +86,13 @@ def grouped_persistent_matmul(
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-        # Main K-loop: unmasked with strong alignment hints for vectorized loads
+        # Main K-loop: unmasked with contiguous-dim alignment hints
+        # A[M,K] row-major: contiguous in K (cols) → (1, 16)
+        # B[K,N] row-major: contiguous in N (cols) → (1, 16)
         loop_k = K // BLOCK_SIZE_K
         for k in range(0, loop_k):
-            a = tl.load(tl.multiple_of(A_BASE, (BLOCK_SIZE_M, BLOCK_SIZE_K)))
-            b = tl.load(tl.multiple_of(B_BASE, (BLOCK_SIZE_K, BLOCK_SIZE_N)))
+            a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
+            b = tl.load(tl.multiple_of(B_BASE, (1, 16)))
             acc += tl.dot(a, b)
             A_BASE += BLOCK_SIZE_K
             B_BASE += BLOCK_SIZE_K * stride_bk

@@ -18,20 +18,13 @@ _torch_to_triton_dtype = {
 
 
 def _is_homogeneous(group_shapes):
-    """Check if all groups have the same (M, N, K)."""
     return all(s == group_shapes[0] for s in group_shapes)
 
 
 def _homogeneous_dispatch(group_a, group_b, group_c, m, n, k, group_size):
-    """Fast path: all groups same shape → reuse persistent_matmul per group.
-
-    Creates the origami selector ONCE and reuses it for all groups.
-    Uses the highly optimized persistent_matmul with constexpr strides,
-    achieving near-peak TFLOPS.
-    """
+    """Fast path: persistent_matmul per group with shared selector."""
     selector = MatmulHeuristicResult(
-        m, n, k, group_a[0].dtype, group_b[0].dtype, group_c[0].dtype,
-        streamk=False,
+        m, n, k, group_a[0].dtype, group_b[0].dtype, group_c[0].dtype, streamk=False,
     )
     for i in range(group_size):
         persistent_matmul_lt(group_a[i], group_b[i], group_c[i], selector)
@@ -89,9 +82,8 @@ def grouped_gemm(
 ):
     """Grouped GEMM with automatic dispatch optimization.
 
-    - Homogeneous groups (same M,N,K): uses fast persistent_matmul per group
-      with constexpr strides for near-peak TFLOPS.
-    - Heterogeneous groups: single-kernel dispatch with dynamic per-group metadata.
+    Homogeneous groups: persistent_matmul per group (near-peak constexpr strides).
+    Heterogeneous groups: single-kernel persistent dispatch.
     """
     group_size = len(group_a)
     assert group_size == len(group_b)
