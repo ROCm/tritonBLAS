@@ -33,6 +33,9 @@ def _homogeneous_dispatch(group_a, group_b, group_c, m, n, k, group_size):
 def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
                              BLK_M, BLK_N, BLK_K, triton_dtype):
     """Single-kernel dispatch for heterogeneous groups."""
+    # Check if ALL groups have K divisible by BLK_K
+    even_k = all(k % BLK_K == 0 for _, _, k in group_shapes)
+
     a_addrs = [a.data_ptr() for a in group_a]
     b_addrs = [b.data_ptr() for b in group_b]
     c_addrs = [c.data_ptr() for c in group_c]
@@ -67,6 +70,7 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
         GROUP_COUNT=group_size,
         NUM_SMS=MAX_SMS, NUM_XCDS=num_xcds, CHUNK_SIZE=chunk_size,
         MATMUL_DTYPE=triton_dtype,
+        EVEN_K=even_k,
         num_stages=2, num_warps=8,
         waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
     )

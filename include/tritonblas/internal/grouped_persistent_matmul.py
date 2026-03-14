@@ -21,6 +21,7 @@ def grouped_persistent_matmul(
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     MATMUL_DTYPE: tl.constexpr,
+    EVEN_K: tl.constexpr,
 ):
     """Persistent grouped GEMM kernel for heterogeneous groups.
 
@@ -86,26 +87,30 @@ def grouped_persistent_matmul(
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-        # Main K-loop: unmasked with contiguous-dim alignment hints
-        # A[M,K] row-major: contiguous in K (cols) → (1, 16)
-        # B[K,N] row-major: contiguous in N (cols) → (1, 16)
-        loop_k = K // BLOCK_SIZE_K
+        # K-loop with vectorized loads
+        # max_contiguous + multiple_of on both A and B enable dwordx4 global loads:
+        # - A[M,K]: K is contiguous (stride=1) → (1, BLOCK_SIZE_K) contiguity hint
+        # - B[K,N]: N is contiguous (stride=1) → (1, BLOCK_SIZE_N) contiguity hint
+        loop_k = tl.cdiv(K, BLOCK_SIZE_K)
+        if not EVEN_K:
+            loop_k -= 1
+
         for k in range(0, loop_k):
-            a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
-            b = tl.load(tl.multiple_of(B_BASE, (1, 16)))
+            a = tl.load(tl.max_contiguous(tl.multiple_of(A_BASE, (1, 16)), (1, BLOCK_SIZE_K)))
+            b = tl.load(tl.max_contiguous(tl.multiple_of(B_BASE, (1, 16)), (1, BLOCK_SIZE_N)))
             acc += tl.dot(a, b)
             A_BASE += BLOCK_SIZE_K
             B_BASE += BLOCK_SIZE_K * stride_bk
 
-        # Remainder K-block
-        remainder_k = K % BLOCK_SIZE_K
-        if remainder_k != 0:
+        # Remainder K-block (only when K not divisible by BLOCK_SIZE_K)
+        # Separated from main loop to preserve vectorization quality
+        if not EVEN_K:
             rk_last = loop_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
             A_LAST = A + rm[:, None] * stride_am + rk_last[None, :]
             B_LAST = B + rk_last[:, None] * stride_bk + rn[None, :]
             k_mask = rk_last < K
-            a = tl.load(tl.multiple_of(A_LAST, (1, 16)), mask=k_mask[None, :], other=0.0)
-            b = tl.load(tl.multiple_of(B_LAST, (16, 1)), mask=k_mask[:, None], other=0.0)
+            a = tl.load(A_LAST, mask=k_mask[None, :], other=0.0)
+            b = tl.load(B_LAST, mask=k_mask[:, None], other=0.0)
             acc += tl.dot(a, b)
 
         c = acc.to(C.type.element_ty)
