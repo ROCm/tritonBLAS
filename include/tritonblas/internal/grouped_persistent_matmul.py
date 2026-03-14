@@ -12,7 +12,6 @@ def grouped_persistent_matmul(
     group_gemm_sizes,
     gemm_offsets,
     g_lds,
-    total_output_tiles,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -23,17 +22,20 @@ def grouped_persistent_matmul(
     CHUNK_SIZE: tl.constexpr,
     MATMUL_DTYPE: tl.constexpr,
 ):
-    """Persistent grouped GEMM kernel optimized for MI300X.
+    """Persistent grouped GEMM kernel for heterogeneous groups.
 
-    GROUP_COUNT is constexpr to enable compiler unrolling of group logic.
-    Assumes row-major contiguous inputs.
+    Flat iteration over all output tiles across all groups. Each tile
+    finds its group via a scan of gemm_offsets. GROUP_COUNT is constexpr
+    for compiler unrolling. Assumes row-major contiguous inputs.
     """
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
 
-    for tile_id in range(pid, total_output_tiles, NUM_SMS):
-        # Find group - compiler can unroll since GROUP_COUNT is constexpr
+    total_tiles = tl.load(gemm_offsets + GROUP_COUNT)
+
+    for tile_id in range(pid, total_tiles, NUM_SMS):
+        # Find group (GROUP_COUNT is constexpr → compiler can unroll)
         g = 0
         for g_idx in range(GROUP_COUNT):
             if tile_id >= tl.load(gemm_offsets + g_idx + 1):
@@ -83,7 +85,7 @@ def grouped_persistent_matmul(
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-        # Main K-loop: unmasked vectorized loads
+        # Main K-loop: unmasked
         loop_k = K // BLOCK_SIZE_K
         for k in range(0, loop_k):
             a = tl.load(tl.multiple_of(A_BASE, (1, 16)))

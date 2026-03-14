@@ -17,15 +17,29 @@ _torch_to_triton_dtype = {
 }
 
 
-def _loop_dispatch(group_a, group_b, group_c, group_shapes):
-    """Dispatch each group as a separate fast matmul kernel call."""
-    for i, (m, n, k) in enumerate(group_shapes):
-        selector = MatmulHeuristicResult(m, n, k, group_a[i].dtype, group_b[i].dtype, group_c[i].dtype)
+def _is_homogeneous(group_shapes):
+    """Check if all groups have the same (M, N, K)."""
+    return all(s == group_shapes[0] for s in group_shapes)
+
+
+def _homogeneous_dispatch(group_a, group_b, group_c, m, n, k, group_size):
+    """Fast path: all groups same shape → reuse persistent_matmul per group.
+
+    Creates the origami selector ONCE and reuses it for all groups.
+    Uses the highly optimized persistent_matmul with constexpr strides,
+    achieving near-peak TFLOPS.
+    """
+    selector = MatmulHeuristicResult(
+        m, n, k, group_a[0].dtype, group_b[0].dtype, group_c[0].dtype,
+        streamk=False,
+    )
+    for i in range(group_size):
         persistent_matmul_lt(group_a[i], group_b[i], group_c[i], selector)
 
 
-def _single_kernel_dispatch(group_a, group_b, group_c, group_shapes, group_size, BLK_M, BLK_N, BLK_K, triton_dtype):
-    """Dispatch all groups in a single persistent kernel."""
+def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
+                             BLK_M, BLK_N, BLK_K, triton_dtype):
+    """Single-kernel dispatch for heterogeneous groups."""
     a_addrs = [a.data_ptr() for a in group_a]
     b_addrs = [b.data_ptr() for b in group_b]
     c_addrs = [c.data_ptr() for c in group_c]
@@ -50,12 +64,11 @@ def _single_kernel_dispatch(group_a, group_b, group_c, group_shapes, group_size,
     num_xcds = 8
     group_size_m = int(math.ceil(math.sqrt(MAX_SMS / num_xcds)))
     total_output_tiles = gemm_offsets[-1]
-    chunk_size = min(group_size_m * group_size_m, max(1, total_output_tiles // num_xcds))
+    chunk_size = max(1, min(group_size_m * group_size_m, total_output_tiles // num_xcds))
 
     grouped_persistent_matmul[(MAX_SMS,)](
         d_a_ptrs, d_b_ptrs, d_c_ptrs,
         d_g_sizes, d_gemm_offsets, d_g_lds,
-        total_output_tiles,
         BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=group_size_m,
         GROUP_COUNT=group_size,
@@ -73,13 +86,14 @@ def grouped_gemm(
     BLK_N: int = None,
     BLK_K: int = None,
 ):
-    """Grouped GEMM with hybrid dispatch.
+    """Grouped GEMM with automatic dispatch optimization.
 
-    Uses individual fast kernel calls for large groups (best TFLOPS),
-    and a single persistent kernel for many small groups (best launch efficiency).
+    - Homogeneous groups (same M,N,K): uses fast persistent_matmul per group
+      with constexpr strides for near-peak TFLOPS.
+    - Heterogeneous groups: single-kernel dispatch with dynamic per-group metadata.
     """
     group_size = len(group_a)
-    assert group_size == len(group_b), "group_a and group_b must have same length"
+    assert group_size == len(group_b)
 
     in_dtype = group_a[0].dtype
     out_dtype = group_c[0].dtype if group_c is not None else in_dtype
@@ -98,14 +112,9 @@ def grouped_gemm(
         assert A.shape[1] == B.shape[0], f"Group {i}: incompatible A={A.shape}, B={B.shape}"
         group_shapes.append((A.shape[0], B.shape[1], A.shape[1]))
 
-    # Decide dispatch strategy:
-    # - Loop dispatch: best for few large groups (kernel launch overhead << compute)
-    # - Single kernel: best for many small groups (amortizes launch overhead)
-    avg_tiles = sum(math.ceil(m / 128) * math.ceil(n / 128) for m, n, k in group_shapes) / group_size
-    use_loop = avg_tiles >= MAX_SMS // 2 or group_size <= 4
-
-    if use_loop:
-        _loop_dispatch(group_a, group_b, group_c, group_shapes)
+    if _is_homogeneous(group_shapes):
+        m, n, k = group_shapes[0]
+        _homogeneous_dispatch(group_a, group_b, group_c, m, n, k, group_size)
     else:
         if BLK_M is None or BLK_N is None or BLK_K is None:
             selector = GroupedGemmSelector(
@@ -118,7 +127,7 @@ def grouped_gemm(
         if triton_dtype is None:
             raise ValueError(f"Unsupported dtype: {in_dtype}")
 
-        _single_kernel_dispatch(group_a, group_b, group_c, group_shapes,
+        _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes,
                                 group_size, BLK_M, BLK_N, BLK_K, triton_dtype)
 
     return group_c
