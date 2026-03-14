@@ -75,7 +75,7 @@ def persistent_matmul_lt(
     # Set chunk size to same area as L2 tiles.
     num_xcds = 8
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, total_programs // num_xcds)
+    chunk_size = max(1, min(chunk_size, total_programs // num_xcds))
 
     # TODO: Support other matmul algs.
     kk = persistent_matmul[(grids,)](
@@ -173,7 +173,7 @@ def streamk_matmul_lt(
     # Set chunk size to same area as L2 tiles.
     num_xcds = 8
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, grids // num_xcds) 
+    chunk_size = max(1, min(chunk_size, grids // num_xcds)) 
 
     kk = streamk_matmul[(grids,)](
         a,

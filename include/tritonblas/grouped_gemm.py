@@ -2,19 +2,67 @@ import torch
 import triton
 import triton.language as tl
 import math
-from .internal.wcc_grouped_gemm import wcc_groupgemm
-from .origami import GroupedGemmSelector
+from .internal.grouped_persistent_matmul import grouped_persistent_matmul
+from .origami import GroupedGemmSelector, MatmulHeuristicResult
+from .matmul import persistent_matmul_lt
 
 current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
 MAX_SMS = current_device.multi_processor_count
 
-# Map torch dtypes to triton dtypes for kernel dispatch
 _torch_to_triton_dtype = {
     torch.float16: tl.float16,
     torch.bfloat16: tl.bfloat16,
     torch.float32: tl.float32,
 }
+
+
+def _loop_dispatch(group_a, group_b, group_c, group_shapes):
+    """Dispatch each group as a separate fast matmul kernel call."""
+    for i, (m, n, k) in enumerate(group_shapes):
+        selector = MatmulHeuristicResult(m, n, k, group_a[i].dtype, group_b[i].dtype, group_c[i].dtype)
+        persistent_matmul_lt(group_a[i], group_b[i], group_c[i], selector)
+
+
+def _single_kernel_dispatch(group_a, group_b, group_c, group_shapes, group_size, BLK_M, BLK_N, BLK_K, triton_dtype):
+    """Dispatch all groups in a single persistent kernel."""
+    a_addrs = [a.data_ptr() for a in group_a]
+    b_addrs = [b.data_ptr() for b in group_b]
+    c_addrs = [c.data_ptr() for c in group_c]
+    g_sizes, g_lds = [], []
+    for i, (m, n, k) in enumerate(group_shapes):
+        g_sizes.extend([m, n, k])
+        g_lds.extend([group_a[i].stride(0), group_a[i].stride(1),
+                       group_b[i].stride(0), group_b[i].stride(1),
+                       group_c[i].stride(0), group_c[i].stride(1)])
+
+    d_a_ptrs = torch.tensor(a_addrs, device="cuda", dtype=torch.int64)
+    d_b_ptrs = torch.tensor(b_addrs, device="cuda", dtype=torch.int64)
+    d_c_ptrs = torch.tensor(c_addrs, device="cuda", dtype=torch.int64)
+    d_g_sizes = torch.tensor(g_sizes, device="cuda", dtype=torch.int32)
+    d_g_lds = torch.tensor(g_lds, device="cuda", dtype=torch.int32)
+
+    gemm_offsets = [0]
+    for m, n, k in group_shapes:
+        gemm_offsets.append(gemm_offsets[-1] + math.ceil(m / BLK_M) * math.ceil(n / BLK_N))
+    d_gemm_offsets = torch.tensor(gemm_offsets, dtype=torch.int32, device="cuda")
+
+    num_xcds = 8
+    group_size_m = int(math.ceil(math.sqrt(MAX_SMS / num_xcds)))
+    total_output_tiles = gemm_offsets[-1]
+    chunk_size = min(group_size_m * group_size_m, max(1, total_output_tiles // num_xcds))
+
+    grouped_persistent_matmul[(MAX_SMS,)](
+        d_a_ptrs, d_b_ptrs, d_c_ptrs,
+        d_g_sizes, d_gemm_offsets, d_g_lds,
+        total_output_tiles,
+        BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=group_size_m,
+        GROUP_COUNT=group_size,
+        NUM_SMS=MAX_SMS, NUM_XCDS=num_xcds, CHUNK_SIZE=chunk_size,
+        MATMUL_DTYPE=triton_dtype,
+        num_stages=2, num_warps=8,
+    )
 
 
 def grouped_gemm(
@@ -25,105 +73,52 @@ def grouped_gemm(
     BLK_N: int = None,
     BLK_K: int = None,
 ):
-    """Grouped GEMM using work-centric stream-K dispatch.
+    """Grouped GEMM with hybrid dispatch.
 
-    Args:
-        group_a: List of A matrices (one per group).
-        group_b: List of B matrices (one per group).
-        group_c: Optional list of output matrices. Allocated if not provided.
-        BLK_M, BLK_N, BLK_K: Optional tile sizes. If None, uses origami prediction.
-
-    Returns:
-        List of output C matrices.
+    Uses individual fast kernel calls for large groups (best TFLOPS),
+    and a single persistent kernel for many small groups (best launch efficiency).
     """
     group_size = len(group_a)
     assert group_size == len(group_b), "group_a and group_b must have same length"
 
-    # Validate and collect shapes
-    a_addrs, b_addrs, c_addrs = [], [], []
-    g_sizes, g_lds = [], []
     in_dtype = group_a[0].dtype
     out_dtype = group_c[0].dtype if group_c is not None else in_dtype
 
-    # Allocate output tensors if not provided
     if group_c is None:
         group_c = []
         for i in range(group_size):
-            m = group_a[i].shape[0]
-            n = group_b[i].shape[1]
-            group_c.append(torch.empty((m, n), device="cuda", dtype=out_dtype))
+            group_c.append(torch.empty((group_a[i].shape[0], group_b[i].shape[1]),
+                                       device="cuda", dtype=out_dtype))
     else:
-        assert group_size == len(group_c), "group_c must match group_a length"
+        assert group_size == len(group_c)
 
-    # Collect group shapes for origami prediction
     group_shapes = []
     for i in range(group_size):
-        A, B, C = group_a[i], group_b[i], group_c[i]
-        assert A.shape[1] == B.shape[0], f"Group {i}: incompatible dimensions A={A.shape}, B={B.shape}"
-        m, k = A.shape
-        _, n = B.shape
-        group_shapes.append((m, n, k))
-        a_addrs.append(A.data_ptr())
-        b_addrs.append(B.data_ptr())
-        c_addrs.append(C.data_ptr())
-        g_sizes.extend([m, n, k])
-        g_lds.extend([A.stride(0), A.stride(1), B.stride(0), B.stride(1), C.stride(0), C.stride(1)])
+        A, B = group_a[i], group_b[i]
+        assert A.shape[1] == B.shape[0], f"Group {i}: incompatible A={A.shape}, B={B.shape}"
+        group_shapes.append((A.shape[0], B.shape[1], A.shape[1]))
 
-    # Use origami prediction if tile sizes not specified
-    if BLK_M is None or BLK_N is None or BLK_K is None:
-        selector = GroupedGemmSelector(
-            group_shapes, in_dtype, in_dtype, out_dtype,
-            device_index=current_device_index,
-        )
-        BLK_M, BLK_N, BLK_K = selector.get_config()
+    # Decide dispatch strategy:
+    # - Loop dispatch: best for few large groups (kernel launch overhead << compute)
+    # - Single kernel: best for many small groups (amortizes launch overhead)
+    avg_tiles = sum(math.ceil(m / 128) * math.ceil(n / 128) for m, n, k in group_shapes) / group_size
+    use_loop = avg_tiles >= MAX_SMS // 2 or group_size <= 4
 
-    # Resolve triton dtype
-    triton_dtype = _torch_to_triton_dtype.get(in_dtype)
-    if triton_dtype is None:
-        raise ValueError(f"Unsupported dtype for grouped GEMM: {in_dtype}")
+    if use_loop:
+        _loop_dispatch(group_a, group_b, group_c, group_shapes)
+    else:
+        if BLK_M is None or BLK_N is None or BLK_K is None:
+            selector = GroupedGemmSelector(
+                group_shapes, in_dtype, in_dtype, out_dtype,
+                device_index=current_device_index,
+            )
+            BLK_M, BLK_N, BLK_K = selector.get_config()
 
-    d_a_ptrs = torch.tensor(a_addrs, device="cuda", dtype=torch.int64)
-    d_b_ptrs = torch.tensor(b_addrs, device="cuda", dtype=torch.int64)
-    d_c_ptrs = torch.tensor(c_addrs, device="cuda", dtype=torch.int64)
-    d_g_sizes = torch.tensor(g_sizes, device="cuda", dtype=torch.int32)
-    d_g_lds = torch.tensor(g_lds, device="cuda", dtype=torch.int32)
+        triton_dtype = _torch_to_triton_dtype.get(in_dtype)
+        if triton_dtype is None:
+            raise ValueError(f"Unsupported dtype: {in_dtype}")
 
-    grids = MAX_SMS
-    locks = torch.zeros((MAX_SMS,), device="cuda", dtype=torch.int32)
-    P = torch.zeros((MAX_SMS, BLK_M * BLK_N), device="cuda", dtype=torch.float32)
+        _single_kernel_dispatch(group_a, group_b, group_c, group_shapes,
+                                group_size, BLK_M, BLK_N, BLK_K, triton_dtype)
 
-    # Compute total tiles across all groups (using k-tiles for stream-K work splitting)
-    total = 0
-    gemm_offsets = [0]
-    for m, n, k in group_shapes:
-        mm = math.ceil(m / BLK_M)
-        nn = math.ceil(n / BLK_N)
-        kk = math.ceil(k / BLK_K)
-        total += nn * mm * kk
-        gemm_offsets.append(total)
-
-    streamk_tiles_pcu = total // MAX_SMS
-    streamk_remainder_tiles = total % MAX_SMS
-    d_gemm_offsets = torch.tensor(gemm_offsets, dtype=torch.int32, device="cuda")
-
-    wcc_groupgemm[(grids,)](
-        d_a_ptrs,
-        d_b_ptrs,
-        d_c_ptrs,
-        d_g_sizes,
-        d_gemm_offsets,
-        d_g_lds,
-        group_size,
-        P,
-        locks,
-        streamk_tiles_pcu=streamk_tiles_pcu,
-        streamk_remainder_tiles=streamk_remainder_tiles,
-        BLOCK_SIZE_M=BLK_M,
-        BLOCK_SIZE_N=BLK_N,
-        BLOCK_SIZE_K=BLK_K,
-        GROUP_SIZE_M=1,
-        NUM_PRGMS=MAX_SMS,
-        NUM_XCDS=8,
-        MATMUL_DTYPE=triton_dtype,
-    )
     return group_c
