@@ -197,14 +197,11 @@ class MatmulHeuristicResult:
         else:
             self.grid = self.hardware.N_CU
 
-        try:
-            _mode, self._xcc_wgm, self._wgm = origami.select_workgroup_mapping(
-                problem, self.hardware, self._result.config, self.grid
-            )
-        except (ValueError, TypeError):
-            self._xcc_wgm, self._wgm = origami.select_workgroup_mapping(
-                problem, self.hardware, self._result.config, self.grid
-            )
+        wgm_result = origami.select_workgroup_mapping(
+            problem, self.hardware, self._result.config, self.grid
+        )
+        self._xcc_wgm = wgm_result.wgmxcc
+        self._wgm = wgm_result.wgm
 
         # Store as tuple for backward compatibility
         self.config = (

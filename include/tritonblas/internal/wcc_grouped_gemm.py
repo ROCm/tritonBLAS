@@ -54,6 +54,7 @@ def accumulate_partials(
         rn1 = tl.max_contiguous(tl.multiple_of(rn1, BLOCK_SIZE_N), BLOCK_SIZE_N)
         P_ = P + pid * BLOCK_SIZE_M * BLOCK_SIZE_N + rm1[:, None] * BLOCK_SIZE_N + rn1[None, :]
         tl.store(P_, partials, cache_modifier=".wt")
+        tl.debug_barrier()
         tl.store(locks + pid, 1, cache_modifier=".wt")
     # Only the pid processing the first tile does the reduction
     else:
