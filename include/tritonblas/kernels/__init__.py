@@ -28,8 +28,9 @@ from .streamk_gemm import streamk_matmul
 
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
+from .fp4_streamk_gemm import fp4_streamk_matmul
 
 # Export stages submodule
 from . import stages
 
-__all__ = ['persistent_matmul', 'streamk_matmul', 'fp4_matmul', 'stages']
+__all__ = ['persistent_matmul', 'streamk_matmul', 'fp4_matmul', 'fp4_streamk_matmul', 'stages']
