@@ -379,6 +379,7 @@ def _matmul(
     b: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
+    work_stealing: Optional[bool] = False,
 ) -> torch.Tensor:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -387,10 +388,11 @@ def _matmul(
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
-        return streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
+        return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, out, selector)
+        return persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
 
 
 def _setup_context_matmul_backwards(
@@ -398,10 +400,11 @@ def _setup_context_matmul_backwards(
     inputs: tuple[Any, ...],
     output: Any
 ):
-    a, b, enable_streamk, sk_grid = inputs
+    a, b, enable_streamk, sk_grid, work_stealing = inputs
     ctx.save_for_backward(a, b)
     ctx.enable_streamk = enable_streamk
     ctx.sk_grid = sk_grid
+    ctx.work_stealing = work_stealing
 
 
 def _matmul_backwards(
@@ -411,16 +414,17 @@ def _matmul_backwards(
     a, b = ctx.saved_tensors
     enable_streamk = ctx.enable_streamk
     sk_grid = ctx.sk_grid
+    work_stealing = ctx.work_stealing
 
     grad_output_cont = grad_output.contiguous()
 
     b_t = b.T.contiguous()
-    grad_a = matmul(grad_output_cont, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid)
+    grad_a = matmul(grad_output_cont, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid, work_stealing=work_stealing)
 
     a_t = a.T.contiguous()
-    grad_b = matmul(a_t, grad_output_cont, enable_streamk=enable_streamk, sk_grid=sk_grid)
+    grad_b = matmul(a_t, grad_output_cont, enable_streamk=enable_streamk, sk_grid=sk_grid, work_stealing=work_stealing)
 
-    return grad_a, grad_b, None, None
+    return grad_a, grad_b, None, None, None
 
 
 _matmul.register_autograd(_matmul_backwards,
@@ -434,17 +438,19 @@ def _matmul_out(
     out: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
+    work_stealing: Optional[bool] = False,
 ) -> None:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
-        streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
+        streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
-        persistent_matmul_lt(a, b, out, selector)
+        persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
 
     return None
 
@@ -454,10 +460,11 @@ def matmul(
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
     enable_streamk: Optional[bool] = False,
-    sk_grid: Optional[int] = None
+    sk_grid: Optional[int] = None,
+    work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
     if out is None:
-        return _matmul(a, b, enable_streamk, sk_grid)
+        return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 
     if torch.is_grad_enabled() and (
         a.requires_grad
@@ -468,7 +475,7 @@ def matmul(
             "tritonblas.matmul(): functions with out=... arguments don't support "
             "automatic differentiation, but one of the arguments requires grad."
         )
-    return _matmul_out(a, b, out, enable_streamk, sk_grid)
+    return _matmul_out(a, b, out, enable_streamk, sk_grid, work_stealing)
 
 
 def matmul_a8w8(
