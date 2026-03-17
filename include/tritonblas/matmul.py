@@ -34,20 +34,23 @@ def _make_matmul_selector(
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
     device: torch.device,
-    mx_block_size = 0,
-    streamk = False
+    mx_block_size=0,
+    streamk=False,
+    num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
     return OrigamiMatmulSelector(
-            M,
-            N,
-            K,
-            a_dtype,
-            b_dtype,
-            c_dtype,
-            device,
-            mx_block_size=mx_block_size,
-            streamk=streamk)
+        M,
+        N,
+        K,
+        a_dtype,
+        b_dtype,
+        c_dtype,
+        device,
+        mx_block_size=mx_block_size,
+        streamk=streamk,
+        num_stages=num_stages,
+    )
 
 
 def persistent_matmul_lt(
@@ -78,7 +81,7 @@ def persistent_matmul_lt(
     total_programs = total_tiles
     even_k = K % BLK_K == 0
 
-    num_stages = 2
+    num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
@@ -220,7 +223,7 @@ def streamk_matmul_lt(
     else:  # all tiles are computed using classical blocking
         total_tiles_streamk = 0
 
-    num_stages = 2
+    num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
@@ -246,8 +249,8 @@ def streamk_matmul_lt(
             locks = _global_locks[:grids]
             P = _global_P[:grids, :block_size]
         else:
-            locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
-            P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
+            locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
+            P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

@@ -62,7 +62,7 @@ jobs:
           pip3 install ruff
           ruff check include/ tests/ --output-format=github
         continue-on-error: true
-        
+
       - name: Run tests
         run: |
           export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
