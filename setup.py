@@ -40,7 +40,7 @@ class CustomBuildExt(build_ext):
                 "_origami",
             ]
         )
-        ORIGAMI_COMMIT = "4fc354a18fbed563d66f347a699f77b9ce52043a"
+        ORIGAMI_COMMIT = "66af6cd8ceb5c4540f857460dc130c9e9207de3e"
         subprocess.check_call(
             [
                 "git",
@@ -64,15 +64,6 @@ class CustomBuildExt(build_ext):
         # Use custom chdir context manager to run sparse-checkout
         with chdir("_origami"):
             subprocess.check_call(["git", "sparse-checkout", "set", "shared/origami"])
-
-        subprocess.check_call(
-            [
-                "git",
-                "apply",
-                "../arch.diff",
-            ],
-            cwd="_origami",
-        )
 
         # Build the nested origami setup.py
         origami_setup_path = os.path.join("_origami", "shared", "origami", "python")
