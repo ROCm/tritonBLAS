@@ -1,25 +1,26 @@
-"""Comprehensive unit tests for LDS (shared memory) estimation functions.
+"""Unit tests for LDS (shared memory) estimation functions.
 
 These functions are critical for preventing "out of resource: shared memory"
-errors (issue #62). They estimate Triton's LDS usage with async_copy,
-PaddedSharedEncoding, and num_stages pipelining.
+errors (issue #62). They estimate Triton's AMD LDS usage with
+swizzled_shared / amd_rotating_shared encodings (no padding overhead).
+
+The AMD LDS model (validated 35/35 against Triton 3.6.0+rocm7.2.0 on gfx942):
+  ns == 1:  max(A_bytes, B_bytes)            — sequential inline alloc
+  ns >= 2:  (ns - 1) * (A_bytes + B_bytes)   — software-pipelined buffers
 
 Tests cover:
-- _padded_size_32_4: [[32, 4]] pattern (fast path)
-- _padded_size_elements_pow2: generic Triton getPaddedSize equivalent
-- estimate_triton_lds_bytes: full LDS estimation with max() over padding patterns
-- check_triton_lds_capacity: capacity check with short-circuit
+- estimate_triton_lds_bytes: AMD LDS model
+- check_triton_lds_capacity: capacity check
 - Architecture-dependent tests: use origami.get_hardware_for_device() to verify
   LDS capacity checks against real hardware (gfx942, gfx950, etc.)
+- Compiled kernel validation: compare estimates against metadata.shared from
+  actual Triton compiled kernels
 """
 
 import pytest
 import torch
 
-# Import module-private functions for direct testing
 from tritonblas.origami import (
-    _padded_size_32_4,
-    _padded_size_elements_pow2,
     estimate_triton_lds_bytes,
     check_triton_lds_capacity,
 )
@@ -37,134 +38,73 @@ def _get_hardware():
         return None
 
 
-class TestPaddedSize32_4:
-    """Test _padded_size_32_4: Triton [[32, 4]] PaddedSharedEncoding pattern."""
-
-    def test_zero_size(self):
-        """Zero elements should return zero."""
-        assert _padded_size_32_4(0) == 0
-
-    def test_exact_divisibility_by_32(self):
-        """When size is exactly divisible by 32, Triton subtracts one padding block."""
-        # 32 elements: 1 block, 4 padding, then subtract 4 -> 0 padding
-        assert _padded_size_32_4(32) == 32
-        # 64 elements: 2 blocks, 8 padding, subtract 4 -> 4 padding
-        assert _padded_size_32_4(64) == 68
-        # 96 elements: 3 blocks, 12 padding, subtract 4 -> 8 padding
-        assert _padded_size_32_4(96) == 104
-        # 2048 elements: 64 blocks, 256 padding, subtract 4 -> 252 padding
-        assert _padded_size_32_4(2048) == 2300
-
-    def test_not_divisible_by_32(self):
-        """When size is not divisible by 32, no subtraction occurs."""
-        # 31: 0 full blocks, 0 padding
-        assert _padded_size_32_4(31) == 31
-        # 33: 1 block, 4 padding, 33%32 != 0 so no subtract
-        assert _padded_size_32_4(33) == 37
-        # 63: 1 block, 4 padding
-        assert _padded_size_32_4(63) == 67
-
-    def test_various_tile_sizes(self):
-        """Common matmul tile element counts."""
-        # 128*64 = 8192 (block_m*block_k for A)
-        assert _padded_size_32_4(8192) == 9212
-        # 64*128 = 8192 (block_k*block_n for B)
-        assert _padded_size_32_4(8192) == 9212
-        # 256*64 = 16384
-        assert _padded_size_32_4(16384) == 18428
-
-
-class TestPaddedSizeElementsPow2:
-    """Test _padded_size_elements_pow2: generic Triton getPaddedSize."""
-
-    def test_matches_32_4_for_same_pattern(self):
-        """[[32, 4]] via generic should match _padded_size_32_4."""
-        for size in [0, 31, 32, 33, 64, 63, 96, 2048, 8192, 16384]:
-            assert _padded_size_elements_pow2(size, [(32, 4)]) == _padded_size_32_4(size)
-
-    def test_block_k_8_pattern(self):
-        """[[block_k, 8]] pattern for A tile (e.g. block_k=64)."""
-        # elem_a=8192, interval=64, padding=8
-        # blocks=128, block_padding=128*8=1024, 8192%64=0 so subtract 8 -> 1016
-        assert _padded_size_elements_pow2(8192, [(64, 8)]) == 9208
-
-    def test_block_n_8_pattern(self):
-        """[[block_n, 8]] pattern for B tile (e.g. block_n=128)."""
-        # interval=128, padding=8: (8192>>7)<<3 = 64<<3 = 512, 8192%128=0, subtract 8 -> 504
-        assert _padded_size_elements_pow2(8192, [(128, 8)]) == 8696
-
-    def test_multiple_intervals(self):
-        """Multiple intervals sum padding (Triton can chain encodings)."""
-        # Single (32,4) for 64
-        single = _padded_size_elements_pow2(64, [(32, 4)])
-        assert single == 68
-
-    def test_edge_case_small_padding(self):
-        """Small padding values."""
-        # (32, 1): log2_padding=0, block_padding = (64>>5)<<0 = 2
-        # 64%32=0, 2>=1, subtract 1 -> 1. return 65
-        assert _padded_size_elements_pow2(64, [(32, 1)]) == 65
-        # (32, 2): log2_padding=1, block_padding = (64>>5)<<1 = 4. 64%32=0, 4>=2, subtract 2 -> 2. return 66
-        assert _padded_size_elements_pow2(64, [(32, 2)]) == 66
-
-
 class TestEstimateTritonLdsBytes:
-    """Test estimate_triton_lds_bytes: full LDS estimation."""
+    """Test estimate_triton_lds_bytes: AMD LDS model (no padding)."""
 
-    def test_at_least_raw_size(self):
-        """Estimate must be >= raw (unpadded) size."""
-        block_m, block_n, block_k = 128, 128, 64
-        bytes_a, bytes_b = 2, 2  # bf16
-        raw = (block_m * block_k * bytes_a + block_k * block_n * bytes_b) * 2
-        lds = estimate_triton_lds_bytes(block_m, block_n, block_k, bytes_a, bytes_b, 2)
-        assert lds >= raw
+    def test_num_stages_1_uses_max(self):
+        """ns=1: LDS = max(A_bytes, B_bytes), no pipelining."""
+        # Square tile: A == B, so max = either
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 1) == 128 * 64 * 2
+        # Rectangular: A > B
+        assert estimate_triton_lds_bytes(256, 64, 64, 2, 2, 1) == 256 * 64 * 2
+        # Rectangular: B > A
+        assert estimate_triton_lds_bytes(64, 256, 64, 2, 2, 1) == 64 * 256 * 2
 
-    def test_num_stages_scaling(self):
-        """LDS scales linearly with num_stages."""
-        block_m, block_n, block_k = 128, 128, 64
-        bytes_a, bytes_b = 2, 2
-        lds_2 = estimate_triton_lds_bytes(block_m, block_n, block_k, bytes_a, bytes_b, 2)
-        lds_3 = estimate_triton_lds_bytes(block_m, block_n, block_k, bytes_a, bytes_b, 3)
-        lds_4 = estimate_triton_lds_bytes(block_m, block_n, block_k, bytes_a, bytes_b, 4)
-        assert lds_3 == lds_2 * 3 // 2
-        assert lds_4 == lds_2 * 2
+    def test_num_stages_2_one_buffer_set(self):
+        """ns=2: LDS = (A_bytes + B_bytes), one pipeline buffer set."""
+        # 128x128x64 bf16: (128*64 + 64*128) * 2 = 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2) == 32768
+        # 256x256x64 bf16: (256*64 + 64*256) * 2 = 65536
+        assert estimate_triton_lds_bytes(256, 256, 64, 2, 2, 2) == 65536
 
-    def test_max_logic_32_4_dominates(self):
-        """When [[32, 4]] produces larger padding than [[block_k, 8]]."""
-        # For 128x128x64: elem_a=8192, elem_b=8192
-        # [[32,4]]: 9212 each. [[64,8]]: 9208 each. So [[32,4]] wins.
-        block_m, block_n, block_k = 128, 128, 64
-        lds = estimate_triton_lds_bytes(block_m, block_n, block_k, 2, 2, 2)
-        # 2 * (9212*2 + 9212*2) = 2 * 36848 = 73696
-        assert lds == 73696
+    def test_num_stages_3_two_buffer_sets(self):
+        """ns=3: LDS = 2 * (A_bytes + B_bytes), two pipeline buffer sets."""
+        # 128x128x64 bf16: 2 * (128*64 + 64*128) * 2 = 65536
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 3) == 65536
 
-    def test_max_logic_block_pattern_dominates(self):
-        """When [[block_k, 8]] produces larger padding for A than [[32, 4]]."""
-        # block_k=16: elem_a=2048. [[32,4]]: 2300. [[16,8]]: 3064 -> A uses 3064
-        # block_n=128: elem_b=2048. [[32,4]]: 2300. [[128,8]]: 2168 -> B uses 2300
-        block_m, block_n, block_k = 128, 128, 16
-        lds = estimate_triton_lds_bytes(block_m, block_n, block_k, 2, 2, 2)
-        # per_stage = 3064*2 + 2300*2 = 10728, total = 21456
-        assert lds == 21456
+    def test_num_stages_scaling_linear(self):
+        """LDS scales as (ns-1) for ns >= 2."""
+        bm, bn, bk = 128, 128, 64
+        lds_2 = estimate_triton_lds_bytes(bm, bn, bk, 2, 2, 2)
+        lds_3 = estimate_triton_lds_bytes(bm, bn, bk, 2, 2, 3)
+        lds_4 = estimate_triton_lds_bytes(bm, bn, bk, 2, 2, 4)
+        assert lds_3 == lds_2 * 2  # (3-1)/(2-1) = 2x
+        assert lds_4 == lds_2 * 3  # (4-1)/(2-1) = 3x
 
-    def test_known_config_128x128x64_bf16(self):
-        """Known config: 128x128x64, bf16, num_stages=2."""
-        lds = estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2)
-        assert lds == 73696
+    def test_rectangular_tiles(self):
+        """Non-square tiles compute A and B sizes independently."""
+        # 128x64x64 bf16 ns=2: (128*64 + 64*64) * 2 = 24576
+        assert estimate_triton_lds_bytes(128, 64, 64, 2, 2, 2) == 24576
+        # 256x128x64 bf16 ns=2: (256*64 + 64*128) * 2 = 49152
+        assert estimate_triton_lds_bytes(256, 128, 64, 2, 2, 2) == 49152
 
-    def test_known_config_64x64x32_bf16(self):
-        """Known config: 64x64x32, bf16, num_stages=2."""
-        lds = estimate_triton_lds_bytes(64, 64, 32, 2, 2, 2)
-        # [[32,4]]: 2300. [[32,8]] for A (block_k=32): 2552. [[64,8]] for B (block_n=64): 2296.
-        # A uses max(2300, 2552)=2552, B uses max(2300, 2296)=2300. per_stage=9704, total=19408
-        assert lds == 19408
+    def test_known_configs_bf16(self):
+        """Known configs validated against Triton metadata.shared on gfx942."""
+        assert estimate_triton_lds_bytes(64, 64, 32, 2, 2, 2) == 8192
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2) == 32768
+        assert estimate_triton_lds_bytes(256, 256, 64, 2, 2, 2) == 65536
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 3) == 65536
+        assert estimate_triton_lds_bytes(128, 256, 64, 2, 2, 2) == 49152
+
+    def test_known_configs_f32(self):
+        """Known configs validated against Triton metadata.shared on gfx942."""
+        assert estimate_triton_lds_bytes(64, 64, 32, 4, 4, 2) == 16384
+        assert estimate_triton_lds_bytes(128, 128, 32, 4, 4, 2) == 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 4, 4, 2) == 65536
+
+    def test_fp32_doubles_bf16(self):
+        """FP32 (4 bytes) uses 2x LDS compared to bf16 (2 bytes) for same tile."""
+        lds_bf16 = estimate_triton_lds_bytes(64, 64, 32, 2, 2, 2)
+        lds_fp32 = estimate_triton_lds_bytes(64, 64, 32, 4, 4, 2)
+        assert lds_fp32 == lds_bf16 * 2
 
     def test_mixed_ab_dtypes(self):
-        """Mixed A/B byte sizes (e.g. f8 A with bf16 B) should differ from uniform."""
-        lds_uniform = estimate_triton_lds_bytes(64, 64, 32, 2, 2, 2)
-        lds_mixed = estimate_triton_lds_bytes(64, 64, 32, 1, 2, 2)
+        """Mixed A/B byte sizes (e.g. f8 A with bf16 B)."""
+        # A: 128*64*1 = 8192, B: 64*128*2 = 16384, total = 24576
+        lds_mixed = estimate_triton_lds_bytes(128, 128, 64, 1, 2, 2)
+        assert lds_mixed == 24576
+        lds_uniform = estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2)
         assert lds_mixed < lds_uniform
-        assert lds_mixed > 0
 
     def test_sub_byte_dtype(self):
         """Sub-byte types (e.g. f4 = 0.5 bytes) must produce non-zero LDS estimates."""
@@ -173,43 +113,41 @@ class TestEstimateTritonLdsBytes:
         lds_bf16 = estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2)
         assert lds == lds_bf16 / 4
 
-    def test_fp32_doubles_bf16(self):
-        """FP32 uses 4 bytes, so LDS ~2x bf16 for same tile."""
-        lds_bf16 = estimate_triton_lds_bytes(64, 64, 32, 2, 2, 2)
-        lds_fp32 = estimate_triton_lds_bytes(64, 64, 32, 4, 4, 2)
-        assert lds_fp32 == lds_bf16 * 2
-
 
 class TestCheckTritonLdsCapacity:
-    """Test check_triton_lds_capacity: capacity check with short-circuit."""
+    """Test check_triton_lds_capacity: capacity check."""
 
     def test_fits_within_capacity(self):
         """Config that fits should return True."""
-        # 64x64x32 bf16 uses ~18400 bytes
+        # 64x64x32 bf16 ns=2 uses 8192 bytes
         assert check_triton_lds_capacity(64, 64, 32, 2, 2, 65536, 2) is True
 
     def test_exceeds_capacity(self):
         """Config that exceeds capacity should return False."""
-        # 256x256x64 bf16 is large
-        assert check_triton_lds_capacity(256, 256, 64, 2, 2, 65536, 2) is False
+        # 256x256x64 f32 ns=2: (256*64 + 64*256) * 4 = 131072 > 65536
+        assert check_triton_lds_capacity(256, 256, 64, 4, 4, 65536, 2) is False
 
-    def test_short_circuit_raw_exceeds(self):
-        """When raw size exceeds capacity, should return False without full padded calc."""
-        # Very large tile - raw alone exceeds
-        assert check_triton_lds_capacity(512, 512, 256, 2, 2, 1000, 2) is False
+    def test_256x256x64_bf16_fits_64kb(self):
+        """256x256x64 bf16 ns=2 uses exactly 65536 bytes — fits 64KB."""
+        assert check_triton_lds_capacity(256, 256, 64, 2, 2, 65536, 2) is True
+
+    def test_128x128x64_bf16_fits_64kb(self):
+        """128x128x64 bf16 ns=2 uses 32768 bytes — fits 64KB easily."""
+        assert check_triton_lds_capacity(128, 128, 64, 2, 2, 65536, 2) is True
 
     def test_num_stages_affects_capacity(self):
         """Higher num_stages can push config over capacity."""
-        # 128x128x64: 73696 bytes (2 stages), 147392 (4 stages). Use capacity 100000.
-        fits_2 = check_triton_lds_capacity(128, 128, 64, 2, 2, 100000, 2)
-        fits_4 = check_triton_lds_capacity(128, 128, 64, 2, 2, 100000, 4)
+        # 128x128x64 bf16: ns=2 uses 32768, ns=3 uses 65536, ns=4 uses 98304
+        fits_2 = check_triton_lds_capacity(128, 128, 64, 2, 2, 65536, 2)
+        fits_3 = check_triton_lds_capacity(128, 128, 64, 2, 2, 65536, 3)
+        fits_4 = check_triton_lds_capacity(128, 128, 64, 2, 2, 65536, 4)
         assert fits_2 is True
-        assert fits_4 is False
+        assert fits_3 is True   # exactly 65536
+        assert fits_4 is False  # 98304 > 65536
 
     def test_sub_byte_dtype_not_free(self):
         """Sub-byte types (0.5 bytes/elem) must not pass capacity=0; LDS > 0."""
         assert check_triton_lds_capacity(128, 128, 64, 0.5, 0.5, 0, 2) is False
-        assert check_triton_lds_capacity(256, 256, 128, 0.5, 0.5, 65536, 2) is False
 
 
 # N_CU -> expected LDS capacity (from origami common.hpp / hardware)
@@ -247,27 +185,28 @@ class TestLdsArchitectureDependent:
         fits = check_triton_lds_capacity(64, 64, 32, 2, 2, lds_cap, 2)
         assert fits, f"64x64x32 should fit in {lds_cap} bytes (N_CU={hardware.N_CU})"
 
-    def test_64kb_arch_128x128x64_exceeds_lds(self):
-        """On 64KB LDS (N_CU in 304,80,64,228,104), 128x128x64 bf16 should exceed LDS."""
+    def test_256x256x64_bf16_fits_on_all_archs(self):
+        """256x256x64 bf16 ns=2 uses 65536 bytes — fits on all archs (64KB+)."""
+        hardware = _get_hardware()
+        if hardware is None:
+            pytest.skip("Could not get hardware")
+        lds_cap = hardware.lds_capacity
+        usage = estimate_triton_lds_bytes(256, 256, 64, 2, 2, 2)
+        fits = check_triton_lds_capacity(256, 256, 64, 2, 2, lds_cap, 2)
+        assert fits, (
+            f"256x256x64 bf16 ns=2 uses {usage} bytes, capacity={lds_cap} (N_CU={hardware.N_CU})"
+        )
+
+    def test_256x256x64_f32_exceeds_on_64kb_archs(self):
+        """256x256x64 f32 ns=2 uses 131072 bytes — exceeds 64KB archs."""
         hardware = _get_hardware()
         if hardware is None:
             pytest.skip("Could not get hardware")
         lds_cap = hardware.lds_capacity
         if lds_cap != 65536:
             pytest.skip(f"Requires 64KB LDS, got {lds_cap} (N_CU={hardware.N_CU})")
-        fits = check_triton_lds_capacity(128, 128, 64, 2, 2, lds_cap, 2)
-        assert not fits, f"128x128x64 should NOT fit in 64KB"
-
-    def test_160kb_arch_128x128x64_fits_lds(self):
-        """On 160KB LDS (N_CU=256), 128x128x64 bf16 should fit in LDS."""
-        hardware = _get_hardware()
-        if hardware is None:
-            pytest.skip("Could not get hardware")
-        lds_cap = hardware.lds_capacity
-        if lds_cap != 163840:
-            pytest.skip(f"Requires 160KB LDS, got {lds_cap} (N_CU={hardware.N_CU})")
-        fits = check_triton_lds_capacity(128, 128, 64, 2, 2, lds_cap, 2)
-        assert fits, f"128x128x64 should fit in 160KB"
+        fits = check_triton_lds_capacity(256, 256, 64, 4, 4, lds_cap, 2)
+        assert not fits, "256x256x64 f32 ns=2 should NOT fit in 64KB"
 
     def test_selector_filters_by_lds_on_current_arch(self):
         """OrigamiMatmulSelector should not select configs that exceed LDS."""
@@ -286,4 +225,70 @@ class TestLdsArchitectureDependent:
         assert usage <= hardware.lds_capacity, (
             f"Selector chose {selector.block_m}x{selector.block_n}x{selector.block_k} "
             f"(LDS={usage}) which exceeds {hardware.lds_capacity} (N_CU={hardware.N_CU})"
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestLdsVsCompiledKernel:
+    """Validate LDS estimates against metadata.shared from compiled Triton kernels.
+
+    This is the ground truth: Triton's compiler reports exact LDS allocation.
+    Our model must match exactly.
+    """
+
+    @staticmethod
+    def _compile_and_get_lds(block_m, block_n, block_k, num_stages, dtype):
+        """Compile a Triton matmul kernel and return metadata.shared."""
+        import triton
+        import triton.language as tl
+
+        # Import the kernel from the validation script
+        import importlib.util
+        import os
+        spec = importlib.util.spec_from_file_location(
+            "lds_validation",
+            os.path.join(os.path.dirname(__file__), "..", "tools", "lds_model_validation.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        kernel = mod.matmul_bf16 if dtype == torch.bfloat16 else mod.matmul_f32
+        return mod.get_lds(kernel, block_m, block_n, block_k, num_stages, dtype)
+
+    @pytest.mark.parametrize("block_m,block_n,block_k,num_stages", [
+        (64, 64, 32, 1),
+        (64, 64, 32, 2),
+        (128, 128, 64, 1),
+        (128, 128, 64, 2),
+        (128, 128, 64, 3),
+        (256, 256, 64, 1),
+        (256, 256, 64, 2),
+        (128, 64, 64, 2),
+        (64, 128, 64, 2),
+        (256, 128, 64, 2),
+        (128, 256, 64, 2),
+    ])
+    def test_bf16_estimate_matches_compiled(self, block_m, block_n, block_k, num_stages):
+        """estimate_triton_lds_bytes must match Triton metadata.shared for bf16."""
+        estimated = estimate_triton_lds_bytes(block_m, block_n, block_k, 2, 2, num_stages)
+        actual = self._compile_and_get_lds(block_m, block_n, block_k, num_stages, torch.bfloat16)
+        assert estimated == actual, (
+            f"{block_m}x{block_n}x{block_k} ns={num_stages} bf16: "
+            f"estimated={estimated}, compiled={actual}"
+        )
+
+    @pytest.mark.parametrize("block_m,block_n,block_k,num_stages", [
+        (64, 64, 32, 1),
+        (64, 64, 32, 2),
+        (128, 128, 32, 2),
+        (128, 128, 64, 1),
+        (128, 128, 64, 2),
+    ])
+    def test_f32_estimate_matches_compiled(self, block_m, block_n, block_k, num_stages):
+        """estimate_triton_lds_bytes must match Triton metadata.shared for f32."""
+        estimated = estimate_triton_lds_bytes(block_m, block_n, block_k, 4, 4, num_stages)
+        actual = self._compile_and_get_lds(block_m, block_n, block_k, num_stages, torch.float32)
+        assert estimated == actual, (
+            f"{block_m}x{block_n}x{block_k} ns={num_stages} f32: "
+            f"estimated={estimated}, compiled={actual}"
         )
