@@ -267,8 +267,10 @@ class OrigamiMatmulSelector:
         )
 
         # Heuristic to favor 256x256x64 tile when close~
-        if((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
-           (self._result.config.mt.m != 256 and self._result.config.mt.n == 256)):
+        # Skip for f32 (4 bytes/elem) — 256x256x64 exceeds LDS on all current archs.
+        if (max(bytes_a, bytes_b) < 4 and
+            ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
+             (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
