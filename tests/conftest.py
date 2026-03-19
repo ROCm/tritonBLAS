@@ -6,7 +6,25 @@ used across multiple correctness test files.  Import from here to keep all
 test shapes in one place.
 """
 
+import pytest
 import torch
+import origami
+
+
+# ---------------------------------------------------------------------------
+# Hardware capability detection
+# ---------------------------------------------------------------------------
+
+_hw = origami.get_hardware_for_device(torch.cuda.current_device())
+GPU_ARCH = _hw.arch.name
+
+# Architectures that support FP4/FP6 datatypes
+_FP4_ARCHS = {"gfx950"}
+
+requires_fp4 = pytest.mark.skipif(
+    GPU_ARCH not in _FP4_ARCHS,
+    reason=f"FP4 not supported on {GPU_ARCH}",
+)
 
 
 # Torch compile / dynamo settings required for compile-enabled tests.
