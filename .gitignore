@@ -167,3 +167,12 @@ cython_debug/
 _origami
 *.amdgcn
 datasets/*.yaml
+
+# Large binaries and cloned repos
+*.tar.gz
+df-counters/rocm-systems/
+df-counters/AMD_CA.crt
+
+# Profiling data
+.rocprofv3/
+*.dat

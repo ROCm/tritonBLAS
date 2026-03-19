@@ -1,0 +1,71 @@
+# Build custom rocprofv3 with DF (Data Fabric) counter support
+# for MALL/LLC and HBM counters on MI300X
+#
+# This builds the custom rocm-systems stack from the df-ipdiscovery branch
+# on top of the tritonblas-research base image.
+#
+# Prerequisites:
+#   - Access to AMD internal rocm-systems repo (or a local clone)
+#   - The ptl-disable.patch and remove.sh from df-counters/
+#
+# Usage:
+#   # Option A: If you have the rocm-systems repo locally:
+#   docker build -f docker/Dockerfile.df-counters \
+#       --build-arg ROCM_SYSTEMS_REPO=/path/to/rocm-systems \
+#       -t tritonblas-research:df .
+#
+#   # Option B: Build as overlay on existing image:
+#   docker build -f docker/Dockerfile.df-counters \
+#       -t tritonblas-research:df .
+#
+# Counters enabled:
+#   MALL_BANDWIDTH_ALL  - Total MALL (LLC) bandwidth
+#   HBM_READ_BYTES      - HBM read bandwidth
+#   HBM_WRITE_BYTES     - HBM write bandwidth
+
+FROM tritonblas-research:latest
+
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+        cmake ninja-build rsync aria2 unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/df-build
+
+# Copy build context from df-counters/
+COPY df-counters/ptl-disable.patch /tmp/df-build/ptl-disable.patch
+COPY df-counters/remove.sh /tmp/df-build/remove.sh
+COPY df-counters/zbuild.sh /tmp/df-build/zbuild.sh
+
+# The rocm-systems repo must be cloned or mounted separately.
+# This Dockerfile expects it at /tmp/df-build/rocm-systems/
+#
+# To clone (requires AMD internal access):
+#   git clone <rocm-systems-url> /tmp/rocm-systems
+#   cd /tmp/rocm-systems && git checkout users/mkuriche/umc-df-ipdiscovery
+#
+# Then build with:
+#   docker build --build-arg ROCM_SYSTEMS_DIR=/tmp/rocm-systems ...
+
+ARG ROCM_SYSTEMS_DIR=""
+
+# If rocm-systems dir provided, build the custom stack
+RUN if [ -n "$ROCM_SYSTEMS_DIR" ] && [ -d "$ROCM_SYSTEMS_DIR" ]; then \
+        echo "Building df-counters from $ROCM_SYSTEMS_DIR" && \
+        cp -r "$ROCM_SYSTEMS_DIR" /tmp/df-build/rocm-systems && \
+        cd /tmp/df-build/rocm-systems && \
+        git checkout users/mkuriche/umc-df-ipdiscovery && \
+        git reset --hard && \
+        git apply /tmp/df-build/ptl-disable.patch && \
+        bash /tmp/df-build/remove.sh && \
+        bash /tmp/df-build/zbuild.sh && \
+        echo "df-counters build complete"; \
+    else \
+        echo "WARNING: No rocm-systems provided. MALL/HBM counters will NOT be available." && \
+        echo "Mount the built libraries at runtime via:" && \
+        echo "  docker run -v /path/to/df-libs:/opt/rocm/lib/df-override ..." && \
+        echo "  with LD_LIBRARY_PATH=/opt/rocm/lib/df-override:/opt/rocm/lib"; \
+    fi
+
+WORKDIR /workspace/tritonBLAS

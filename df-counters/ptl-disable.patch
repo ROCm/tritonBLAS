@@ -1,0 +1,16 @@
+--- a/projects/rocprofiler-sdk/source/lib/rocprofiler-sdk/counters/ioctl.cpp
++++ b/projects/rocprofiler-sdk/source/lib/rocprofiler-sdk/counters/ioctl.cpp
+@@ -34,13 +34,6 @@ namespace counters
+ bool
+ counter_collection_has_device_lock()
+ {
+-    kfd_ioctl_profiler_args args = {};
+-    args.op                      = KFD_IOC_PROFILER_VERSION;
+-    int ret = ioctl(pc_sampling::ioctl::get_kfd_fd(), AMDKFD_IOC_PROFILER, &args);
+-    if(ret == 0)
+-    {
+-        return true;
+-    }
+     return false;
+ }
+ 
