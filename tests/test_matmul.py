@@ -33,22 +33,23 @@ from tritonblas.utils import generate_matmul_inputs  # type: ignore
     ],
 )
 @pytest.mark.parametrize(
-    "enable_streamk",
+    "mode",
     [
-        False,
-        True,
+        "persistent",
+        "streamk",
+        "work_stealing",
     ],
 )
-def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
+def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, mode):
     """Test non-quantized matmul with all transpose combinations using shared input generation utilities."""
     init_type = "randn"
+    enable_streamk = mode == "streamk"
+    work_stealing = mode == "work_stealing"
 
-    # Generate all inputs using shared utility (handles transposes automatically)
     inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
 
-    # Run TritonBLAS matmul
-    tritonblas.matmul(inputs.A, inputs.B, inputs.C, enable_streamk=enable_streamk)
+    tritonblas.matmul(inputs.A, inputs.B, inputs.C, enable_streamk=enable_streamk,
+                      work_stealing=work_stealing)
 
-    # Check correctness
     torch_c = torch.matmul(inputs.A, inputs.B)
     torch.testing.assert_close(inputs.C.to(out_dtype), torch_c, atol=1, rtol=1)

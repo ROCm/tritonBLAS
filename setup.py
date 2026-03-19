@@ -40,7 +40,7 @@ class CustomBuildExt(build_ext):
                 "_origami",
             ]
         )
-        ORIGAMI_COMMIT = "4fc354a18fbed563d66f347a699f77b9ce52043a"
+        ORIGAMI_COMMIT = "66af6cd8ceb5c4540f857460dc130c9e9207de3e"
         subprocess.check_call(
             [
                 "git",
@@ -77,6 +77,9 @@ class CustomBuildExt(build_ext):
 
 
 setup(
+    name="tritonblas",
+    version="0.1.0",
+    package_dir={"": "include"},
     cmdclass={"build_ext": CustomBuildExt},
     ext_modules=[Extension("_trigger_ext", sources=[])],
 )

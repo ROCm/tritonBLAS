@@ -16,7 +16,7 @@ import tritonblas
 
 
 # If we don't increase this, torch will complain about too many recompilations.
-torch._dynamo.config.cache_size_limit = 10000
+torch._dynamo.config.cache_size_limit = 50000
 # Also disable caches so every compile is fresh and new issues are caught.
 # Note this causes a single UserWarning that notes caches are disabled.
 torch._inductor.config.force_disable_caches = True
@@ -32,6 +32,7 @@ STANDARD_DIMS = [
     (128, 256, 512),      # Medium sizes
     (256, 256, 256),      # Square
     (512, 1024, 768),     # Larger
+    (768, 1024, 512),     #
     (2048, 1024, 512),    # Wide output
     (1024, 2048, 512),    # Tall output
 ]
@@ -64,6 +65,9 @@ USE_COMPILE = [False, True]
 # Whether to enable StreamK (vs. Persistent path)
 ENABLE_STREAMK = [False, True]
 
+# Number of trials for select tests to catch intermittent problems
+MULTITRIAL_NUM_TRIALS = 1
+
 
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
@@ -90,13 +94,14 @@ def test_matmul_forward_correctness(m, n, k, dtype, enable_streamk, use_compile)
     torch.testing.assert_close(result, expected, atol=1e-1, rtol=1e-1)
 
 
+@pytest.mark.parametrize("trial", range(MULTITRIAL_NUM_TRIALS))
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
 @pytest.mark.parametrize("m, n, k", STANDARD_DIMS + EDGE_CASE_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_matmul_backward_correctness(m, n, k, dtype, enable_streamk, use_compile):
+def test_matmul_backward_correctness(m, n, k, dtype, enable_streamk, use_compile, trial):
     """Test that tritonblas.matmul backward pass produces correct gradients."""
-    torch.manual_seed(42)
+    torch.manual_seed(42 + trial)
     
     # Create inputs with requires_grad for tritonblas
     a = torch.randn(m, k, device='cuda', dtype=dtype, requires_grad=True)

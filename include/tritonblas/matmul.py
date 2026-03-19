@@ -7,18 +7,18 @@ import torch
 from torch.library import triton_op, wrap_triton
 import triton
 
-from .kernels import persistent_matmul, streamk_matmul
+from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
+from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 _tensor_cache = {}
+
 current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
 MAX_SMS = current_device.multi_processor_count
-# TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
 MAX_BLOCK_SIZE = 65536
 
-# Global pre-allocated buffers
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
@@ -58,10 +58,12 @@ def persistent_matmul_lt(
     b: torch.Tensor,
     c: torch.Tensor,
     selector,
+    config: Optional[MatmulConfig] = None,
     bias: Optional[torch.Tensor] = None,
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
+    work_stealing: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -79,63 +81,104 @@ def persistent_matmul_lt(
     total_programs = total_tiles
     even_k = K % BLK_K == 0
 
-    # TODO: Separate these configs.
-    # basica configs for most of compute bound sizes
-    # TODO: set these values analytically?
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
-    #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
-    # Run in Data-parallel mode.
-    grids = total_tiles
-
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, total_programs // num_xcds)
+    chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
 
-    # TODO: Support other matmul algs.
-    #kk = persistent_matmul[(grids,)](
-    kk = wrap_triton(persistent_matmul)[(grids,)](
-        a,
-        b,
-        c,
-        a_scale if quantized else None,  # A_scale_ptr
-        b_scale if quantized else None,  # B_scale_ptr
-        bias if bias is not None else None,
-        M,
-        N,
-        K,
-        a.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        bias.stride(0) if bias is not None else 0,
-        stride_ak=a.stride(1),
-        stride_bk=b.stride(0),
-        BLOCK_SIZE_M=BLK_M,
-        BLOCK_SIZE_N=BLK_N,
-        BLOCK_SIZE_K=BLK_K,
-        GROUP_SIZE_M=gsize_m,
-        NUM_SMS=total_programs,
-        NUM_XCDS=num_xcds,
-        CHUNK_SIZE=chunk_size,
-        BIAS=bias is not None,
-        EVEN_K=even_k,
-        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
-        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
-        QUANTIZED=quantized,
-        num_stages=num_stages,
-        num_warps=num_warps,
-        waves_per_eu=waves_per_eu,
-        matrix_instr_nonkdim=mfmaInstrSize,
-        kpack=kpack,
-        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
-    )
+    if work_stealing and config is not None:
+        device = a.device
+        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
+        for i in range(selector._ACTIVE_CU, len(mask), 1):
+            mask[i] = 0
+
+        grids = selector._hardware.N_CU
+
+        kk = ws_persistent_matmul[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,
+            b_scale if quantized else None,
+            bias if bias is not None else None,
+            config.tile_counter,
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            bias.stride(0) if bias is not None else 0,
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=grids,
+            NUM_XCDS=num_xcds,
+            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
+            COUNTER_STRIDE=COUNTER_STRIDE,
+            BIAS=bias is not None,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            GLOBAL_ATOMIC=config.global_atomic,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+            mask_ptr=mask,
+        )
+    else:
+        grids = total_tiles
+
+        kk = wrap_triton(persistent_matmul)[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,
+            b_scale if quantized else None,
+            bias if bias is not None else None,
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            bias.stride(0) if bias is not None else 0,
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=total_programs,
+            NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size,
+            BIAS=bias is not None,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        )
 
     return c
 
@@ -144,11 +187,13 @@ def streamk_matmul_lt(
     b: torch.Tensor, 
     c: torch.Tensor, 
     selector, 
+    config: Optional[MatmulConfig] = None,
     bias: Optional[torch.Tensor] = None,
     sk_grid: Optional[int] = None,
     a_scale: Optional[torch.Tensor] = None,
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
+    work_stealing: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -168,7 +213,10 @@ def streamk_matmul_lt(
     ##
     # Grid Size
     ##
-    total_programs_streamk = selector.sk_grid
+    if work_stealing:
+        total_programs_streamk = selector._hardware.N_CU
+    else:
+        total_programs_streamk = selector.sk_grid
 
     if total_programs_streamk > 0:  # Stream-K
         total_tiles_streamk = total_tiles % total_programs_streamk
@@ -180,7 +228,6 @@ def streamk_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
-    #for skinny size like 4, 5120, 2880, use CACHE_MODIFIER=".cg"
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -190,79 +237,140 @@ def streamk_matmul_lt(
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
 
-    # Use global buffers with optimized zeroing
-    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
-        locks = _global_locks[:grids]
-        P = _global_P[:grids, :block_size]
+    if config is not None:
+        if grids <= config.locks.shape[0] and block_size <= config.P.shape[1]:
+            locks = config.locks[:grids]
+            P = config.P[:grids, :block_size]
+        else:
+            locks = torch.empty(grids, device=config.device, dtype=torch.uint8)
+            P = torch.empty(grids, block_size, device=config.device, dtype=torch.float32)
     else:
-        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
-        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
+        if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+            locks = _global_locks[:grids]
+            P = _global_P[:grids, :block_size]
+        else:
+            locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
+            P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, grids // num_xcds) 
+    chunk_size = min(chunk_size, grids // num_xcds)
 
-    #kk = streamk_matmul[(grids,)](
-    kk = wrap_triton(streamk_matmul)[(grids,)](
-        a,
-        b,
-        c,
-        a_scale if quantized else None,  # A_scale_ptr
-        b_scale if quantized else None,  # B_scale_ptr
-        bias if bias is not None else None,
-        P,
-        locks,
-        M,
-        N,
-        K,
-        a.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        bias.stride(0) if bias is not None else None,
-        stride_ak=a.stride(1),
-        stride_bk=b.stride(0),
-        BLOCK_SIZE_M=BLK_M,
-        BLOCK_SIZE_N=BLK_N,
-        BLOCK_SIZE_K=BLK_K,
-        GROUP_SIZE_M=gsize_m,
-        NUM_SMS=grids,
-        NUM_XCDS=num_xcds,
-        CHUNK_SIZE=chunk_size,
-        STREAMK_TILES=total_tiles_streamk,
-        BIAS=bias is not None,
-        EVEN_K=even_k,
-        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
-        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
-        QUANTIZED=quantized,
-        num_stages=num_stages,
-        num_warps=num_warps,
-        waves_per_eu=waves_per_eu,
-        matrix_instr_nonkdim=mfmaInstrSize,
-        kpack=kpack,
-    )
+    if work_stealing and config is not None:
+        device = a.device
+        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
+        for i in range(selector._ACTIVE_CU, len(mask), 1):
+            mask[i] = 0
+
+        kk = ws_streamk_matmul[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,
+            b_scale if quantized else None,
+            bias if bias is not None else None,
+            config.tile_counter,
+            config.streamk_tile_counter,
+            P,
+            locks,
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            bias.stride(0) if bias is not None else 0,
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=selector._ACTIVE_CU,
+            NUM_XCDS=num_xcds,
+            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
+            COUNTER_STRIDE=COUNTER_STRIDE,
+            CHUNK_SIZE=chunk_size,
+            STREAMK_TILES=total_tiles_streamk,
+            BIAS=bias is not None,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            GLOBAL_ATOMIC=config.global_atomic,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+            mask_ptr=mask,
+        )
+    else:
+        kk = wrap_triton(streamk_matmul)[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,
+            b_scale if quantized else None,
+            bias if bias is not None else None,
+            P,
+            locks,
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            bias.stride(0) if bias is not None else None,
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=grids,
+            NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size,
+            STREAMK_TILES=total_tiles_streamk,
+            BIAS=bias is not None,
+            EVEN_K=even_k,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            QUANTIZED=quantized,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+        )
 
     return c
 
 def matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
+    selector, config: MatmulConfig,
+    enable_streamk=False, work_stealing=False
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector)
+        return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
 
 def matmul_a8w8_lt(
-    a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
+    c: torch.Tensor, selector, config: MatmulConfig,
+    enable_streamk=False, work_stealing=False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:
-        return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
 @triton_op("tritonblas::_matmul", mutates_args={})
@@ -271,20 +379,20 @@ def _matmul(
     b: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
+    work_stealing: Optional[bool] = False,
 ) -> torch.Tensor:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
 
-    # Allocate an output tensor
     out = a.new_empty(M, N)
 
-    # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
-        return streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
+        return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, out, selector)
+        return persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
 
 
 def _setup_context_matmul_backwards(
@@ -292,10 +400,11 @@ def _setup_context_matmul_backwards(
     inputs: tuple[Any, ...],
     output: Any
 ):
-    a, b, enable_streamk, sk_grid = inputs
+    a, b, enable_streamk, sk_grid, work_stealing = inputs
     ctx.save_for_backward(a, b)
     ctx.enable_streamk = enable_streamk
     ctx.sk_grid = sk_grid
+    ctx.work_stealing = work_stealing
 
 
 def _matmul_backwards(
@@ -305,22 +414,17 @@ def _matmul_backwards(
     a, b = ctx.saved_tensors
     enable_streamk = ctx.enable_streamk
     sk_grid = ctx.sk_grid
+    work_stealing = ctx.work_stealing
 
-    # Make grad_output contiguous
     grad_output_cont = grad_output.contiguous()
 
-    # grad_a = grad_output @ b^T
     b_t = b.T.contiguous()
-    grad_a = matmul(grad_output_cont, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid)
+    grad_a = matmul(grad_output_cont, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid, work_stealing=work_stealing)
 
-    # grad_b = a^T @ grad_output
     a_t = a.T.contiguous()
-    grad_b = matmul(a_t, grad_output_cont, enable_streamk=enable_streamk, sk_grid=sk_grid)
+    grad_b = matmul(a_t, grad_output_cont, enable_streamk=enable_streamk, sk_grid=sk_grid, work_stealing=work_stealing)
 
-    # tuple[a, b, enable_streamk, sk_grid]
-    #   First 2 must be in the order that matches matmul()'s forward args
-    #   Last 2 are not part of the gradient and so are None
-    return grad_a, grad_b, None, None
+    return grad_a, grad_b, None, None, None
 
 
 _matmul.register_autograd(_matmul_backwards,
@@ -334,21 +438,20 @@ def _matmul_out(
     out: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
+    work_stealing: Optional[bool] = False,
 ) -> None:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
 
-    # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
-        streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
+        streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
-        persistent_matmul_lt(a, b, out, selector)
+        persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
 
-    # Custom torch ops cannot return a value which is an alias of an input.  So
-    # even though torch returns a pointer to the out arg when used, we can't.
     return None
 
 
@@ -357,14 +460,12 @@ def matmul(
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
     enable_streamk: Optional[bool] = False,
-    sk_grid: Optional[int] = None
+    sk_grid: Optional[int] = None,
+    work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
-    # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
-        return _matmul(a, b, enable_streamk, sk_grid)
+        return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 
-    # If out tensor provided - in-place - we do NOT support autograd
-    # Check for autograd conditions (global and per-tensor)
     if torch.is_grad_enabled() and (
         a.requires_grad
         or b.requires_grad
@@ -374,7 +475,7 @@ def matmul(
             "tritonblas.matmul(): functions with out=... arguments don't support "
             "automatic differentiation, but one of the arguments requires grad."
         )
-    return _matmul_out(a, b, out, enable_streamk, sk_grid)
+    return _matmul_out(a, b, out, enable_streamk, sk_grid, work_stealing)
 
 
 def matmul_a8w8(
@@ -384,6 +485,7 @@ def matmul_a8w8(
     b_scale: torch.Tensor,
     c: torch.Tensor,
     enable_streamk=False,
+    work_stealing=False,
     sk_grid=None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
@@ -391,10 +493,11 @@ def matmul_a8w8(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
+    config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 def matmul_fp4(
     a: torch.Tensor,
