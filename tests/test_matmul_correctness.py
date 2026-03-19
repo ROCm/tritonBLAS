@@ -16,7 +16,7 @@ import tritonblas
 
 
 # If we don't increase this, torch will complain about too many recompilations.
-torch._dynamo.config.cache_size_limit = 10000
+torch._dynamo.config.cache_size_limit = 50000
 # Also disable caches so every compile is fresh and new issues are caught.
 # Note this causes a single UserWarning that notes caches are disabled.
 torch._inductor.config.force_disable_caches = True
