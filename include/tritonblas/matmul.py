@@ -254,7 +254,7 @@ def streamk_matmul_lt(
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, grids // num_xcds) 
+    chunk_size = min(chunk_size, grids // num_xcds)
 
     if work_stealing and config is not None:
         device = a.device
