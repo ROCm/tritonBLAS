@@ -1,0 +1,356 @@
+{
+  "1024": {
+    "best": "cpx=8",
+    "results": [
+      {
+        "label": "global",
+        "global": true,
+        "cpx": 1,
+        "ms": 0.10999149829149246,
+        "tflops": 19.52408760092417,
+        "locks": 1,
+        "tiles_per_lock": 256.0
+      },
+      {
+        "label": "cpx=1",
+        "global": false,
+        "cpx": 1,
+        "ms": 0.10806800052523613,
+        "tflops": 19.87159600957471,
+        "locks": 8,
+        "tiles_per_lock": 32.0
+      },
+      {
+        "label": "cpx=2",
+        "global": false,
+        "cpx": 2,
+        "ms": 0.10812799632549286,
+        "tflops": 19.860570074151067,
+        "locks": 16,
+        "tiles_per_lock": 16.0
+      },
+      {
+        "label": "cpx=4",
+        "global": false,
+        "cpx": 4,
+        "ms": 0.10818799957633018,
+        "tflops": 19.849555000643857,
+        "locks": 32,
+        "tiles_per_lock": 8.0
+      },
+      {
+        "label": "cpx=8",
+        "global": false,
+        "cpx": 8,
+        "ms": 0.07180450111627579,
+        "tflops": 29.90736812616381,
+        "locks": 64,
+        "tiles_per_lock": 4.0
+      },
+      {
+        "label": "cpx=16",
+        "global": false,
+        "cpx": 16,
+        "ms": 0.10480000078678131,
+        "tflops": 20.49125602936892,
+        "locks": 128,
+        "tiles_per_lock": 2.0
+      }
+    ]
+  },
+  "2048": {
+    "best": "cpx=4",
+    "results": [
+      {
+        "label": "global",
+        "global": true,
+        "cpx": 1,
+        "ms": 0.17672450095415115,
+        "tflops": 97.21271861708124,
+        "locks": 1,
+        "tiles_per_lock": 512.0
+      },
+      {
+        "label": "cpx=1",
+        "global": false,
+        "cpx": 1,
+        "ms": 0.14531250298023224,
+        "tflops": 118.2270543253741,
+        "locks": 8,
+        "tiles_per_lock": 64.0
+      },
+      {
+        "label": "cpx=2",
+        "global": false,
+        "cpx": 2,
+        "ms": 0.14414949715137482,
+        "tflops": 119.18091650336463,
+        "locks": 16,
+        "tiles_per_lock": 32.0
+      },
+      {
+        "label": "cpx=4",
+        "global": false,
+        "cpx": 4,
+        "ms": 0.14202500134706497,
+        "tflops": 120.96369668054244,
+        "locks": 32,
+        "tiles_per_lock": 16.0
+      },
+      {
+        "label": "cpx=8",
+        "global": false,
+        "cpx": 8,
+        "ms": 0.1420455053448677,
+        "tflops": 120.94623580161546,
+        "locks": 64,
+        "tiles_per_lock": 8.0
+      },
+      {
+        "label": "cpx=16",
+        "global": false,
+        "cpx": 16,
+        "ms": 0.17720549553632736,
+        "tflops": 96.94885100489508,
+        "locks": 128,
+        "tiles_per_lock": 4.0
+      }
+    ]
+  },
+  "4096": {
+    "best": "cpx=4",
+    "results": [
+      {
+        "label": "global",
+        "global": true,
+        "cpx": 1,
+        "ms": 0.2801609933376312,
+        "tflops": 490.5713384102968,
+        "locks": 1,
+        "tiles_per_lock": 256.0
+      },
+      {
+        "label": "cpx=1",
+        "global": false,
+        "cpx": 1,
+        "ms": 0.282587006688118,
+        "tflops": 486.35977670299206,
+        "locks": 8,
+        "tiles_per_lock": 32.0
+      },
+      {
+        "label": "cpx=2",
+        "global": false,
+        "cpx": 2,
+        "ms": 0.27041950821876526,
+        "tflops": 508.2434857503474,
+        "locks": 16,
+        "tiles_per_lock": 16.0
+      },
+      {
+        "label": "cpx=4",
+        "global": false,
+        "cpx": 4,
+        "ms": 0.2661695033311844,
+        "tflops": 516.358755424321,
+        "locks": 32,
+        "tiles_per_lock": 8.0
+      },
+      {
+        "label": "cpx=8",
+        "global": false,
+        "cpx": 8,
+        "ms": 0.2736465036869049,
+        "tflops": 502.2499890196003,
+        "locks": 64,
+        "tiles_per_lock": 4.0
+      },
+      {
+        "label": "cpx=16",
+        "global": false,
+        "cpx": 16,
+        "ms": 0.28174449503421783,
+        "tflops": 487.8141574880036,
+        "locks": 128,
+        "tiles_per_lock": 2.0
+      }
+    ]
+  },
+  "8192": {
+    "best": "cpx=4",
+    "results": [
+      {
+        "label": "global",
+        "global": true,
+        "cpx": 1,
+        "ms": 1.9437690377235413,
+        "tflops": 565.6596058674239,
+        "locks": 1,
+        "tiles_per_lock": 1024.0
+      },
+      {
+        "label": "cpx=1",
+        "global": false,
+        "cpx": 1,
+        "ms": 1.9289950132369995,
+        "tflops": 569.9919492953671,
+        "locks": 8,
+        "tiles_per_lock": 128.0
+      },
+      {
+        "label": "cpx=2",
+        "global": false,
+        "cpx": 2,
+        "ms": 1.838487982749939,
+        "tflops": 598.0521157018351,
+        "locks": 16,
+        "tiles_per_lock": 64.0
+      },
+      {
+        "label": "cpx=4",
+        "global": false,
+        "cpx": 4,
+        "ms": 1.7997589707374573,
+        "tflops": 610.9215987546773,
+        "locks": 32,
+        "tiles_per_lock": 32.0
+      },
+      {
+        "label": "cpx=8",
+        "global": false,
+        "cpx": 8,
+        "ms": 1.8804839849472046,
+        "tflops": 584.6960870591352,
+        "locks": 64,
+        "tiles_per_lock": 16.0
+      },
+      {
+        "label": "cpx=16",
+        "global": false,
+        "cpx": 16,
+        "ms": 1.9156444668769836,
+        "tflops": 573.9643481801716,
+        "locks": 128,
+        "tiles_per_lock": 8.0
+      }
+    ]
+  },
+  "12288": {
+    "best": "cpx=1",
+    "results": [
+      {
+        "label": "global",
+        "global": true,
+        "cpx": 1,
+        "ms": 6.642442941665649,
+        "tflops": 558.6576770523936,
+        "locks": 1,
+        "tiles_per_lock": 2304.0
+      },
+      {
+        "label": "cpx=1",
+        "global": false,
+        "cpx": 1,
+        "ms": 6.21418309211731,
+        "tflops": 597.1584178862087,
+        "locks": 8,
+        "tiles_per_lock": 288.0
+      },
+      {
+        "label": "cpx=2",
+        "global": false,
+        "cpx": 2,
+        "ms": 6.311084032058716,
+        "tflops": 587.9895949560819,
+        "locks": 16,
+        "tiles_per_lock": 144.0
+      },
+      {
+        "label": "cpx=4",
+        "global": false,
+        "cpx": 4,
+        "ms": 6.404798984527588,
+        "tflops": 579.3861372868221,
+        "locks": 32,
+        "tiles_per_lock": 72.0
+      },
+      {
+        "label": "cpx=8",
+        "global": false,
+        "cpx": 8,
+        "ms": 7.240551948547363,
+        "tflops": 512.5095117214772,
+        "locks": 64,
+        "tiles_per_lock": 36.0
+      },
+      {
+        "label": "cpx=16",
+        "global": false,
+        "cpx": 16,
+        "ms": 7.126190185546875,
+        "tflops": 520.734312040989,
+        "locks": 128,
+        "tiles_per_lock": 18.0
+      }
+    ]
+  },
+  "16384": {
+    "best": "cpx=2",
+    "results": [
+      {
+        "label": "global",
+        "global": true,
+        "cpx": 1,
+        "ms": 15.848093032836914,
+        "tflops": 555.0253272732991,
+        "locks": 1,
+        "tiles_per_lock": 4096.0
+      },
+      {
+        "label": "cpx=1",
+        "global": false,
+        "cpx": 1,
+        "ms": 14.506903648376465,
+        "tflops": 606.3384189631956,
+        "locks": 8,
+        "tiles_per_lock": 512.0
+      },
+      {
+        "label": "cpx=2",
+        "global": false,
+        "cpx": 2,
+        "ms": 14.444721698760986,
+        "tflops": 608.9485976709746,
+        "locks": 16,
+        "tiles_per_lock": 256.0
+      },
+      {
+        "label": "cpx=4",
+        "global": false,
+        "cpx": 4,
+        "ms": 16.025498390197754,
+        "tflops": 548.8810898753868,
+        "locks": 32,
+        "tiles_per_lock": 128.0
+      },
+      {
+        "label": "cpx=8",
+        "global": false,
+        "cpx": 8,
+        "ms": 17.314929962158203,
+        "tflops": 508.006272126533,
+        "locks": 64,
+        "tiles_per_lock": 64.0
+      },
+      {
+        "label": "cpx=16",
+        "global": false,
+        "cpx": 16,
+        "ms": 17.20561981201172,
+        "tflops": 511.2337200469351,
+        "locks": 128,
+        "tiles_per_lock": 32.0
+      }
+    ]
+  }
+}

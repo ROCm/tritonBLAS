@@ -666,6 +666,58 @@
         }
       },
       "conclusion": "CONFIRMED: At 8K, WS delivers 511 TFLOPS during overlap vs torch 466 TFLOPS (+10%). WS overlap penalty is +10% vs torch +41% (31pp advantage). WS is 13% slower in isolation but faster during overlap. Advantage strongest at 4K-8K where wave quantization matters. At 12K+ both converge."
+    },
+    {
+      "experiment_id": "exp_010_atomic_counter_sweep",
+      "timestamp": "2026-03-20T03:13:29.910240",
+      "hypothesis": "Tuning COUNTERS_PER_XCD can reduce atomic contention and improve WS performance",
+      "configuration": {
+        "size": "8192x8192x8192 bf16",
+        "swept": {
+          "global": [
+            true
+          ],
+          "COUNTERS_PER_XCD": [
+            1,
+            2,
+            4,
+            8,
+            16,
+            32,
+            38
+          ]
+        }
+      },
+      "results": {
+        "best": {
+          "config": "per-XCD x4 (32 locks)",
+          "ms": 1.78,
+          "tflops": 618,
+          "vs_torch": 1.102
+        },
+        "default": {
+          "config": "per-XCD x1 (8 locks)",
+          "ms": 1.841,
+          "tflops": 597,
+          "vs_torch": 1.14
+        },
+        "global": {
+          "config": "global (1 lock)",
+          "ms": 1.956,
+          "tflops": 562,
+          "vs_torch": 1.211
+        },
+        "improvement": "1.841 -> 1.780 ms (-3.3%)",
+        "overlap_with_cpx4": {
+          "ws_alone_median": 1.804,
+          "ws_overlap_gemm_median": 2.108,
+          "torch_alone_median": 1.63,
+          "torch_overlap_gemm_median": 2.299,
+          "ws_overlap_efficiency": 72.2,
+          "torch_overlap_efficiency": 57.5
+        }
+      },
+      "conclusion": "COUNTERS_PER_XCD=4 (32 locks) is optimal. U-shaped curve: too few locks -> contention, too many -> small partitions. Improves WS raw by 3.3%, closes torch gap from 14% to 10%. During overlap, WS is 8% faster than torch (2.108 vs 2.299ms). Changed default from 1 to 4."
     }
   ]
 }

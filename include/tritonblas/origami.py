@@ -136,7 +136,7 @@ class OrigamiMatmulSelector:
     if hasattr(torch, "float8_e4m3fnuz"):
         dtype_to_str[torch.float8_e4m3fnuz] = "f8"
 
-    COUNTERS_PER_XCD = 1  # work-stealing: atomic counter slots per XCD
+    COUNTERS_PER_XCD = 4  # work-stealing: default, overridden by _select_ws_params()
 
     def __init__(
         self,
@@ -289,6 +289,36 @@ class OrigamiMatmulSelector:
             # origami >= 0.1.0: returns workgroup_mapping_t object
             self._xcc_workgroup_mapping = _wg_result.wgmxcc
             self._workgroup_mapping = _wg_result.wgm
+
+        self._select_ws_params()
+
+    def _select_ws_params(self):
+        """Select work-stealing parameters based on tile count.
+
+        Empirically tuned on MI300X (8 XCDs, 304 CUs) via autotune sweeps
+        across GEMM sizes 1K-16K. Optimizes both COUNTERS_PER_XCD (atomic
+        contention) and GROUP_SIZE_M (L2 tile locality).
+        """
+        bm = self._result.config.mt.m
+        bn = self._result.config.mt.n
+        total_tiles = ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
+        tiles_m = (self._m + bm - 1) // bm
+
+        if total_tiles <= 512:
+            self.COUNTERS_PER_XCD = 8
+        elif total_tiles <= 1536:
+            self.COUNTERS_PER_XCD = 4
+        elif total_tiles <= 2048:
+            self.COUNTERS_PER_XCD = 2
+        else:
+            self.COUNTERS_PER_XCD = 1
+
+        if total_tiles <= 1024:
+            self._workgroup_mapping = max(2, min(tiles_m // 8, 8))
+        elif total_tiles <= 4096:
+            self._workgroup_mapping = max(4, min(tiles_m // 4, 16))
+        else:
+            self._workgroup_mapping = max(8, min(tiles_m // 4, 16))
 
     @property
     def block_m(self):

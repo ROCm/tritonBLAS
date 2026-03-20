@@ -107,19 +107,23 @@ def ws_persistent_matmul(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
+    # Pre-compute K-loop invariants outside the tile loop
+    rk = tl.arange(0, BLOCK_SIZE_K)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    loop_k = tl.cdiv(K, BLOCK_SIZE_K)
+    has_remainder = not EVEN_K
+    if has_remainder:
+        loop_k -= 1
+    tl.assume(loop_k > 1)
+
     raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
 
     while raw_idx < bound:
-        # Map raw counter value → global tile_id
         if GLOBAL_ATOMIC:
-            # Chiplet swizzle: remap global sequential index into
-            # per-XCD tile regions so data stays in the issuing XCD's L2.
             tile_id = chiplet_transform(raw_idx, total_tiles, NUM_XCDS)
         else:
             tile_id = xcd_base + slot_base + raw_idx
 
-        # GROUP_SIZE_M swizzle → (pid_m, pid_n)
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
         group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
@@ -130,7 +134,6 @@ def ws_persistent_matmul(
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rk = tl.arange(0, BLOCK_SIZE_K)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
@@ -139,11 +142,6 @@ def ws_persistent_matmul(
         if BIAS:
             bias_ = bias_ptr + rm * stride_bias
             bias = tl.load(bias_, mask=rm < M, other=0.0)
-
-        loop_k = tl.cdiv(K, BLOCK_SIZE_K)
-        if not EVEN_K:
-            loop_k -= 1
-        tl.assume(loop_k > 1)
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for k in range(0, loop_k):
@@ -164,22 +162,22 @@ def ws_persistent_matmul(
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
 
-        if not EVEN_K:
+        if has_remainder:
             k = loop_k
-            rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+            rk_rem = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+            A_REM = A + rm[:, None] * stride_am + rk_rem[None, :] * stride_ak
+            B_REM = B + rk_rem[:, None] * stride_bk + rn[None, :] * stride_bn
             if stride_ak == 1:
-                A_BASE = tl.multiple_of(A_BASE, (1, 16))
+                A_REM = tl.multiple_of(A_REM, (1, 16))
             else:
-                A_BASE = tl.multiple_of(A_BASE, (16, 1))
+                A_REM = tl.multiple_of(A_REM, (16, 1))
 
             if stride_bk == 1:
-                B_BASE = tl.multiple_of(B_BASE, (16, 1))
+                B_REM = tl.multiple_of(B_REM, (16, 1))
             else:
-                B_BASE = tl.multiple_of(B_BASE, (1, 16))
-            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
-            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
+                B_REM = tl.multiple_of(B_REM, (1, 16))
+            a = tl.load(A_REM, mask=rk_rem[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
+            b = tl.load(B_REM, mask=rk_rem[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
             if QUANTIZED:
                 acc += tl.dot(a, b, input_precision="ieee")
@@ -204,12 +202,9 @@ def ws_persistent_matmul(
         else:
             c = acc.to(C.type.element_ty)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(C_, c, c_mask)
+        next_raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
 
-        raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
+        C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        tl.store(C_, c, mask=(rm[:, None] < M) & (rn[None, :] < N))
+
+        raw_idx = next_raw_idx

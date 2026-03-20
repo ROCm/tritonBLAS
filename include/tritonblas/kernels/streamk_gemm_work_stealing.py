@@ -194,6 +194,8 @@ def ws_streamk_matmul(
         else:
             c = acc.to(C.type.element_ty)
 
+        next_raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
+
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -202,7 +204,7 @@ def ws_streamk_matmul(
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, mask=mask)
 
-        raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
+        raw_idx = next_raw_idx
 
     if STREAMK_TILES == 0:
         return

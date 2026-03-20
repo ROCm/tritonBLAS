@@ -94,11 +94,6 @@ def persistent_matmul_lt(
     chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
 
     if work_stealing and config is not None:
-        device = a.device
-        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
-        for i in range(selector._ACTIVE_CU, len(mask), 1):
-            mask[i] = 0
-
         grids = selector._hardware.N_CU
 
         kk = ws_persistent_matmul[(grids,)](
@@ -138,7 +133,7 @@ def persistent_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            mask_ptr=mask,
+            mask_ptr=config.mask,
         )
     else:
         grids = total_tiles
@@ -257,11 +252,6 @@ def streamk_matmul_lt(
     chunk_size = min(chunk_size, grids // num_xcds) 
 
     if work_stealing and config is not None:
-        device = a.device
-        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
-        for i in range(selector._ACTIVE_CU, len(mask), 1):
-            mask[i] = 0
-
         kk = ws_streamk_matmul[(grids,)](
             a,
             b,
@@ -304,7 +294,7 @@ def streamk_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            mask_ptr=mask,
+            mask_ptr=config.mask,
         )
     else:
         kk = wrap_triton(streamk_matmul)[(grids,)](
