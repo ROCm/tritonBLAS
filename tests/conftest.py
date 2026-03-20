@@ -79,5 +79,8 @@ USE_COMPILE = [False, True]
 # Whether to enable StreamK (vs. Persistent path)
 ENABLE_STREAMK = [False, True]
 
+# Whether to enable work stealing
+ENABLE_WORK_STEALING = [False, True]
+
 # Number of trials for select tests to catch intermittent problems
 MULTITRIAL_NUM_TRIALS = 1
