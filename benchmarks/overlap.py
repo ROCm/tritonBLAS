@@ -225,9 +225,9 @@ def _time_per_iter(
     """
     # Warmup
     for _ in range(n_warmup):
-        if reset_fn:
-            reset_fn()
         with torch.cuda.stream(stream):
+            if reset_fn:
+                reset_fn()
             fn()
     torch.cuda.synchronize()
 
@@ -235,8 +235,9 @@ def _time_per_iter(
     ends = [torch.cuda.Event(enable_timing=True) for _ in range(n_steps)]
 
     for i in range(n_steps):
-        if reset_fn:
-            reset_fn()
+        with torch.cuda.stream(stream):
+            if reset_fn:
+                reset_fn()
         torch.cuda.synchronize()
         starts[i].record(stream)
         with torch.cuda.stream(stream):
@@ -272,8 +273,9 @@ def _time_serial(
     """
     # Warmup
     for _ in range(n_warmup):
-        if reset_fn:
-            reset_fn()
+        with torch.cuda.stream(matmul_stream):
+            if reset_fn:
+                reset_fn()
         with torch.cuda.stream(comm_stream):
             comm_fn()
         torch.cuda.synchronize()
@@ -285,13 +287,12 @@ def _time_serial(
     ends = [torch.cuda.Event(enable_timing=True) for _ in range(n_steps)]
 
     for i in range(n_steps):
-        if reset_fn:
-            reset_fn()
-        # Run NCCL first, wait for it to COMPLETELY finish
+        with torch.cuda.stream(matmul_stream):
+            if reset_fn:
+                reset_fn()
         with torch.cuda.stream(comm_stream):
             comm_fn()
         torch.cuda.synchronize()
-        # Now run GEMM (NCCL is 100% done, zero temporal overlap)
         starts[i].record(matmul_stream)
         with torch.cuda.stream(matmul_stream):
             matmul_fn()
@@ -330,9 +331,9 @@ def _time_rotating(
     # Warmup every buffer set
     for j in range(max(n_warmup, n_bufs)):
         idx = j % n_bufs
-        if reset_fns[idx]:
-            reset_fns[idx]()
         with torch.cuda.stream(matmul_stream):
+            if reset_fns[idx]:
+                reset_fns[idx]()
             matmul_fns[idx]()
     torch.cuda.synchronize()
 
@@ -341,8 +342,9 @@ def _time_rotating(
 
     for i in range(n_steps):
         idx = i % n_bufs
-        if reset_fns[idx]:
-            reset_fns[idx]()
+        with torch.cuda.stream(matmul_stream):
+            if reset_fns[idx]:
+                reset_fns[idx]()
         torch.cuda.synchronize()
         starts[i].record(matmul_stream)
         with torch.cuda.stream(matmul_stream):
@@ -378,8 +380,9 @@ def _time_overlap(
     """
     # Warmup — schedule comm first so RCCL gets CUs before GEMM
     for _ in range(n_warmup):
-        if reset_fn:
-            reset_fn()
+        with torch.cuda.stream(matmul_stream):
+            if reset_fn:
+                reset_fn()
         with torch.cuda.stream(comm_stream):
             comm_fn()
         with torch.cuda.stream(matmul_stream):
@@ -394,11 +397,11 @@ def _time_overlap(
     co_e = [torch.cuda.Event(enable_timing=True) for _ in range(n_steps)]
 
     for i in range(n_steps):
-        if reset_fn:
-            reset_fn()
+        with torch.cuda.stream(matmul_stream):
+            if reset_fn:
+                reset_fn()
         torch.cuda.synchronize()
 
-        # Ensure both streams wait for the default stream
         matmul_stream.wait_stream(torch.cuda.current_stream())
         comm_stream.wait_stream(torch.cuda.current_stream())
 
@@ -462,8 +465,9 @@ def _time_overlap_rotating(
     # Warmup
     for j in range(max(n_warmup, n_bufs)):
         idx = j % n_bufs
-        if reset_fns[idx]:
-            reset_fns[idx]()
+        with torch.cuda.stream(matmul_stream):
+            if reset_fns[idx]:
+                reset_fns[idx]()
         with torch.cuda.stream(comm_stream):
             comm_fn()
         with torch.cuda.stream(matmul_stream):
@@ -479,8 +483,9 @@ def _time_overlap_rotating(
 
     for i in range(n_steps):
         idx = i % n_bufs
-        if reset_fns[idx]:
-            reset_fns[idx]()
+        with torch.cuda.stream(matmul_stream):
+            if reset_fns[idx]:
+                reset_fns[idx]()
         torch.cuda.synchronize()
 
         matmul_stream.wait_stream(torch.cuda.current_stream())
@@ -719,12 +724,13 @@ def _print_standard_results(args, results, nccl_ch, world_size):
 
 def mode_l2_profile(args):
     """Run GEMM for L2 cache profiling (wrap with rocprof for hardware counters)."""
-    # Single-GPU modes
-    if args.profile_mode in ["gemm-alone", "gemm-polluted"]:
+    SINGLE_GPU_MODES = ["gemm-alone", "gemm-polluted", "gemm-rotating"]
+    DISTRIBUTED_MODES = ["gemm-rccl", "gemm-rccl-rotating"]
+
+    if args.profile_mode in SINGLE_GPU_MODES:
         torch.cuda.set_device(0)
         dev = torch.device("cuda", 0)
-    # Distributed mode
-    else:  # gemm-rccl
+    else:
         dist.init_process_group(backend="nccl")
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
@@ -823,6 +829,78 @@ def mode_l2_profile(args):
         if rank == 0:
             print(f"GEMM + RCCL all_reduce: {elapsed / args.steps:.3f} ms/iter ({args.steps} iters)")
         
+        dist.destroy_process_group()
+
+    elif args.profile_mode == "gemm-rotating":
+        N_BUFS = 4
+        rot_As = [torch.randn(args.m, args.k, dtype=dtype, device=dev) for _ in range(N_BUFS)]
+        rot_Bs = [torch.randn(args.k, args.n, dtype=dtype, device=dev) for _ in range(N_BUFS)]
+        rot_Cs = [torch.empty(args.m, args.n, dtype=dtype, device=dev) for _ in range(N_BUFS)]
+        rot_fns = [_make_tritonblas_matmul(a, b, c, args.backend)
+                    for a, b, c in zip(rot_As, rot_Bs, rot_Cs)]
+
+        for j in range(max(args.warmup, N_BUFS)):
+            idx = j % N_BUFS
+            rot_fns[idx][1]()  # reset
+            rot_fns[idx][0]()  # matmul
+        torch.cuda.synchronize()
+
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for i in range(args.steps):
+            idx = i % N_BUFS
+            rot_fns[idx][1]()
+            rot_fns[idx][0]()
+        end.record()
+        torch.cuda.synchronize()
+        elapsed = start.elapsed_time(end)
+        print(f"GEMM rotating: {elapsed / args.steps:.3f} ms/iter ({args.steps} iters, {N_BUFS} bufs)")
+
+    elif args.profile_mode == "gemm-rccl-rotating":
+        N_BUFS = 4
+        rot_As = [torch.randn(args.m, args.k, dtype=dtype, device=dev) for _ in range(N_BUFS)]
+        rot_Bs = [torch.randn(args.k, args.n, dtype=dtype, device=dev) for _ in range(N_BUFS)]
+        rot_Cs = [torch.empty(args.m, args.n, dtype=dtype, device=dev) for _ in range(N_BUFS)]
+        rot_fns = [_make_tritonblas_matmul(a, b, c, args.backend)
+                    for a, b, c in zip(rot_As, rot_Bs, rot_Cs)]
+
+        comm_tensor = torch.randn(*args.comm_size, dtype=dtype, device=dev)
+        comm_stream = torch.cuda.Stream(device=dev)
+        gemm_stream = torch.cuda.Stream(device=dev)
+
+        def comm_fn():
+            dist.all_reduce(comm_tensor, op=dist.ReduceOp.SUM)
+
+        for j in range(max(args.warmup, N_BUFS)):
+            idx = j % N_BUFS
+            rot_fns[idx][1]()
+            with torch.cuda.stream(comm_stream):
+                comm_fn()
+            with torch.cuda.stream(gemm_stream):
+                torch.cuda._sleep(100_000)
+                rot_fns[idx][0]()
+            torch.cuda.synchronize()
+
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for i in range(args.steps):
+            idx = i % N_BUFS
+            rot_fns[idx][1]()
+            with torch.cuda.stream(comm_stream):
+                comm_fn()
+            with torch.cuda.stream(gemm_stream):
+                torch.cuda._sleep(100_000)
+                rot_fns[idx][0]()
+            torch.cuda.synchronize()
+        end.record()
+        torch.cuda.synchronize()
+        elapsed = start.elapsed_time(end)
+        rank = dist.get_rank()
+        if rank == 0:
+            print(f"GEMM + RCCL rotating: {elapsed / args.steps:.3f} ms/iter ({args.steps} iters, {N_BUFS} bufs)")
+
         dist.destroy_process_group()
 
 
@@ -1362,7 +1440,8 @@ def parse_args():
     add_backend_arg(p_l2)
     add_common_args(p_l2)
     p_l2.add_argument("--profile-mode", type=str, required=True,
-                     choices=["gemm-alone", "gemm-polluted", "gemm-rccl"],
+                     choices=["gemm-alone", "gemm-polluted", "gemm-rccl",
+                              "gemm-rotating", "gemm-rccl-rotating"],
                      help="Profiling mode")
     p_l2.add_argument("--pollution-mb", type=int, default=512,
                      help="Size of L2-pollution buffer in MB (for gemm-polluted mode)")

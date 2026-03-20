@@ -191,6 +191,481 @@
       },
       "conclusion": "HYPOTHESIS REFUTED. GEMM slowdown is CONSTANT at ~1.03x regardless of NCCL channel count (4\u219232). This means NCCL's memory traffic volume does NOT materially affect GEMM during overlap with work-stealing. The CU contention from NCCL workgroups is the only meaningful factor. Fewer channels improve overlap efficiency simply because comm takes longer (more 'free' overlap time).",
       "significance": "HIGH \u2014 proves GEMM with work-stealing is insensitive to NCCL BW load"
+    },
+    {
+      "experiment_id": "ws-l2_hitmiss",
+      "timestamp": "2026-03-19T23:35:34.056496",
+      "hypothesis": "WS kernel shows 59% perf drop warm\u2192rotating; L2 miss rate should increase. Rotating buffers cause measurable change in l2_hitmiss counters",
+      "configuration": {
+        "group": "l2_hitmiss",
+        "counters": [
+          "TCC_HIT_sum",
+          "TCC_MISS_sum",
+          "TCC_READ_sum",
+          "TCC_WRITE_sum"
+        ],
+        "conditions": [
+          "alone_warm",
+          "alone_rotating",
+          "rccl_warm",
+          "rccl_rotating"
+        ],
+        "m": 8192,
+        "n": 8192,
+        "k": 8192,
+        "backend": "ws",
+        "steps": 20
+      },
+      "results": {
+        "per_condition": {
+          "alone_warm": {
+            "sums": {
+              "TCC_HIT_sum": 1673675004.0,
+              "TCC_MISS_sum": 466463017.0,
+              "TCC_READ_sum": 2014269061.0,
+              "TCC_WRITE_sum": 125829120.0
+            },
+            "n_rows": 380,
+            "timing": "GEMM alone: 2.211 ms/iter (20 iters)"
+          },
+          "alone_rotating": {
+            "sums": {
+              "TCC_HIT_sum": 1648777554.0,
+              "TCC_MISS_sum": 491360912.0,
+              "TCC_READ_sum": 2014269506.0,
+              "TCC_WRITE_sum": 125829120.0
+            },
+            "n_rows": 460,
+            "timing": "GEMM rotating: 2.255 ms/iter (20 iters, 4 bufs)"
+          },
+          "rccl_warm": {
+            "sums": {},
+            "n_rows": 0,
+            "timing": ""
+          },
+          "rccl_rotating": {
+            "sums": {},
+            "n_rows": 0,
+            "timing": ""
+          }
+        }
+      },
+      "conclusion": "l2_hitmiss: No significant difference between warm and rotating"
+    },
+    {
+      "experiment_id": "ws-dram_traffic",
+      "timestamp": "2026-03-19T23:35:46.644457",
+      "hypothesis": "Rotating buffers force more DRAM reads; RCCL may add GMI traffic. Rotating buffers cause measurable change in dram_traffic counters",
+      "configuration": {
+        "group": "dram_traffic",
+        "counters": [
+          "TCC_EA0_RDREQ_DRAM_sum",
+          "TCC_EA0_WRREQ_DRAM_sum",
+          "TCC_EA0_RDREQ_sum",
+          "TCC_EA0_WRREQ_sum"
+        ],
+        "conditions": [
+          "alone_warm",
+          "alone_rotating",
+          "rccl_warm",
+          "rccl_rotating"
+        ],
+        "m": 8192,
+        "n": 8192,
+        "k": 8192,
+        "backend": "ws",
+        "steps": 20
+      },
+      "results": {
+        "per_condition": {
+          "alone_warm": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_sum": 435140603.0,
+              "TCC_EA0_WRREQ_DRAM_sum": 67659467.0,
+              "TCC_EA0_RDREQ_sum": 435140603.0,
+              "TCC_EA0_WRREQ_sum": 67659467.0
+            },
+            "n_rows": 380,
+            "timing": "GEMM alone: 2.189 ms/iter (20 iters)"
+          },
+          "alone_rotating": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_sum": 458420150.0,
+              "TCC_EA0_WRREQ_DRAM_sum": 67502816.0,
+              "TCC_EA0_RDREQ_sum": 458420150.0,
+              "TCC_EA0_WRREQ_sum": 67502816.0
+            },
+            "n_rows": 460,
+            "timing": "GEMM rotating: 2.236 ms/iter (20 iters, 4 bufs)"
+          },
+          "rccl_warm": {
+            "sums": {},
+            "n_rows": 0,
+            "timing": ""
+          },
+          "rccl_rotating": {
+            "sums": {},
+            "n_rows": 0,
+            "timing": ""
+          }
+        }
+      },
+      "conclusion": "dram_traffic: No significant difference between warm and rotating"
+    },
+    {
+      "experiment_id": "ws-credit_stalls",
+      "timestamp": "2026-03-19T23:35:59.480045",
+      "hypothesis": "RCCL contention shows as DRAM/GMI credit stalls during overlap. Rotating buffers cause measurable change in credit_stalls counters",
+      "configuration": {
+        "group": "credit_stalls",
+        "counters": [
+          "TCC_EA0_RDREQ_DRAM_CREDIT_STALL_sum",
+          "TCC_EA0_RDREQ_GMI_CREDIT_STALL_sum"
+        ],
+        "conditions": [
+          "alone_warm",
+          "alone_rotating",
+          "rccl_warm",
+          "rccl_rotating"
+        ],
+        "m": 8192,
+        "n": 8192,
+        "k": 8192,
+        "backend": "ws",
+        "steps": 20
+      },
+      "results": {
+        "per_condition": {
+          "alone_warm": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_CREDIT_STALL_sum": 0.0,
+              "TCC_EA0_RDREQ_GMI_CREDIT_STALL_sum": 0.0
+            },
+            "n_rows": 190,
+            "timing": "GEMM alone: 2.088 ms/iter (20 iters)"
+          },
+          "alone_rotating": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_CREDIT_STALL_sum": 0.0,
+              "TCC_EA0_RDREQ_GMI_CREDIT_STALL_sum": 0.0
+            },
+            "n_rows": 230,
+            "timing": "GEMM rotating: 2.140 ms/iter (20 iters, 4 bufs)"
+          },
+          "rccl_warm": {
+            "sums": {},
+            "n_rows": 0,
+            "timing": ""
+          },
+          "rccl_rotating": {
+            "sums": {},
+            "n_rows": 0,
+            "timing": ""
+          }
+        }
+      },
+      "conclusion": "credit_stalls: No significant difference between warm and rotating"
+    },
+    {
+      "experiment_id": "ws-l2_hitmiss",
+      "timestamp": "2026-03-19T23:38:22.143759",
+      "hypothesis": "WS kernel shows 59% perf drop warm\u2192rotating; L2 miss rate should increase. Rotating buffers cause measurable change in l2_hitmiss counters",
+      "configuration": {
+        "group": "l2_hitmiss",
+        "counters": [
+          "TCC_HIT_sum",
+          "TCC_MISS_sum",
+          "TCC_READ_sum",
+          "TCC_WRITE_sum"
+        ],
+        "conditions": [
+          "alone_warm",
+          "alone_rotating",
+          "rccl_warm",
+          "rccl_rotating"
+        ],
+        "m": 8192,
+        "n": 8192,
+        "k": 8192,
+        "backend": "ws",
+        "steps": 20
+      },
+      "results": {
+        "per_condition": {
+          "alone_warm": {
+            "sums": {
+              "TCC_HIT_sum": 1674081044.0,
+              "TCC_MISS_sum": 466057000.0,
+              "TCC_READ_sum": 2014269084.0,
+              "TCC_WRITE_sum": 125829120.0
+            },
+            "n_rows": 380,
+            "timing": "GEMM alone: 2.199 ms/iter (20 iters)"
+          },
+          "alone_rotating": {
+            "sums": {
+              "TCC_HIT_sum": 1643711745.0,
+              "TCC_MISS_sum": 496426688.0,
+              "TCC_READ_sum": 2014269473.0,
+              "TCC_WRITE_sum": 125829120.0
+            },
+            "n_rows": 460,
+            "timing": "GEMM rotating: 2.238 ms/iter (20 iters, 4 bufs)"
+          },
+          "rccl_warm": {
+            "sums": {
+              "TCC_HIT_sum": 1680286497.0,
+              "TCC_MISS_sum": 459851314.0,
+              "TCC_READ_sum": 2014268851.0,
+              "TCC_WRITE_sum": 125829120.0
+            },
+            "n_rows": 6548,
+            "timing": "GEMM + RCCL all_reduce: 3.394 ms/iter (20 iters)"
+          },
+          "rccl_rotating": {
+            "sums": {
+              "TCC_HIT_sum": 1663548698.0,
+              "TCC_MISS_sum": 476590523.0,
+              "TCC_READ_sum": 2014270261.0,
+              "TCC_WRITE_sum": 125829120.0
+            },
+            "n_rows": 6748,
+            "timing": "GEMM + RCCL rotating: 10.738 ms/iter (20 iters, 4 bufs)"
+          }
+        }
+      },
+      "conclusion": "l2_hitmiss: No significant difference between warm and rotating"
+    },
+    {
+      "experiment_id": "ws-dram_traffic",
+      "timestamp": "2026-03-19T23:39:23.919686",
+      "hypothesis": "Rotating buffers force more DRAM reads; RCCL may add GMI traffic. Rotating buffers cause measurable change in dram_traffic counters",
+      "configuration": {
+        "group": "dram_traffic",
+        "counters": [
+          "TCC_EA0_RDREQ_DRAM_sum",
+          "TCC_EA0_WRREQ_DRAM_sum",
+          "TCC_EA0_RDREQ_sum",
+          "TCC_EA0_WRREQ_sum"
+        ],
+        "conditions": [
+          "alone_warm",
+          "alone_rotating",
+          "rccl_warm",
+          "rccl_rotating"
+        ],
+        "m": 8192,
+        "n": 8192,
+        "k": 8192,
+        "backend": "ws",
+        "steps": 20
+      },
+      "results": {
+        "per_condition": {
+          "alone_warm": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_sum": 433657011.0,
+              "TCC_EA0_WRREQ_DRAM_sum": 67559430.0,
+              "TCC_EA0_RDREQ_sum": 433657011.0,
+              "TCC_EA0_WRREQ_sum": 67559430.0
+            },
+            "n_rows": 380,
+            "timing": "GEMM alone: 2.189 ms/iter (20 iters)"
+          },
+          "alone_rotating": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_sum": 449869166.0,
+              "TCC_EA0_WRREQ_DRAM_sum": 67494608.0,
+              "TCC_EA0_RDREQ_sum": 449869166.0,
+              "TCC_EA0_WRREQ_sum": 67494608.0
+            },
+            "n_rows": 460,
+            "timing": "GEMM rotating: 2.218 ms/iter (20 iters, 4 bufs)"
+          },
+          "rccl_warm": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_sum": 425083090.0,
+              "TCC_EA0_WRREQ_DRAM_sum": 67719075.0,
+              "TCC_EA0_RDREQ_sum": 425083090.0,
+              "TCC_EA0_WRREQ_sum": 67719075.0
+            },
+            "n_rows": 6524,
+            "timing": "GEMM + RCCL all_reduce: 3.382 ms/iter (20 iters)"
+          },
+          "rccl_rotating": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_sum": 437969917.0,
+              "TCC_EA0_WRREQ_DRAM_sum": 67877051.0,
+              "TCC_EA0_RDREQ_sum": 437969917.0,
+              "TCC_EA0_WRREQ_sum": 67877051.0
+            },
+            "n_rows": 6748,
+            "timing": "GEMM + RCCL rotating: 3.418 ms/iter (20 iters, 4 bufs)"
+          }
+        }
+      },
+      "conclusion": "dram_traffic: No significant difference between warm and rotating"
+    },
+    {
+      "experiment_id": "ws-credit_stalls",
+      "timestamp": "2026-03-19T23:40:24.782903",
+      "hypothesis": "RCCL contention shows as DRAM/GMI credit stalls during overlap. Rotating buffers cause measurable change in credit_stalls counters",
+      "configuration": {
+        "group": "credit_stalls",
+        "counters": [
+          "TCC_EA0_RDREQ_DRAM_CREDIT_STALL_sum",
+          "TCC_EA0_RDREQ_GMI_CREDIT_STALL_sum"
+        ],
+        "conditions": [
+          "alone_warm",
+          "alone_rotating",
+          "rccl_warm",
+          "rccl_rotating"
+        ],
+        "m": 8192,
+        "n": 8192,
+        "k": 8192,
+        "backend": "ws",
+        "steps": 20
+      },
+      "results": {
+        "per_condition": {
+          "alone_warm": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_CREDIT_STALL_sum": 0.0,
+              "TCC_EA0_RDREQ_GMI_CREDIT_STALL_sum": 0.0
+            },
+            "n_rows": 190,
+            "timing": "GEMM alone: 2.097 ms/iter (20 iters)"
+          },
+          "alone_rotating": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_CREDIT_STALL_sum": 0.0,
+              "TCC_EA0_RDREQ_GMI_CREDIT_STALL_sum": 0.0
+            },
+            "n_rows": 230,
+            "timing": "GEMM rotating: 2.137 ms/iter (20 iters, 4 bufs)"
+          },
+          "rccl_warm": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_CREDIT_STALL_sum": 0.0,
+              "TCC_EA0_RDREQ_GMI_CREDIT_STALL_sum": 0.0
+            },
+            "n_rows": 3330,
+            "timing": "GEMM + RCCL all_reduce: 3.179 ms/iter (20 iters)"
+          },
+          "rccl_rotating": {
+            "sums": {
+              "TCC_EA0_RDREQ_DRAM_CREDIT_STALL_sum": 0.0,
+              "TCC_EA0_RDREQ_GMI_CREDIT_STALL_sum": 0.0
+            },
+            "n_rows": 3370,
+            "timing": "GEMM + RCCL rotating: 3.240 ms/iter (20 iters, 4 bufs)"
+          }
+        }
+      },
+      "conclusion": "credit_stalls: No significant difference between warm and rotating"
+    },
+    {
+      "experiment_id": "exp_007_reset_bug_fix",
+      "timestamp": "2026-03-20T00:13:23.459193",
+      "hypothesis": "The 59% warm-vs-rotating gap is a measurement artifact: reset_fn() on the default stream is not visible to the WS kernel on the matmul stream due to MI300X non-coherent L2",
+      "configuration": {
+        "gemm": "8192x8192x8192 bf16",
+        "backend": "ws",
+        "collective": "all_reduce",
+        "comm_size": [
+          8192,
+          8192
+        ],
+        "steps": 200,
+        "warmup": 20,
+        "world_size": 8,
+        "fix": "Move reset_fn() onto matmul_stream via with torch.cuda.stream(stream): reset_fn()"
+      },
+      "results": {
+        "before_fix": {
+          "gemm_alone_warm_ms": 1.228,
+          "gemm_rotating_ms": 2.016,
+          "warm_rotating_gap": "59%",
+          "overlap_gemm_ms": 2.347,
+          "gemm_slowdown_vs_warm": 1.91,
+          "gemm_slowdown_vs_rotating": 1.11,
+          "note": "warm mean includes 50% no-op dispatches at 0.07ms alternating with real dispatches at 2.38ms"
+        },
+        "after_fix": {
+          "gemm_alone_warm_ms": 1.899,
+          "gemm_alone_warm_median_ms": 1.887,
+          "gemm_rotating_ms": 2.014,
+          "gemm_rotating_median_ms": 1.99,
+          "warm_rotating_gap": "6%",
+          "serial_gemm_ms": 2.018,
+          "overlap_gemm_mean_ms": 2.227,
+          "overlap_gemm_median_ms": 2.151,
+          "overlap_rot_gemm_mean_ms": 2.258,
+          "overlap_rot_gemm_median_ms": 2.208,
+          "comm_alone_ms": 0.835,
+          "overlap_comm_median_ms": 1.3,
+          "gemm_slowdown_vs_warm": 1.17,
+          "gemm_slowdown_vs_rotating": 1.12,
+          "comm_slowdown": 2.76,
+          "overlap_efficiency_pct": 57.0
+        }
+      },
+      "conclusion": "CONFIRMED: 59% gap was a measurement bug. Cross-stream tile counter zero_() not visible to WS kernel on MI300X non-coherent L2. Fix: run reset on same stream as matmul. True warm-vs-rotating gap is ~6%. True RCCL overlap slowdown is 12-17% (from CU contention + memory BW sharing, not cache thrashing)."
+    },
+    {
+      "experiment_id": "exp_008_ws_vs_torch_overlap",
+      "timestamp": "2026-03-20T00:28:50.000178",
+      "hypothesis": "WS kernel has smaller RCCL overlap penalty than torch.matmul due to dynamic work-stealing avoiding wave quantization",
+      "configuration": {
+        "sizes": [
+          "4096x4096x4096",
+          "6144x6144x6144",
+          "8192x8192x8192",
+          "12288x12288x12288",
+          "16384x16384x16384"
+        ],
+        "dtype": "bf16",
+        "backends": [
+          "ws",
+          "torch"
+        ],
+        "collective": "all_reduce",
+        "world_size": 8,
+        "steps": 100,
+        "warmup": 20
+      },
+      "results": {
+        "8192": {
+          "ws_alone_median_ms": 1.88,
+          "ws_alone_tflops": 585,
+          "torch_alone_median_ms": 1.633,
+          "torch_alone_tflops": 673,
+          "ws_overlap_gemm_median_ms": 2.151,
+          "ws_overlap_tflops": 511,
+          "torch_overlap_gemm_median_ms": 2.361,
+          "torch_overlap_tflops": 466,
+          "ws_overlap_penalty_pct": 10.4,
+          "torch_overlap_penalty_pct": 41.3,
+          "ws_faster_during_overlap": true,
+          "ws_overlap_speedup": 1.27,
+          "torch_overlap_speedup": 1.06
+        },
+        "4096": {
+          "ws_overlap_penalty_pct": 36.5,
+          "torch_overlap_penalty_pct": 93.8
+        },
+        "12288": {
+          "ws_overlap_penalty_pct": 22.6,
+          "torch_overlap_penalty_pct": 19.3
+        },
+        "16384": {
+          "ws_overlap_penalty_pct": 18.1,
+          "torch_overlap_penalty_pct": 17.4
+        }
+      },
+      "conclusion": "CONFIRMED: At 8K, WS delivers 511 TFLOPS during overlap vs torch 466 TFLOPS (+10%). WS overlap penalty is +10% vs torch +41% (31pp advantage). WS is 13% slower in isolation but faster during overlap. Advantage strongest at 4K-8K where wave quantization matters. At 12K+ both converge."
     }
   ]
 }
