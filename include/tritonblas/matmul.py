@@ -83,7 +83,7 @@ def persistent_matmul_lt(
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
-    waves_per_eu = 2
+    waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None
