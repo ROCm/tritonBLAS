@@ -101,7 +101,7 @@ def persistent_matmul_lt(
 
         grids = selector._hardware.N_CU
 
-        kk = ws_persistent_matmul[(grids,)](
+        kk = wrap_triton(ws_persistent_matmul)[(grids,)](
             a,
             b,
             c,
@@ -132,13 +132,14 @@ def persistent_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
             GLOBAL_ATOMIC=config.global_atomic,
+            mask_ptr=mask,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            mask_ptr=mask,
         )
     else:
         grids = total_tiles
@@ -262,7 +263,7 @@ def streamk_matmul_lt(
         for i in range(selector._ACTIVE_CU, len(mask), 1):
             mask[i] = 0
 
-        kk = ws_streamk_matmul[(grids,)](
+        kk = wrap_triton(ws_streamk_matmul)[(grids,)](
             a,
             b,
             c,
@@ -289,22 +290,23 @@ def streamk_matmul_lt(
             GROUP_SIZE_M=gsize_m,
             NUM_SMS=selector._ACTIVE_CU,
             NUM_XCDS=num_xcds,
-            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
-            COUNTER_STRIDE=COUNTER_STRIDE,
             CHUNK_SIZE=chunk_size,
             STREAMK_TILES=total_tiles_streamk,
+            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
+            COUNTER_STRIDE=COUNTER_STRIDE,
             BIAS=bias is not None,
             EVEN_K=even_k,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
             GLOBAL_ATOMIC=config.global_atomic,
+            mask_ptr=mask,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            mask_ptr=mask,
         )
     else:
         kk = wrap_triton(streamk_matmul)[(grids,)](
