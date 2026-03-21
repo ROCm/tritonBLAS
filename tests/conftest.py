@@ -11,26 +11,10 @@ import torch
 import origami
 
 
-# ---------------------------------------------------------------------------
-# Hardware capability detection
-# ---------------------------------------------------------------------------
-
-_hw = origami.get_hardware_for_device(torch.cuda.current_device())
-GPU_ARCH = _hw.arch.name
-
-# Architectures that support FP4/FP6 datatypes
-_FP4_ARCHS = {"gfx950"}
-
-requires_fp4 = pytest.mark.skipif(
-    GPU_ARCH not in _FP4_ARCHS,
-    reason=f"FP4 not supported on {GPU_ARCH}",
-)
-
-
 # Torch compile / dynamo settings required for compile-enabled tests.
 # Applied here so they take effect before any test file is imported.
 # If we don't increase this, torch will complain about too many recompilations.
-torch._dynamo.config.cache_size_limit = 50000
+torch._dynamo.config.cache_size_limit = 100000
 # Also disable caches so every compile is fresh and new issues are caught.
 # Note this causes a single UserWarning that notes caches are disabled.
 torch._inductor.config.force_disable_caches = True
@@ -40,6 +24,17 @@ torch._inductor.config.force_disable_caches = True
 # 'spawn' but that actually doesn't fix the issue - you have to force
 # single-threaded compilation.  This needs to be fixed upstream in torch/triton.
 torch._inductor.config.compile_threads = 1
+
+# Hardware capability detection
+_hw = origami.get_hardware_for_device(torch.cuda.current_device())
+GPU_ARCH = _hw.arch.name
+# Architectures that support FP4/FP6 datatypes
+_FP4_ARCHS = {"gfx950"}
+
+requires_fp4 = pytest.mark.skipif(
+    GPU_ARCH not in _FP4_ARCHS,
+    reason=f"FP4 not supported on {GPU_ARCH}",
+)
 
 # Standard test dimensions
 STANDARD_DIMS = [
@@ -84,3 +79,12 @@ ENABLE_WORK_STEALING = [False, True]
 
 # Number of trials for select tests to catch intermittent problems
 MULTITRIAL_NUM_TRIALS = 1
+
+
+@pytest.fixture(autouse=True)
+def reset_dynamo():
+    """Reset torch.compile state between tests to prevent
+    accumulated recompilation limits across parametrized cases."""
+    yield
+    torch._dynamo.reset()
+
