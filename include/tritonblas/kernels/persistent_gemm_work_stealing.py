@@ -128,17 +128,24 @@ def ws_persistent_matmul(
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        # Raw indices before modulo — used for boundary masking
+        rm_raw = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn_raw = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         rk = tl.arange(0, BLOCK_SIZE_K)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        # Boundary mask from raw indices (before wrapping)
+        mask_m = rm_raw < M
+        mask_n = rn_raw < N
+
+        # Wrapped indices for pointer computation
+        rm = tl.max_contiguous(tl.multiple_of(rm_raw % M, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn_raw % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
         A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
         if BIAS:
-            bias_ = bias_ptr + rm * stride_bias
-            bias = tl.load(bias_, mask=rm < M, other=0.0)
+            bias_ = bias_ptr + rn * stride_bias
+            bias = tl.load(bias_, mask=mask_n, other=0.0)
 
         loop_k = tl.cdiv(K, BLOCK_SIZE_K)
         if not EVEN_K:
@@ -148,14 +155,14 @@ def ws_persistent_matmul(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for k in range(0, loop_k):
             if stride_ak == 1:
-                a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_A)
+                a = tl.load(tl.multiple_of(A_BASE, (1, 16)), mask=mask_m[:, None], other=0.0, cache_modifier=CACHE_MODIFIER_A)
             else:
-                a = tl.load(tl.multiple_of(A_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_A)
+                a = tl.load(tl.multiple_of(A_BASE, (16, 1)), mask=mask_m[:, None], other=0.0, cache_modifier=CACHE_MODIFIER_A)
 
             if stride_bk == 1:
-                b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER_B)
+                b = tl.load(tl.multiple_of(B_BASE, (16, 1)), mask=mask_n[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_B)
             else:
-                b = tl.load(tl.multiple_of(B_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_B)
+                b = tl.load(tl.multiple_of(B_BASE, (1, 16)), mask=mask_n[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
             if QUANTIZED:
                 acc += tl.dot(a, b, input_precision="ieee")
@@ -178,8 +185,8 @@ def ws_persistent_matmul(
                 B_BASE = tl.multiple_of(B_BASE, (16, 1))
             else:
                 B_BASE = tl.multiple_of(B_BASE, (1, 16))
-            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0, cache_modifier=CACHE_MODIFIER_A)
-            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
+            a = tl.load(A_BASE, mask=mask_m[:, None] & (rk[None, :] < K), other=0.0, cache_modifier=CACHE_MODIFIER_A)
+            b = tl.load(B_BASE, mask=mask_n[None, :] & (rk[:, None] < K), other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
             if QUANTIZED:
                 acc += tl.dot(a, b, input_precision="ieee")
@@ -187,28 +194,24 @@ def ws_persistent_matmul(
                 acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
 
         if QUANTIZED:
-            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M) % M
-            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) % N
-            A_scale = tl.load(A_scale_ptr + rm_A_scale)
-            B_scale = tl.load(B_scale_ptr + rn_B_scale)
+            rm_A_scale = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            rn_B_scale = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            A_scale = tl.load(A_scale_ptr + rm_A_scale, mask=mask_m, other=1.0)
+            B_scale = tl.load(B_scale_ptr + rn_B_scale, mask=mask_n, other=1.0)
             acc *= A_scale[:, None] * B_scale[None, :]
 
         if BIAS:
             if QUANTIZED:
                 bias_float = bias.to(tl.float32)
-                c = acc + bias_float[:, None]
+                c = acc + bias_float[None, :]
                 c = c.to(C.type.element_ty)
             else:
                 c = acc.to(C.type.element_ty)
-                c += bias[:, None]
+                c += bias[None, :]
         else:
             c = acc.to(C.type.element_ty)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+        c_mask = mask_m[:, None] & mask_n[None, :]
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
 
