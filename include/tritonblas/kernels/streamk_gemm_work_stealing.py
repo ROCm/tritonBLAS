@@ -10,6 +10,8 @@ def ws_streamk_matmul(
     A,
     B,
     C,
+    activeCUs_ptr,
+    numCUs_ptr,
     A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
@@ -92,9 +94,10 @@ def ws_streamk_matmul(
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
     raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
+    release_cu = False
 
     # Full tiles loop
-    while raw_idx < bound:
+    while raw_idx < bound and not release_cu:
         # Map raw counter value → global tile_id
         if GLOBAL_ATOMIC:
             # Chiplet swizzle: remap global sequential index into
@@ -204,6 +207,16 @@ def ws_streamk_matmul(
 
         raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
 
+        num_cus = tl.atomic_add(numCUs_ptr, 0, scope="gpu")
+        num_active_cus = tl.atomic_add(activeCUs_ptr, 0, scope="gpu")
+        if num_cus < num_active_cus:
+            release_cu = True
+            while tl.atomic_cas(activeCUs_ptr, num_active_cus, num_active_cus-1, scope="gpu") != num_active_cus:
+                num_active_cus = tl.atomic_add(activeCUs_ptr, 0, scope="gpu")
+            if num_cus == num_active_cus:
+                    release_cu = False
+
+
     if STREAMK_TILES == 0:
         return
 
@@ -216,11 +229,13 @@ def ws_streamk_matmul(
     tl.store(P_, 0.0, cache_modifier=".wt")
     tl.store(locks + pid, 0, cache_modifier=".wt")
 
+    num_cus = tl.atomic_add(numCUs_ptr, 0, scope="gpu")
+
     tl.assume(pid >= 0)
     iters_per_tile = tl.cdiv(K, BLOCK_SIZE_K)
     total_streamk_iters = STREAMK_TILES * iters_per_tile
-    streamk_iters_pcu = total_streamk_iters // NUM_SMS
-    streamk_remainder_iters = total_streamk_iters % NUM_SMS
+    streamk_iters_pcu = total_streamk_iters // num_cus 
+    streamk_remainder_iters = total_streamk_iters % num_cus
     start_iter = total_full_tiles * iters_per_tile + pid * streamk_iters_pcu + tl.minimum(pid, streamk_remainder_iters)
     last_iter = total_full_tiles * iters_per_tile + (pid + 1) * streamk_iters_pcu + tl.minimum(
         pid + 1, streamk_remainder_iters)

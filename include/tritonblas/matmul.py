@@ -57,6 +57,8 @@ def persistent_matmul_lt(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
+    activeCUs: torch.Tensor, 
+    numCUs: torch.Tensor, 
     selector,
     config: Optional[MatmulConfig] = None,
     bias: Optional[torch.Tensor] = None,
@@ -105,6 +107,8 @@ def persistent_matmul_lt(
             a,
             b,
             c,
+            activeCUs,
+            numCUs,
             a_scale if quantized else None,
             b_scale if quantized else None,
             bias if bias is not None else None,
@@ -186,6 +190,8 @@ def streamk_matmul_lt(
     a: torch.Tensor, 
     b: torch.Tensor, 
     c: torch.Tensor, 
+    activeCUs: torch.Tensor, 
+    numCUs: torch.Tensor, 
     selector, 
     config: Optional[MatmulConfig] = None,
     bias: Optional[torch.Tensor] = None,
@@ -266,6 +272,8 @@ def streamk_matmul_lt(
             a,
             b,
             c,
+            activeCUs,
+            numCUs,
             a_scale if quantized else None,
             b_scale if quantized else None,
             bias if bias is not None else None,
@@ -350,27 +358,28 @@ def streamk_matmul_lt(
 
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
+    activeCUs: torch.Tensor, numCUs: torch.Tensor,
     selector, config: MatmulConfig,
     enable_streamk=False, work_stealing=False
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+        return streamk_matmul_lt(a, b, c, activeCUs, numCUs, selector, config, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, c, activeCUs, numCUs, selector, config, work_stealing=work_stealing)
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
-    c: torch.Tensor, selector, config: MatmulConfig,
+    c: torch.Tensor, activeCUs: torch.Tensor, selector, config: MatmulConfig,
     enable_streamk=False, work_stealing=False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return streamk_matmul_lt(a, b, c, activeCUs, numCUs, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, c, activeCUs, numCUs, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
 @triton_op("tritonblas::_matmul", mutates_args={})

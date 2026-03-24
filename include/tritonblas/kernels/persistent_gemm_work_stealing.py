@@ -33,6 +33,8 @@ def ws_persistent_matmul(
     A,
     B,
     C,
+    activeCUs_ptr,
+    numCUs_ptr,
     A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,

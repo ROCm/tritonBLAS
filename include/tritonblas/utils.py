@@ -5,13 +5,31 @@ Utility functions for TritonBLAS
 This module provides helper functions for dtype handling, quantization, and input generation.
 """
 from dataclasses import dataclass
+from hip import hip, hiprtc
 from typing import Optional, Tuple, Union
 
+import ctypes
+import numpy as np
 import torch  # type: ignore
 import triton
 import triton.language as tl
 
 import os
+import sys
+
+def hip_check(call_result):
+    err = call_result[0]
+    result = call_result[1:]
+    if len(result) == 1:
+        result = result[0]
+    if isinstance(err, hip.hipError_t) and err != hip.hipError_t.hipSuccess:
+        raise RuntimeError(str(err))
+    elif (
+        isinstance(err, hiprtc.hiprtcResult)
+        and err != hiprtc.hiprtcResult.HIPRTC_SUCCESS
+    ):
+        raise RuntimeError(str(err))
+    return result
 
 # FP8 support flags - check for both variants
 TORCH_HAS_FP8E5B16_FNUZ = hasattr(torch, 'float8_e5m2fnuz')
@@ -247,6 +265,9 @@ class MatmulInputs:
     bias: torch.Tensor  # Reserved for future support of bias-enabled matmul operations.
     scaleA: Optional[torch.Tensor] = None
     scaleB: Optional[torch.Tensor] = None
+    activeCUs: Optional[torch.Tensor] = None
+    numCUs: Optional[torch.Tensor] = None
+    numCUs_hptr: Optional[ctypes.POINTER(ctypes.c_int)] = None
 
     @property
     def is_quantized(self) -> bool:
@@ -535,7 +556,21 @@ def generate_matmul_inputs(
     C = torch.zeros((m, n), device=device, dtype=out_dtype)
     bias = torch.zeros((m,), device=device, dtype=out_dtype)
 
-    return MatmulInputs(A=A, B=B, C=C, bias=bias, scaleA=scaleA, scaleB=scaleB)
+    prop = torch.cuda.get_device_properties(device)
+    num_cus = prop.multi_processor_count
+
+    activeCUs = torch.zeros(1, device=device, dtype=torch.int32).contiguous()
+    activeCUs[0] = num_cus
+
+    # Sync var used for numCUs,  passed to the GPU kernel, numCUs_h is a void*
+    numCUs_h = hip_check(hip.hipMalloc(1 * sys.getsizeof(int)))
+    # Casting numCUs to a typed pointer, for content access
+    numCUs_typed_ptr = ctypes.cast(numCUs_h.as_c_void_p(), ctypes.POINTER(ctypes.c_int * 1))
+    numCUs_typed_ptr.contents[0] = num_cus
+    numCUs_h_np_array = np.ctypeslib.as_array(numCUs_typed_ptr, shape=(1,))
+    numCUs_h_tensor = torch.from_numpy(numCUs_h_np_array)
+
+    return MatmulInputs(A=A, B=B, C=C, bias=bias, scaleA=scaleA, scaleB=scaleB, activeCUs=activeCUs, numCUs=numCUs_h_tensor, numCUs_hptr=numCUs_typed_ptr)
 
 
 # ============================================================================
