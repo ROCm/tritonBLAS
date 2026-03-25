@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch.library import triton_op, wrap_triton
+from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
@@ -13,11 +14,6 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
-def _maybe_wrap(fn):
-    """Use wrap_triton only under torch.compile tracing; direct call in eager."""
-    if torch.compiler.is_compiling():
-        return wrap_triton(fn)
-    return fn
 
 _tensor_cache = {}
 
@@ -28,6 +24,16 @@ MAX_BLOCK_SIZE = 65536
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+
+def _maybe_wrap(fn, probe_tensor):
+    # Use wrap_triton only under torch.compile tracing; otherwise direct call
+    # in eager.  Can't use torch.compiler.is_compiling() here because the code
+    # inside @triton_op but outside wrap_triton is part of the compile pass
+    # itself and is_compiling() is never True.
+    if is_fake(probe_tensor):
+        return wrap_triton(fn)
+    return fn
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -106,7 +112,7 @@ def persistent_matmul_lt(
     if work_stealing and config is not None:
         grids = selector._hardware.N_CU
 
-        kk = _maybe_wrap(ws_persistent_matmul)[(grids,)](
+        kk = _maybe_wrap(ws_persistent_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -154,7 +160,7 @@ def persistent_matmul_lt(
     else:
         grids = total_tiles
 
-        kk = _maybe_wrap(persistent_matmul)[(grids,)](
+        kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -271,7 +277,7 @@ def streamk_matmul_lt(
         num_xcds = 1
 
     if work_stealing and config is not None:
-        kk = _maybe_wrap(ws_streamk_matmul)[(grids,)](
+        kk = _maybe_wrap(ws_streamk_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -317,7 +323,7 @@ def streamk_matmul_lt(
             kpack=kpack,
         )
     else:
-        kk = _maybe_wrap(streamk_matmul)[(grids,)](
+        kk = _maybe_wrap(streamk_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
