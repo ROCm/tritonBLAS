@@ -10,7 +10,7 @@ import triton
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
-from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE, MAX_SK_TILES
 
 _tensor_cache = {}
 
@@ -209,14 +209,24 @@ def streamk_matmul_lt(
     # Grid Size
     ##
     if work_stealing:
-        total_programs_streamk = selector._hardware.N_CU
+        # Always launch NUM_SMS (full hardware) WGs; mask_ptr gates inactive ones.
+        # STREAMK_TILES uses NUM_SMS — the kernel self-discovers the actual
+        # active count at runtime via participant_counter.
+        total_programs_streamk = selector._N_CU
+        active_cus = min(selector._ACTIVE_CU, total_tiles)
+        # CUTLASS-style heuristic: only use SK when the tail wave is less
+        # than half full. When the tail is mostly full, the wave quantization
+        # cost is small and pure WS DP is faster (no SK reduction overhead).
+        remainder = total_tiles % active_cus if active_cus > 0 else 0
+        tail_occupancy = remainder / active_cus if active_cus > 0 else 0
+        total_tiles_streamk = remainder if tail_occupancy < 0.5 else 0
     else:
         total_programs_streamk = selector.sk_grid
-
-    if total_programs_streamk > 0:  # Stream-K
-        total_tiles_streamk = total_tiles % total_programs_streamk
-    else:  # all tiles are computed using classical blocking
-        total_tiles_streamk = 0
+        active_cus = total_programs_streamk
+        if total_programs_streamk > 0:
+            total_tiles_streamk = total_tiles % total_programs_streamk
+        else:
+            total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
@@ -260,7 +270,6 @@ def streamk_matmul_lt(
             b_scale if quantized else None,
             bias if bias is not None else None,
             config.tile_counter,
-            config.streamk_tile_counter,
             P,
             locks,
             M,
@@ -277,7 +286,8 @@ def streamk_matmul_lt(
             BLOCK_SIZE_N=BLK_N,
             BLOCK_SIZE_K=BLK_K,
             GROUP_SIZE_M=gsize_m,
-            NUM_SMS=selector._ACTIVE_CU,
+            NUM_SMS=selector._N_CU,
+            ACTIVE_CUS=active_cus,
             NUM_XCDS=num_xcds,
             COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
             COUNTER_STRIDE=COUNTER_STRIDE,

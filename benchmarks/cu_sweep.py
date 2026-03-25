@@ -1,187 +1,211 @@
 #!/usr/bin/env python3
-"""CU sweep: GFLOPs vs available CUs for ws, streamk, torch.
-
-For WS/streamk: controls grid size via total_cus parameter.
-For torch: uses ROC_GLOBAL_CU_MASK env var.
-
-MI300X: 304 CUs = 8 XCDs * 38 CUs/XCD.
-CU mask is per-SE (shader engine). 8 XCDs with ~5 SEs each = ~38 SEs.
-ROC_GLOBAL_CU_MASK format: one 64-bit mask applied uniformly to all SEs.
-Each SE has 10 CUs (2 WGPs * 4 CUs/WGP + 2 CUs from the last WGP).
-Actually on MI300X: 304 CUs / 8 XCDs = 38 CUs/XCD.
-Each XCD has 4 SEs (actually called "shader arrays"), each with ~10 CUs.
-The mask bits correspond to CU lanes within each SE.
-
-For CU masking we set ROC_GLOBAL_CU_MASK to limit active CUs.
-For tritonBLAS WS, we pass total_cus to the selector which limits the grid.
 """
-import torch
-import tritonblas
-import statistics
+CU Sweep Benchmark for MI300X.
+
+Sweeps CU count from 8 to 304 and measures GEMM performance for:
+  - torch.matmul           (CU-masked via ROC_GLOBAL_CU_MASK)
+  - WS grid-limited        (grid = cus, all 304 physical CUs available)
+  - WS full-grid           (grid = num_tiles, CU-masked)
+  - Persistent GEMM        (CU-masked)
+  - Stream-K               (CU-masked)
+  - Stream-K + WS          (CU-masked)
+
+Usage:
+    python3 benchmarks/cu_sweep.py --size 8192 --gpu 4
+    python3 benchmarks/cu_sweep.py --size 4096 --gpu 4
+"""
+import argparse
 import json
 import os
+import statistics
+import subprocess
 import sys
-import ctypes
+import time
+
+DATA_DIR = "results/plot_data"
+
+
+def make_multi_xcd_mask(cus_per_xcd, n_xcds=8, bits_per_xcd=38):
+    """Build ROC_GLOBAL_CU_MASK hex for MI300X: cus_per_xcd bits set per XCD block."""
+    per_xcd = (1 << cus_per_xcd) - 1
+    full = 0
+    for xcd in range(n_xcds):
+        full |= per_xcd << (xcd * bits_per_xcd)
+    return hex(full)
+
+
+# The worker script runs in a subprocess for GPU isolation.
+# MODE: torch | ws-grid | ws-full | persistent | streamk | streamk-ws
+WORKER = r'''
+import torch, statistics, sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "include"))
+
+MODE = sys.argv[1]
+M = int(sys.argv[2])
+STEPS = int(sys.argv[3])
+TOTAL_CUS = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] != "0" else 0
 
 torch.cuda.set_device(0)
 dev = torch.device("cuda", 0)
 dtype = torch.bfloat16
-stream = torch.cuda.Stream(device=dev)
+A = torch.randn(M, M, dtype=dtype, device=dev)
+B = torch.randn(M, M, dtype=dtype, device=dev)
 
-OUT_DIR = "results/plot_data"
-os.makedirs(OUT_DIR, exist_ok=True)
+if MODE == "torch":
+    def bench():
+        torch.matmul(A, B)
+    reset = lambda: None
+else:
+    import tritonblas
+    C = torch.empty(M, M, dtype=dtype, device=dev)
 
-GEMM_SIZE = int(sys.argv[1]) if len(sys.argv) > 1 else 8192
-M = N = K = GEMM_SIZE
-FLOPS = 2.0 * M * N * K
+    sk = MODE in ("streamk", "streamk-ws")
+    ws = MODE in ("ws-grid", "ws-full", "streamk-ws")
 
-print(f"CU sweep for {M}x{N}x{K} bf16")
-print(f"  Peak FP16 TFLOPS (MI300X): ~1300")
-print()
+    sel = tritonblas.OrigamiMatmulSelector(
+        M, M, M, dtype, dtype, dtype, dev,
+        streamk=sk,
+        total_cus=TOTAL_CUS if TOTAL_CUS > 0 else None,
+    )
+    cfg = tritonblas.matmul_preamble(sel)
+    def bench():
+        tritonblas.matmul_lt(A, B, C, sel, cfg, enable_streamk=sk, work_stealing=ws)
+    def reset():
+        cfg.reset(streamk=sk, work_stealing=ws)
 
-CU_COUNTS = sorted(set(
-    list(range(24, 305, 8)) + [304, 280, 272, 256, 240, 200, 160, 120, 80, 40]
-))
+for _ in range(20):
+    reset()
+    bench()
+torch.cuda.synchronize()
 
-A_base = torch.randn(M, K, dtype=dtype, device=dev)
-B_base = torch.randn(K, N, dtype=dtype, device=dev)
-C_base = torch.empty(M, N, dtype=dtype, device=dev)
-
-
-def bench(fn, reset_fn, warmup=10, steps=30):
-    for _ in range(warmup):
-        with torch.cuda.stream(stream):
-            if reset_fn:
-                reset_fn()
-            fn()
+t = []
+for _ in range(STEPS):
+    reset()
     torch.cuda.synchronize()
-    times = []
-    for _ in range(steps):
-        if reset_fn:
-            with torch.cuda.stream(stream):
-                reset_fn()
-        torch.cuda.synchronize()
-        st = torch.cuda.Event(enable_timing=True)
-        en = torch.cuda.Event(enable_timing=True)
-        st.record(stream)
-        with torch.cuda.stream(stream):
-            fn()
-        en.record(stream)
-        torch.cuda.synchronize()
-        times.append(st.elapsed_time(en))
-    return times
+    s = torch.cuda.Event(enable_timing=True)
+    e = torch.cuda.Event(enable_timing=True)
+    s.record(); bench(); e.record(); torch.cuda.synchronize()
+    t.append(s.elapsed_time(e))
+
+med = statistics.median(t)
+cus = torch.cuda.get_device_properties(0).multi_processor_count
+flops = 2.0 * M**3
+tflops = flops / (med * 1e-3) / 1e12
+print(f"RESULT {med:.4f} {min(t):.4f} {max(t):.4f} {cus} {tflops:.1f}")
+'''
 
 
-data = {"size": GEMM_SIZE, "cu_counts": CU_COUNTS}
+def run_worker(mode, size, steps, total_cus=0, mask=None, timeout=120):
+    """Run the benchmark worker in a subprocess, return (med_ms, tflops, reported_cus) or None."""
+    script = "/tmp/_cu_sweep_worker.py"
+    if not os.path.exists(script):
+        with open(script, "w") as f:
+            f.write(WORKER)
 
-# --- WS sweep ---
-print("=== WS (grid-limited) ===")
-ws_results = []
-for n_cus in CU_COUNTS:
+    env = os.environ.copy()
+    if mask:
+        env["ROC_GLOBAL_CU_MASK"] = mask
+    elif "ROC_GLOBAL_CU_MASK" in env:
+        del env["ROC_GLOBAL_CU_MASK"]
+
+    cmd = [sys.executable, script, mode, str(size), str(steps), str(total_cus)]
     try:
-        A = A_base.clone()
-        B = B_base.clone()
-        C = C_base.clone()
-        sel = tritonblas.OrigamiMatmulSelector(M, N, K, A.dtype, B.dtype, C.dtype, dev,
-                                                total_cus=n_cus)
-        cfg = tritonblas.matmul_preamble(sel)
-        tiles = (M // sel.block_m) * (N // sel.block_n)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        if r.returncode == 0:
+            for line in r.stdout.strip().split("\n"):
+                if line.startswith("RESULT"):
+                    parts = line.split()
+                    med = float(parts[1])
+                    reported = int(parts[4])
+                    tflops = float(parts[5])
+                    return med, tflops, reported
+        else:
+            err = (r.stderr or "")[-200:]
+            print(f"      FAILED (rc={r.returncode}) {err[:80]}")
+    except subprocess.TimeoutExpired:
+        print(f"      TIMEOUT")
+    return None
 
-        def fn(a=A, b=B, c=C, s_=sel, cf=cfg):
-            tritonblas.matmul_lt(a, b, c, s_, cf, work_stealing=True)
-        def rst(cf=cfg):
-            cf.reset(work_stealing=True)
 
-        times = bench(fn, rst)
-        med = statistics.median(times)
-        tflops = FLOPS / (med * 1e-3) / 1e12
-        ws_results.append({"cus": n_cus, "median_ms": med, "tflops": tflops, "tiles": tiles})
-        if n_cus % 40 == 0 or n_cus in [24, 304]:
-            print(f"  CUs={n_cus:>3}: {med:.3f} ms  {tflops:.1f} TF  tiles={tiles}")
-    except Exception as e:
-        ws_results.append({"cus": n_cus, "median_ms": None, "tflops": None})
-        print(f"  CUs={n_cus:>3}: FAILED ({str(e)[:60]})")
-data["ws"] = ws_results
+def sweep_one(label, mode, size, steps, cus_list, use_mask=False, cooldown=3):
+    """Run a sweep for one backend. Returns list of {cus, tflops, med_ms, ...}."""
+    print(f"\n  [{label}] ({len(cus_list)} points)")
+    results = []
+    for target_cus in cus_list:
+        cpx = target_cus // 8
+        mask = make_multi_xcd_mask(cpx) if use_mask else None
+        total_cus_arg = target_cus if not use_mask else 0
 
-# --- StreamK+WS sweep ---
-print("\n=== StreamK+WS (grid-limited) ===")
-sk_results = []
-for n_cus in CU_COUNTS:
-    try:
-        A = A_base.clone()
-        B = B_base.clone()
-        C = C_base.clone()
-        sel = tritonblas.OrigamiMatmulSelector(M, N, K, A.dtype, B.dtype, C.dtype, dev,
-                                                streamk=True, total_cus=n_cus)
-        cfg = tritonblas.matmul_preamble(sel)
+        r = run_worker(mode, size, steps, total_cus=total_cus_arg, mask=mask)
+        if r:
+            med, tflops, reported = r
+            results.append({
+                "cus": target_cus, "tflops": tflops, "med_ms": med,
+                "reported_cus": reported, "cus_per_xcd": cpx,
+            })
+            flag = f"mask={cpx}/xcd" if use_mask else f"grid={total_cus_arg}"
+            print(f"    {target_cus:>4d} CUs ({flag}): {med:.3f}ms {tflops:.0f}TF")
+        else:
+            print(f"    {target_cus:>4d} CUs: FAILED")
+        time.sleep(cooldown)
+    return results
 
-        def fn(a=A, b=B, c=C, s_=sel, cf=cfg):
-            tritonblas.matmul_lt(a, b, c, s_, cf, enable_streamk=True, work_stealing=True)
-        def rst(cf=cfg):
-            cf.reset(streamk=True, work_stealing=True)
 
-        times = bench(fn, rst)
-        med = statistics.median(times)
-        tflops = FLOPS / (med * 1e-3) / 1e12
-        sk_results.append({"cus": n_cus, "median_ms": med, "tflops": tflops})
-        if n_cus % 40 == 0 or n_cus in [24, 304]:
-            print(f"  CUs={n_cus:>3}: {med:.3f} ms  {tflops:.1f} TF")
-    except Exception as e:
-        sk_results.append({"cus": n_cus, "median_ms": None, "tflops": None})
-        print(f"  CUs={n_cus:>3}: FAILED ({str(e)[:60]})")
-data["streamk_ws"] = sk_results
+def main():
+    parser = argparse.ArgumentParser(description="CU sweep benchmark")
+    parser.add_argument("--size", type=int, required=True, help="GEMM size (M=N=K)")
+    parser.add_argument("--gpu", type=int, default=None, help="GPU index")
+    parser.add_argument("--steps", type=int, default=50, help="Benchmark iterations")
+    parser.add_argument("--cooldown", type=int, default=3, help="Seconds between runs")
+    args = parser.parse_args()
 
-# --- torch sweep (CU masking) ---
-print("\n=== torch.matmul (ROC_GLOBAL_CU_MASK) ===")
-torch_results = []
+    if args.gpu is not None:
+        os.environ["HIP_VISIBLE_DEVICES"] = str(args.gpu)
 
-# MI300X CU mask: 304 CUs across 8 XCDs, 38 CUs per XCD
-# ROC_GLOBAL_CU_MASK is a per-SE mask (10 CU lanes per SE, 4 SEs per XCD)
-# To disable N CUs: we disable from the top SE lanes down
-# Simpler approach: each SE has 10 CUs (bits 0-9). To get X CUs total out of 304:
-#   active_per_se = ceil(X * 10 / 304) ≈ X / 30.4
-# But this is approximate. For the benchmark, we just use the mask directly.
-# Actually, ROC_GLOBAL_CU_MASK uses lower bits per SE.
-# For N CUs out of 304 (38/XCD, ~10/SE, ~4 SEs/XCD, 8 XCDs = 32 SEs):
-#   cus_per_se = 304/32 ≈ 9.5 → 10 CUs per SE
-#   To get N CUs: enable ceil(N/32) CUs per SE = set that many bits
+    sz = args.size
+    os.makedirs(DATA_DIR, exist_ok=True)
 
-for n_cus in CU_COUNTS:
-    try:
-        cus_per_se = 10
-        n_ses = 32  # approximate for MI300X
-        target_per_se = max(1, round(n_cus * cus_per_se / 304))
-        target_per_se = min(target_per_se, cus_per_se)
-        mask_val = (1 << target_per_se) - 1
-        actual_cus = target_per_se * n_ses
-        os.environ["ROC_GLOBAL_CU_MASK"] = hex(mask_val)
+    # CU values: every 2 CUs per XCD from 1 to 38
+    cus_per_xcd_list = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38]
+    cus_list = [cpx * 8 for cpx in cus_per_xcd_list]
+    # Add 304 explicitly (38*8=304, already there)
 
-        A = A_base.clone()
-        B = B_base.clone()
-        C = C_base.clone()
-        def fn(a=A, b=B, c=C):
-            torch.matmul(a, b, out=c)
+    print(f"{'='*70}")
+    print(f"  CU Sweep: {sz}x{sz}x{sz} BF16 on MI300X")
+    print(f"  CU points: {cus_list}")
+    print(f"{'='*70}")
 
-        times = bench(fn, None)
-        med = statistics.median(times)
-        tflops = FLOPS / (med * 1e-3) / 1e12
-        torch_results.append({
-            "cus": n_cus, "actual_cus": actual_cus, "mask": hex(mask_val),
-            "cus_per_se": target_per_se,
-            "median_ms": med, "tflops": tflops
-        })
-        if n_cus % 40 == 0 or n_cus in [24, 304]:
-            print(f"  CUs={n_cus:>3} (actual~{actual_cus:>3}, mask={hex(mask_val)}): "
-                  f"{med:.3f} ms  {tflops:.1f} TF")
-    except Exception as e:
-        torch_results.append({"cus": n_cus, "median_ms": None, "tflops": None})
-        print(f"  CUs={n_cus:>3}: FAILED ({str(e)[:60]})")
-    finally:
-        if "ROC_GLOBAL_CU_MASK" in os.environ:
-            del os.environ["ROC_GLOBAL_CU_MASK"]
+    data = {}
 
-data["torch"] = torch_results
+    # 1) torch (CU-masked)
+    data["torch"] = sweep_one("torch (CU-masked)", "torch", sz, args.steps, cus_list,
+                              use_mask=True, cooldown=args.cooldown)
 
-with open(f"{OUT_DIR}/cu_sweep_{GEMM_SIZE}.json", "w") as f:
-    json.dump(data, f, indent=2)
-print(f"\nSaved {OUT_DIR}/cu_sweep_{GEMM_SIZE}.json")
+    # 2) WS grid-limited (grid = cus, no mask)
+    data["ws_grid"] = sweep_one("WS grid-limited", "ws-grid", sz, args.steps, cus_list,
+                                use_mask=False, cooldown=args.cooldown)
+
+    # 3) WS full-grid (grid = num_tiles, CU-masked)
+    data["ws_full"] = sweep_one("WS full-grid (CU-masked)", "ws-full", sz, args.steps, cus_list,
+                                use_mask=True, cooldown=args.cooldown)
+
+    # 4) Persistent GEMM (CU-masked)
+    data["persistent"] = sweep_one("Persistent GEMM (CU-masked)", "persistent", sz, args.steps, cus_list,
+                                   use_mask=True, cooldown=args.cooldown)
+
+    # 5) Stream-K (CU-masked)
+    data["streamk"] = sweep_one("Stream-K (CU-masked)", "streamk", sz, args.steps, cus_list,
+                                use_mask=True, cooldown=args.cooldown)
+
+    # 6) Stream-K + WS (CU-masked)
+    data["streamk_ws"] = sweep_one("Stream-K+WS (CU-masked)", "streamk-ws", sz, args.steps, cus_list,
+                                   use_mask=True, cooldown=args.cooldown)
+
+    out_path = f"{DATA_DIR}/cu_sweep_{sz}_v4.json"
+    with open(out_path, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"\nSaved → {out_path}")
+
+
+if __name__ == "__main__":
+    main()

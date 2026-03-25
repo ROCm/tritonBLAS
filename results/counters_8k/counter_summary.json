@@ -1,0 +1,190 @@
+{
+  "torch_alone": {
+    "TCC_EA0_RDREQ_DRAM_sum": {
+      "median": 13921370.0,
+      "mean": 13859630.0,
+      "count": 25
+    },
+    "TCC_EA0_WRREQ_DRAM_sum": {
+      "median": 2097152.0,
+      "mean": 2097152.0,
+      "count": 25
+    },
+    "TCC_HIT_sum": {
+      "median": 59563486.0,
+      "mean": 59625256.72,
+      "count": 25
+    },
+    "TCC_MISS_sum": {
+      "median": 14966882.0,
+      "mean": 14905132.24,
+      "count": 25
+    },
+    "MALL_BANDWIDTH_ALL": {
+      "median": 231557.0,
+      "mean": 232951.42,
+      "count": 100
+    },
+    "MALL_HIT_RATE_1": {
+      "median": 85.89596224980123,
+      "mean": 86.00232267773005,
+      "count": 25
+    },
+    "MALL_MISS_RATE_1": {
+      "median": 14.104901994676252,
+      "mean": 13.998536425367094,
+      "count": 25
+    },
+    "HBM_READ_BYTES": {
+      "median": 57154304.0,
+      "mean": 57028096.0,
+      "count": 25
+    },
+    "HBM_WRITE_BYTES": {
+      "median": 4194304.0,
+      "mean": 4194304.0,
+      "count": 25
+    }
+  },
+  "torch_rccl": {
+    "TCC_EA0_RDREQ_DRAM_sum": {
+      "median": 13532493.0,
+      "mean": 13641348.64,
+      "count": 25
+    },
+    "TCC_EA0_WRREQ_DRAM_sum": {
+      "median": 2097152.0,
+      "mean": 2097152.0,
+      "count": 25
+    },
+    "TCC_HIT_sum": {
+      "median": 59952400.0,
+      "mean": 59843539.56,
+      "count": 25
+    },
+    "TCC_MISS_sum": {
+      "median": 14577968.0,
+      "mean": 14686843.4,
+      "count": 25
+    },
+    "MALL_BANDWIDTH_ALL": {
+      "median": 912931.0,
+      "mean": 914522.08,
+      "count": 25
+    },
+    "MALL_HIT_RATE_1": {
+      "median": 85.686238,
+      "mean": 85.43205012,
+      "count": 25
+    },
+    "MALL_MISS_RATE_1": {
+      "median": 14.31464,
+      "mean": 14.57282568,
+      "count": 25
+    },
+    "HBM_READ_BYTES": {
+      "median": 53674368.0,
+      "mean": 54019584.0,
+      "count": 25
+    },
+    "HBM_WRITE_BYTES": {
+      "median": 4194304.0,
+      "mean": 4210055.68,
+      "count": 25
+    }
+  },
+  "ws_alone": {
+    "TCC_EA0_RDREQ_DRAM_sum": {
+      "median": 13533374.0,
+      "mean": 13822295.16,
+      "count": 25
+    },
+    "TCC_EA0_WRREQ_DRAM_sum": {
+      "median": 2111074.0,
+      "mean": 2120676.88,
+      "count": 25
+    },
+    "TCC_HIT_sum": {
+      "median": 56746271.0,
+      "mean": 56445920.64,
+      "count": 25
+    },
+    "TCC_MISS_sum": {
+      "median": 14591825.0,
+      "mean": 14892175.72,
+      "count": 25
+    },
+    "MALL_BANDWIDTH_ALL": {
+      "median": 242090.5,
+      "mean": 241031.26,
+      "count": 100
+    },
+    "MALL_HIT_RATE_1": {
+      "median": 86.0934581015717,
+      "mean": 85.98806856403398,
+      "count": 25
+    },
+    "MALL_MISS_RATE_1": {
+      "median": 13.907385306979627,
+      "mean": 14.012762405893328,
+      "count": 25
+    },
+    "HBM_READ_BYTES": {
+      "median": 54865280.0,
+      "mean": 55662136.32,
+      "count": 25
+    },
+    "HBM_WRITE_BYTES": {
+      "median": 4245632.0,
+      "mean": 4252631.04,
+      "count": 25
+    }
+  },
+  "ws_rccl": {
+    "TCC_EA0_RDREQ_DRAM_sum": {
+      "median": 13564006.0,
+      "mean": 12545130.64,
+      "count": 25
+    },
+    "TCC_EA0_WRREQ_DRAM_sum": {
+      "median": 2108913.0,
+      "mean": 1941822.96,
+      "count": 25
+    },
+    "TCC_HIT_sum": {
+      "median": 56698548.0,
+      "mean": 52113521.24,
+      "count": 25
+    },
+    "TCC_MISS_sum": {
+      "median": 14619733.0,
+      "mean": 13518085.08,
+      "count": 25
+    },
+    "MALL_BANDWIDTH_ALL": {
+      "median": 907094.0,
+      "mean": 838724.6,
+      "count": 25
+    },
+    "MALL_HIT_RATE_1": {
+      "median": 85.487238,
+      "mean": 86.3352512,
+      "count": 25
+    },
+    "MALL_MISS_RATE_1": {
+      "median": 14.526405,
+      "mean": 21.66555648,
+      "count": 25
+    },
+    "HBM_READ_BYTES": {
+      "median": 54078592.0,
+      "mean": 50252195.84,
+      "count": 25
+    },
+    "HBM_WRITE_BYTES": {
+      "median": 4214592.0,
+      "mean": 3880768.0,
+      "count": 25
+    }
+  }
+}

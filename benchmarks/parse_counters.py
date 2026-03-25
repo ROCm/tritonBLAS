@@ -1,248 +1,157 @@
 #!/usr/bin/env python3
-"""
-Unified rocprofv3 counter parser for overlap analysis.
-
-Handles both standard L2 counters (TCC_*) and df-counter MALL/HBM counters.
-Produces clean JSON/CSV summaries suitable for the autoresearch experiment log.
-
-Usage:
-    # Parse a single rocprofv3 CSV output
-    python3 benchmarks/parse_counters.py /path/to/out_counter_collection.csv
-
-    # Parse and compare baseline vs treatment
-    python3 benchmarks/parse_counters.py --baseline results/l2_gemm_alone/ --treatment results/l2_gemm_rccl/
-
-    # Output as JSON for experiment log
-    python3 benchmarks/parse_counters.py --json /path/to/csv
-"""
-import argparse
+"""Parse rocprofv3 counter results (SQLite for alone, CSV for RCCL) for 8K GEMM."""
 import csv
+import glob
 import json
 import os
-import sys
+import sqlite3
+import statistics
 from collections import defaultdict
-from pathlib import Path
+
+OUTDIR = "results/counters_8k"
+
+GEMM_PATTERNS = ["Cijk_", "ws_hierarchical", "matmul_kernel"]
+SKIP_PATTERNS = ["distribution", "elementwise", "fill", "copy", "reduce",
+                 "nccl", "rccl", "AllReduce", "ncclKernel", "ncclDevKernel",
+                 "rocclr_fill", "Sendrecv"]
 
 
-def parse_rocprof_csv(csv_path):
-    """Parse a rocprofv3 counter collection CSV.
-
-    Returns a list of dicts, one per kernel dispatch, with counter values.
-    Handles the rocprofv3 format where each counter gets its own row.
-    """
-    dispatches = defaultdict(lambda: {"counters": {}})
-
-    with open(csv_path) as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            disp_id = row.get("Dispatch_Id", row.get("dispatch_id", ""))
-            if not disp_id:
-                continue
-
-            kernel = row.get("Kernel_Name", row.get("kernel_name", ""))
-            counter = row.get("Counter_Name", row.get("counter_name", ""))
-            value = row.get("Counter_Value", row.get("counter_value", "0"))
-
-            key = f"{disp_id}"
-            dispatches[key]["dispatch_id"] = disp_id
-            dispatches[key]["kernel_name"] = kernel
-            dispatches[key]["grid_size"] = row.get("Grid_Size", "")
-            dispatches[key]["workgroup_size"] = row.get("Workgroup_Size", "")
-
-            try:
-                dispatches[key]["counters"][counter] = float(value)
-            except (ValueError, TypeError):
-                dispatches[key]["counters"][counter] = value
-
-    return list(dispatches.values())
+def is_gemm_kernel(name):
+    nl = name.lower()
+    for skip in SKIP_PATTERNS:
+        if skip.lower() in nl:
+            return False
+    for pat in GEMM_PATTERNS:
+        if pat.lower() in nl:
+            return True
+    return False
 
 
-def filter_gemm_dispatches(dispatches):
-    """Filter to only GEMM kernel dispatches (Cijk_ or matmul-related)."""
-    gemm_keywords = ["Cijk_", "matmul", "gemm", "ws_matmul", "persistent_matmul"]
-    result = []
-    for d in dispatches:
-        name = d.get("kernel_name", "").lower()
-        if any(kw.lower() in name for kw in gemm_keywords):
-            result.append(d)
-    return result
+def parse_sqlite(db_path):
+    conn = sqlite3.connect(db_path)
+    tables = [t[0] for t in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+
+    pmc_tbl = [t for t in tables if "pmc_event" in t][0]
+    info_tbl = [t for t in tables if "info_pmc" in t][0]
+    kd_tbl = [t for t in tables if "kernel_dispatch" in t][0]
+    ks_tbl = [t for t in tables if "kernel_symbol" in t][0]
+
+    counter_names = {}
+    for row in conn.execute(f"SELECT id, name FROM {info_tbl}"):
+        counter_names[row[0]] = row[1]
+
+    gemm_event_ids = set()
+    for row in conn.execute(f"""
+        SELECT d.event_id, s.kernel_name
+        FROM {kd_tbl} d JOIN {ks_tbl} s ON d.kernel_id = s.id
+    """):
+        if is_gemm_kernel(row[1]):
+            gemm_event_ids.add(row[0])
+
+    results = defaultdict(list)
+    for row in conn.execute(f"SELECT event_id, pmc_id, value FROM {pmc_tbl}"):
+        event_id, pmc_id, value = row
+        if event_id in gemm_event_ids:
+            cname = counter_names.get(pmc_id, str(pmc_id))
+            results[cname].append(value)
+
+    conn.close()
+    return {k: {"median": statistics.median(v), "mean": statistics.mean(v),
+                "count": len(v)} for k, v in results.items() if v}
 
 
-def compute_l2_stats(dispatches):
-    """Compute L2 cache statistics from TCC counters."""
-    total_hit = 0
-    total_miss = 0
-    total_read = 0
-    total_write = 0
-    total_writeback = 0
-    n = 0
+def parse_csv_dir(dir_path):
+    csv_files = sorted(glob.glob(os.path.join(dir_path, "*", "*_counter_collection.csv")))
+    if not csv_files:
+        return {}
 
-    for d in dispatches:
-        c = d["counters"]
-        hit = c.get("TCC_HIT_sum", c.get("TCC_HIT", 0))
-        miss = c.get("TCC_MISS_sum", c.get("TCC_MISS", 0))
-        read = c.get("TCC_READ_sum", c.get("TCC_READ", 0))
-        write = c.get("TCC_WRITE_sum", c.get("TCC_WRITE", 0))
-        wb = c.get("TCC_WRITEBACK_sum", c.get("TCC_WRITEBACK", 0))
+    pids = set()
+    for f in csv_files:
+        base = os.path.basename(f).split("_")[0]
+        pids.add(base)
+    first_pid = sorted(pids)[0]
+    rank0_files = [f for f in csv_files if f"/{first_pid}_" in f]
 
-        if isinstance(hit, (int, float)) and isinstance(miss, (int, float)):
-            total_hit += hit
-            total_miss += miss
-            total_read += read
-            total_write += write
-            total_writeback += wb
-            n += 1
+    results = defaultdict(list)
+    for csv_file in rank0_files:
+        with open(csv_file, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                kname = row.get("Kernel_Name", "")
+                ctr_name = row.get("Counter_Name", "")
+                ctr_val = row.get("Counter_Value", "")
+                if not ctr_name or not ctr_val:
+                    continue
+                if is_gemm_kernel(kname):
+                    try:
+                        results[ctr_name].append(float(ctr_val))
+                    except ValueError:
+                        pass
 
-    total = total_hit + total_miss
-    hit_rate = (total_hit / total * 100) if total > 0 else 0.0
-
-    return {
-        "n_dispatches": n,
-        "total_hit": total_hit,
-        "total_miss": total_miss,
-        "hit_rate_pct": round(hit_rate, 2),
-        "total_read": total_read,
-        "total_write": total_write,
-        "total_writeback": total_writeback,
-    }
-
-
-def compute_mall_stats(dispatches):
-    """Compute MALL/LLC and HBM statistics from df-counter output."""
-    total_mall_bw = 0
-    total_hbm_read = 0
-    total_hbm_write = 0
-    n = 0
-
-    for d in dispatches:
-        c = d["counters"]
-        mall = c.get("MALL_BANDWIDTH_ALL", 0)
-        hbm_r = c.get("HBM_READ_BYTES", 0)
-        hbm_w = c.get("HBM_WRITE_BYTES", 0)
-
-        if isinstance(mall, (int, float)):
-            total_mall_bw += mall
-            total_hbm_read += hbm_r
-            total_hbm_write += hbm_w
-            n += 1
-
-    return {
-        "n_dispatches": n,
-        "total_mall_bandwidth": total_mall_bw,
-        "total_hbm_read_bytes": total_hbm_read,
-        "total_hbm_write_bytes": total_hbm_write,
-        "total_hbm_bytes": total_hbm_read + total_hbm_write,
-    }
-
-
-def summarize_csv(csv_path, gemm_only=True):
-    """Parse a CSV and return a full summary."""
-    dispatches = parse_rocprof_csv(csv_path)
-    if gemm_only:
-        gemm = filter_gemm_dispatches(dispatches)
-    else:
-        gemm = dispatches
-
-    summary = {
-        "file": str(csv_path),
-        "total_dispatches": len(dispatches),
-        "gemm_dispatches": len(gemm),
-    }
-
-    has_tcc = any("TCC_HIT" in d["counters"] or "TCC_HIT_sum" in d["counters"] for d in gemm)
-    has_mall = any("MALL_BANDWIDTH_ALL" in d["counters"] for d in gemm)
-
-    if has_tcc:
-        summary["l2"] = compute_l2_stats(gemm)
-    if has_mall:
-        summary["mall"] = compute_mall_stats(gemm)
-
-    return summary
-
-
-def compare_results(baseline_dir, treatment_dir, gemm_only=True):
-    """Compare baseline and treatment counter data."""
-    def find_csvs(d):
-        p = Path(d)
-        return sorted(p.rglob("*counter_collection*.csv"))
-
-    baseline_csvs = find_csvs(baseline_dir)
-    treatment_csvs = find_csvs(treatment_dir)
-
-    comparison = {
-        "baseline_dir": str(baseline_dir),
-        "treatment_dir": str(treatment_dir),
-        "baseline_files": len(baseline_csvs),
-        "treatment_files": len(treatment_csvs),
-    }
-
-    if baseline_csvs:
-        b_summary = summarize_csv(baseline_csvs[0], gemm_only)
-        comparison["baseline"] = b_summary
-
-    if treatment_csvs:
-        t_summary = summarize_csv(treatment_csvs[0], gemm_only)
-        comparison["treatment"] = t_summary
-
-    if "baseline" in comparison and "treatment" in comparison:
-        b = comparison["baseline"]
-        t = comparison["treatment"]
-        diff = {}
-        if "l2" in b and "l2" in t:
-            diff["l2_hit_rate_baseline"] = b["l2"]["hit_rate_pct"]
-            diff["l2_hit_rate_treatment"] = t["l2"]["hit_rate_pct"]
-            diff["l2_hit_rate_delta"] = round(t["l2"]["hit_rate_pct"] - b["l2"]["hit_rate_pct"], 2)
-        if "mall" in b and "mall" in t:
-            diff["mall_bw_baseline"] = b["mall"]["total_mall_bandwidth"]
-            diff["mall_bw_treatment"] = t["mall"]["total_mall_bandwidth"]
-            b_hbm = b["mall"]["total_hbm_bytes"]
-            t_hbm = t["mall"]["total_hbm_bytes"]
-            diff["hbm_increase_pct"] = round((t_hbm - b_hbm) / b_hbm * 100, 2) if b_hbm > 0 else None
-        comparison["diff"] = diff
-
-    return comparison
+    return {k: {"median": statistics.median(v), "mean": statistics.mean(v),
+                "count": len(v)} for k, v in results.items() if v}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Parse rocprofv3 counter data")
-    parser.add_argument("csv_file", nargs="?", help="Single CSV file to parse")
-    parser.add_argument("--baseline", help="Baseline results directory")
-    parser.add_argument("--treatment", help="Treatment results directory")
-    parser.add_argument("--json", action="store_true", help="Output as JSON")
-    parser.add_argument("--all-kernels", action="store_true", help="Include non-GEMM kernels")
-    args = parser.parse_args()
+    scenarios = {}
+    for backend in ["torch", "ws"]:
+        for mode in ["alone", "rccl"]:
+            for pass_name in ["l2", "mall", "hbm"]:
+                tag = f"{backend}_{mode}_{pass_name}"
+                db_path = os.path.join(OUTDIR, f"{tag}_results.db")
+                dir_path = os.path.join(OUTDIR, f"{tag}_dir")
 
-    gemm_only = not args.all_kernels
+                if os.path.exists(db_path):
+                    data = parse_sqlite(db_path)
+                elif os.path.isdir(dir_path):
+                    data = parse_csv_dir(dir_path)
+                else:
+                    continue
 
-    if args.baseline and args.treatment:
-        result = compare_results(args.baseline, args.treatment, gemm_only)
-    elif args.csv_file:
-        result = summarize_csv(args.csv_file, gemm_only)
-    else:
-        parser.print_help()
-        sys.exit(1)
+                key = f"{backend}_{mode}"
+                if key not in scenarios:
+                    scenarios[key] = {}
+                scenarios[key].update(data)
 
-    if args.json:
-        print(json.dumps(result, indent=2))
-    else:
-        if "diff" in result:
-            print(f"\n{'='*60}")
-            print("COUNTER COMPARISON")
-            print(f"{'='*60}")
-            print(f"Baseline:  {result['baseline_dir']}")
-            print(f"Treatment: {result['treatment_dir']}")
-            d = result["diff"]
-            if "l2_hit_rate_baseline" in d:
-                print(f"\nL2 Cache Hit Rate:")
-                print(f"  Baseline:  {d['l2_hit_rate_baseline']:.1f}%")
-                print(f"  Treatment: {d['l2_hit_rate_treatment']:.1f}%")
-                print(f"  Delta:     {d['l2_hit_rate_delta']:+.1f}%")
-            if "hbm_increase_pct" in d:
-                print(f"\nHBM Traffic Increase: {d['hbm_increase_pct']:+.1f}%")
-                print(f"MALL BW Baseline:     {d['mall_bw_baseline']}")
-                print(f"MALL BW Treatment:    {d['mall_bw_treatment']}")
-        else:
-            print(json.dumps(result, indent=2))
+    def fmt(v):
+        if v != v: return "—"
+        if abs(v) >= 1e9: return f"{v:.2e}"
+        if abs(v) >= 1e6: return f"{v/1e6:.1f}M"
+        if abs(v) >= 1e3: return f"{v/1e3:.1f}K"
+        return f"{v:.2f}"
+
+    def delta(a, b):
+        if a != a or b != b or a == 0: return "—"
+        return f"{(b - a) / a * 100:+.1f}%"
+
+    print("\n" + "=" * 120)
+    print(f"{'Counter':40s} │ {'torch alone':>12s} │ {'torch+RCCL':>12s} │ {'Δ':>8s} │ "
+          f"{'WS alone':>12s} │ {'WS+RCCL':>12s} │ {'Δ':>8s}")
+    print("=" * 120)
+
+    all_counters = sorted(set().union(*(s.keys() for s in scenarios.values())))
+    groups = {"L2": [], "MALL": [], "HBM": [], "Other": []}
+    for c in all_counters:
+        if "TCC" in c: groups["L2"].append(c)
+        elif "MALL" in c: groups["MALL"].append(c)
+        elif "HBM" in c: groups["HBM"].append(c)
+        else: groups["Other"].append(c)
+
+    for group_name, ctrs in groups.items():
+        if not ctrs: continue
+        print(f"\n  --- {group_name} ---")
+        for ctr in ctrs:
+            ta = scenarios.get("torch_alone", {}).get(ctr, {}).get("median", float("nan"))
+            tr = scenarios.get("torch_rccl", {}).get(ctr, {}).get("median", float("nan"))
+            wa = scenarios.get("ws_alone", {}).get(ctr, {}).get("median", float("nan"))
+            wr = scenarios.get("ws_rccl", {}).get(ctr, {}).get("median", float("nan"))
+            print(f"  {ctr:38s} │ {fmt(ta):>12s} │ {fmt(tr):>12s} │ {delta(ta,tr):>8s} │ "
+                  f"{fmt(wa):>12s} │ {fmt(wr):>12s} │ {delta(wa,wr):>8s}")
+
+    with open(os.path.join(OUTDIR, "counter_summary.json"), "w") as f:
+        json.dump(scenarios, f, indent=2)
+    print(f"\nJSON: {OUTDIR}/counter_summary.json")
 
 
 if __name__ == "__main__":

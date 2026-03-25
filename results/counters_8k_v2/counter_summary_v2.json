@@ -1,0 +1,1482 @@
+{
+  "torch_alone": {
+    "randn": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 8192.0,
+        "mean": 8192.0,
+        "n": 8
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 8
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 8193.0,
+        "mean": 8193.0,
+        "n": 8
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 8192.0,
+        "mean": 8192.0,
+        "n": 8
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 8
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 8193.0,
+        "mean": 8193.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 16385.0,
+        "mean": 16385.0,
+        "n": 8
+      },
+      "HBM_READ_BYTES": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 2
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 4194304.0,
+        "mean": 4194304.0,
+        "n": 2
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 16384.0,
+        "mean": 16385.0,
+        "n": 8
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 0.012205541315757355,
+        "mean": 0.012205541315757355,
+        "n": 2
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 0.02440661446507819,
+        "mean": 0.02440661446507819,
+        "n": 2
+      },
+      "TCC_HIT_sum": {
+        "median": 1059024.0,
+        "mean": 1059024.0,
+        "n": 2
+      },
+      "TCC_MISS_sum": {
+        "median": 1048979.0,
+        "mean": 1048979.0,
+        "n": 2
+      }
+    },
+    "fill": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 1600.0,
+        "mean": 1600.0,
+        "n": 4
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 4
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 1601.0,
+        "mean": 1601.0,
+        "n": 4
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 1600.0,
+        "mean": 1600.0,
+        "n": 4
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 4
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 1601.0,
+        "mean": 1601.0,
+        "n": 4
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 4
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 4
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 4
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 4
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 3201.0,
+        "mean": 3201.0,
+        "n": 4
+      },
+      "HBM_READ_BYTES": {
+        "median": 1024.0,
+        "mean": 1024.0,
+        "n": 1
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 819200.0,
+        "mean": 819200.0,
+        "n": 1
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 3200.0,
+        "mean": 3200.0,
+        "n": 4
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 0.06246096189881324,
+        "mean": 0.06246096189881324,
+        "n": 1
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 0.06246096189881324,
+        "mean": 0.06246096189881324,
+        "n": 1
+      },
+      "TCC_HIT_sum": {
+        "median": 209320.0,
+        "mean": 209320.0,
+        "n": 1
+      },
+      "TCC_MISS_sum": {
+        "median": 204957.0,
+        "mean": 204957.0,
+        "n": 1
+      }
+    },
+    "GEMM": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 116921.0,
+        "mean": 116745.05,
+        "n": 140
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 100561.0,
+        "mean": 100412.78571428571,
+        "n": 140
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 16361.5,
+        "mean": 16334.264285714286,
+        "n": 140
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 117165.0,
+        "mean": 117021.12142857142,
+        "n": 140
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 100791.0,
+        "mean": 100084.5,
+        "n": 140
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 16373.5,
+        "mean": 16938.621428571427,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 218147.0,
+        "mean": 218571.2142857143,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 16385.0,
+        "mean": 16385.0,
+        "n": 140
+      },
+      "HBM_READ_BYTES": {
+        "median": 56240512.0,
+        "mean": 56147649.82857143,
+        "n": 35
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 4194304.0,
+        "mean": 4194304.0,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 239029.0,
+        "mean": 238420.07142857142,
+        "n": 140
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 86.34775609195162,
+        "mean": 86.31200674795849,
+        "n": 35
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 86.34754701596296,
+        "mean": 86.31198507225537,
+        "n": 35
+      },
+      "TCC_HIT_sum": {
+        "median": 59231835.0,
+        "mean": 59272882.057142854,
+        "n": 35
+      },
+      "TCC_MISS_sum": {
+        "median": 15298533.0,
+        "mean": 15257488.6,
+        "n": 35
+      }
+    }
+  },
+  "torch_rccl": {
+    "randn": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 32768.0,
+        "mean": 65536.0,
+        "n": 3
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 4.0,
+        "mean": 4.0,
+        "n": 3
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 32772.0,
+        "mean": 65540.0,
+        "n": 3
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 32802.0,
+        "mean": 65568.66666666667,
+        "n": 3
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 36.0,
+        "mean": 36.0,
+        "n": 3
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 32774.0,
+        "mean": 65540.66666666667,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 65540.0,
+        "mean": 131076.0,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 68.0,
+        "mean": 68.0,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 4.0,
+        "mean": 4.0,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 4.0,
+        "mean": 4.0,
+        "n": 3
+      },
+      "HBM_READ_BYTES": {
+        "median": 4096.0,
+        "mean": 4096.0,
+        "n": 3
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 4194304.0,
+        "mean": 8388608.0,
+        "n": 3
+      },
+      "TCC_HIT_sum": {
+        "median": 1059024.0,
+        "mean": 2107600.0,
+        "n": 3
+      },
+      "TCC_MISS_sum": {
+        "median": 1049024.0,
+        "mean": 2097730.3333333335,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 65580.0,
+        "mean": 131086.66666666666,
+        "n": 3
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 0.0122055413,
+        "mean": 0.029481929526666666,
+        "n": 3
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 0.0122055413,
+        "mean": 0.03354449046,
+        "n": 3
+      }
+    },
+    "fill": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 512.0,
+        "mean": 858.375,
+        "n": 352
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 4.0,
+        "mean": 4.386363636363637,
+        "n": 352
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 516.0,
+        "mean": 862.0340909090909,
+        "n": 352
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 512.0,
+        "mean": 858.2897727272727,
+        "n": 352
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 4.0,
+        "mean": 4.278409090909091,
+        "n": 352
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 516.0,
+        "mean": 862.0482954545455,
+        "n": 352
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 352
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 1028.0,
+        "mean": 1720.5255681818182,
+        "n": 352
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 4.0,
+        "mean": 4.568181818181818,
+        "n": 352
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 4.0,
+        "mean": 4.042613636363637,
+        "n": 352
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 4.0,
+        "mean": 4.002840909090909,
+        "n": 352
+      },
+      "HBM_READ_BYTES": {
+        "median": 2048.0,
+        "mean": 1458.3636363636363,
+        "n": 352
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 65536.0,
+        "mean": 109857.63636363637,
+        "n": 352
+      },
+      "TCC_HIT_sum": {
+        "median": 4520.0,
+        "mean": 4183.809659090909,
+        "n": 352
+      },
+      "TCC_MISS_sum": {
+        "median": 168.0,
+        "mean": 1464.1022727272727,
+        "n": 352
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 1024.0,
+        "mean": 1716.6420454545455,
+        "n": 352
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 0.775193798,
+        "mean": 35.08078174759892,
+        "n": 352
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 0.775193798,
+        "mean": 34.92018235417562,
+        "n": 352
+      }
+    },
+    "copy": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 0.0,
+        "mean": 0.07509881422924901,
+        "n": 506
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 4.0,
+        "mean": 4.067193675889328,
+        "n": 506
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 4.0,
+        "mean": 4.013833992094861,
+        "n": 506
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 0.0,
+        "mean": 0.06324110671936758,
+        "n": 506
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 4.0,
+        "mean": 4.057312252964427,
+        "n": 506
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 4.0,
+        "mean": 4.025691699604743,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 4.0,
+        "mean": 4.041501976284585,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 4.0,
+        "mean": 4.051383399209486,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 4.0,
+        "mean": 4.041501976284585,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 4.0,
+        "mean": 4.021739130434782,
+        "n": 506
+      },
+      "HBM_READ_BYTES": {
+        "median": 192.0,
+        "mean": 193.64426877470356,
+        "n": 506
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 0.0,
+        "mean": 12.015810276679842,
+        "n": 506
+      },
+      "TCC_HIT_sum": {
+        "median": 13.0,
+        "mean": 14.972332015810277,
+        "n": 506
+      },
+      "TCC_MISS_sum": {
+        "median": 16.0,
+        "mean": 19.770750988142293,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 0.0,
+        "mean": 0.34782608695652173,
+        "n": 506
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 100.0,
+        "mean": 101.36428514229249,
+        "n": 506
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 100.0,
+        "mean": 100.25785808102766,
+        "n": 506
+      }
+    },
+    "RCCL": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 719630.0,
+        "mean": 719694.0285714286,
+        "n": 35
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 114.0,
+        "mean": 134.57142857142858,
+        "n": 35
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 719428.0,
+        "mean": 719429.2571428572,
+        "n": 35
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 719147.0,
+        "mean": 720449.7428571428,
+        "n": 35
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 132.0,
+        "mean": 235.4857142857143,
+        "n": 35
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 718830.0,
+        "mean": 720048.2571428572,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 714820.0,
+        "mean": 713600.4285714285,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 721308.0,
+        "mean": 721313.1142857143,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 34.0,
+        "mean": 36.94285714285714,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 34.0,
+        "mean": 33.857142857142854,
+        "n": 35
+      },
+      "HBM_READ_BYTES": {
+        "median": 46158720.0,
+        "mean": 46176894.17142857,
+        "n": 35
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 45960064.0,
+        "mean": 45801234.28571428,
+        "n": 35
+      },
+      "TCC_HIT_sum": {
+        "median": 4934039.0,
+        "mean": 7776205.685714286,
+        "n": 35
+      },
+      "TCC_MISS_sum": {
+        "median": 15117301.0,
+        "mean": 15115168.57142857,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 1440946.0,
+        "mean": 1439105.9714285715,
+        "n": 35
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 0.0274783989,
+        "mean": 0.02784666770857143,
+        "n": 35
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 0.0222106542,
+        "mean": 0.02414767889714286,
+        "n": 35
+      }
+    },
+    "GEMM": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 453382.0,
+        "mean": 455791.71428571426,
+        "n": 35
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 387973.0,
+        "mean": 389376.8,
+        "n": 35
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 65423.0,
+        "mean": 66452.62857142858,
+        "n": 35
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 453664.0,
+        "mean": 455050.45714285714,
+        "n": 35
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 388182.0,
+        "mean": 388793.02857142856,
+        "n": 35
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 65288.0,
+        "mean": 66274.31428571428,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 65540.0,
+        "mean": 65786.97142857143,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 837280.0,
+        "mean": 839192.4,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 4.0,
+        "mean": 4.0285714285714285,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 4.0,
+        "mean": 4.0285714285714285,
+        "n": 35
+      },
+      "HBM_READ_BYTES": {
+        "median": 53834368.0,
+        "mean": 54028145.37142857,
+        "n": 35
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 4194304.0,
+        "mean": 4260728.685714286,
+        "n": 35
+      },
+      "TCC_HIT_sum": {
+        "median": 60010896.0,
+        "mean": 59948462.428571425,
+        "n": 35
+      },
+      "TCC_MISS_sum": {
+        "median": 14519472.0,
+        "mean": 14581913.857142856,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 907752.0,
+        "mean": 911616.6,
+        "n": 35
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 85.579244,
+        "mean": 85.43683405714286,
+        "n": 35
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 85.579686,
+        "mean": 85.4349886,
+        "n": 35
+      }
+    }
+  },
+  "ws_alone": {
+    "randn": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 8192.0,
+        "mean": 8194.0,
+        "n": 8
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 1.0,
+        "mean": 3.0,
+        "n": 8
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 8193.0,
+        "mean": 8193.0,
+        "n": 8
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 8192.0,
+        "mean": 8194.625,
+        "n": 8
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 1.0,
+        "mean": 3.625,
+        "n": 8
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 8193.0,
+        "mean": 8193.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 8
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 16385.0,
+        "mean": 16385.0,
+        "n": 8
+      },
+      "HBM_READ_BYTES": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 2
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 4194304.0,
+        "mean": 4194304.0,
+        "n": 2
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 16384.0,
+        "mean": 16385.0,
+        "n": 8
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 0.012205541315757355,
+        "mean": 0.012205541315757355,
+        "n": 2
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 0.02440661446507819,
+        "mean": 0.02440661446507819,
+        "n": 2
+      },
+      "TCC_HIT_sum": {
+        "median": 1059024.0,
+        "mean": 1059024.0,
+        "n": 2
+      },
+      "TCC_MISS_sum": {
+        "median": 1048974.0,
+        "mean": 1048974.0,
+        "n": 2
+      }
+    },
+    "fill": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 0.0,
+        "mean": 110.70270270270271,
+        "n": 296
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 296
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 1.0,
+        "mean": 111.70270270270271,
+        "n": 296
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 0.0,
+        "mean": 110.70945945945945,
+        "n": 296
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 296
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 1.0,
+        "mean": 111.70945945945945,
+        "n": 296
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 296
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 296
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 296
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 296
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 1.0,
+        "mean": 222.40540540540542,
+        "n": 296
+      },
+      "HBM_READ_BYTES": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 74
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 0.0,
+        "mean": 56679.78378378379,
+        "n": 74
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 0.0,
+        "mean": 221.4189189189189,
+        "n": 296
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 100.0,
+        "mean": 98.64881358839615,
+        "n": 74
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 100.0,
+        "mean": 98.64881358839615,
+        "n": 74
+      },
+      "TCC_HIT_sum": {
+        "median": 24.5,
+        "mean": 14241.148648648648,
+        "n": 74
+      },
+      "TCC_MISS_sum": {
+        "median": 30.0,
+        "mean": 14196.68918918919,
+        "n": 74
+      }
+    },
+    "GEMM": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 118713.5,
+        "mean": 118614.72857142857,
+        "n": 140
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 101994.5,
+        "mean": 101895.53571428571,
+        "n": 140
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 16441.5,
+        "mean": 16721.192857142858,
+        "n": 140
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 120521.5,
+        "mean": 120461.62142857142,
+        "n": 140
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 104096.0,
+        "mean": 103815.32142857143,
+        "n": 140
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 16433.0,
+        "mean": 16648.3,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 1.0,
+        "mean": 1.0,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 212557.0,
+        "mean": 217661.4,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 262.5,
+        "mean": 371.24285714285713,
+        "n": 140
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 16258.5,
+        "mean": 16214.557142857142,
+        "n": 140
+      },
+      "HBM_READ_BYTES": {
+        "median": 54489856.0,
+        "mean": 55091989.942857146,
+        "n": 35
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 4238592.0,
+        "mean": 4241938.285714285,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 228701.0,
+        "mean": 230655.0,
+        "n": 140
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 85.5771993834847,
+        "mean": 85.50180227762716,
+        "n": 35
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 85.58597383065784,
+        "mean": 85.50187133142695,
+        "n": 35
+      },
+      "TCC_HIT_sum": {
+        "median": 56697667.0,
+        "mean": 56567189.657142855,
+        "n": 35
+      },
+      "TCC_MISS_sum": {
+        "median": 14640413.0,
+        "mean": 14770897.114285715,
+        "n": 35
+      }
+    }
+  },
+  "ws_rccl": {
+    "randn": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 32770.0,
+        "mean": 65536.66666666667,
+        "n": 3
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 4.0,
+        "mean": 4.0,
+        "n": 3
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 32776.0,
+        "mean": 65541.33333333333,
+        "n": 3
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 32768.0,
+        "mean": 65536.0,
+        "n": 3
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 4.0,
+        "mean": 4.0,
+        "n": 3
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 32772.0,
+        "mean": 65540.0,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 65544.0,
+        "mean": 131077.33333333334,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 4.0,
+        "mean": 4.0,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 4.0,
+        "mean": 4.0,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 4.0,
+        "mean": 4.0,
+        "n": 3
+      },
+      "HBM_READ_BYTES": {
+        "median": 0.0,
+        "mean": 1194.6666666666667,
+        "n": 3
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 4194304.0,
+        "mean": 8388608.0,
+        "n": 3
+      },
+      "TCC_HIT_sum": {
+        "median": 1059024.0,
+        "mean": 2107600.0,
+        "n": 3
+      },
+      "TCC_MISS_sum": {
+        "median": 1049006.0,
+        "mean": 2097681.6666666665,
+        "n": 3
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 65540.0,
+        "mean": 131094.66666666666,
+        "n": 3
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 0.0183071947,
+        "mean": 0.01932367156666667,
+        "n": 3
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 0.0183071947,
+        "mean": 0.01932367156666667,
+        "n": 3
+      }
+    },
+    "fill": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 512.0,
+        "mean": 775.5482352941176,
+        "n": 425
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 4.0,
+        "mean": 4.517647058823529,
+        "n": 425
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 516.0,
+        "mean": 783.3341176470589,
+        "n": 425
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 512.0,
+        "mean": 775.8,
+        "n": 425
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 4.0,
+        "mean": 4.216470588235294,
+        "n": 425
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 516.0,
+        "mean": 784.4094117647059,
+        "n": 425
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 425
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 1028.0,
+        "mean": 1561.24,
+        "n": 425
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 36.0,
+        "mean": 22.687058823529412,
+        "n": 425
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 4.0,
+        "mean": 4.0329411764705885,
+        "n": 425
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 4.0,
+        "mean": 4.016470588235294,
+        "n": 425
+      },
+      "HBM_READ_BYTES": {
+        "median": 2048.0,
+        "mean": 1176.9976470588235,
+        "n": 425
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 65536.0,
+        "mean": 99906.25882352941,
+        "n": 425
+      },
+      "TCC_HIT_sum": {
+        "median": 4520.0,
+        "mean": 5452.501176470589,
+        "n": 425
+      },
+      "TCC_MISS_sum": {
+        "median": 160.0,
+        "mean": 3202.534117647059,
+        "n": 425
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 1024.0,
+        "mean": 1545.884705882353,
+        "n": 425
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 1.162791,
+        "mean": 46.10523840920847,
+        "n": 425
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 1.162791,
+        "mean": 46.07091543342965,
+        "n": 425
+      }
+    },
+    "copy": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 0.0,
+        "mean": 0.07905138339920949,
+        "n": 506
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 4.0,
+        "mean": 4.0770750988142295,
+        "n": 506
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 4.0,
+        "mean": 4.017786561264822,
+        "n": 506
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 0.0,
+        "mean": 0.08498023715415019,
+        "n": 506
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 4.0,
+        "mean": 4.075098814229249,
+        "n": 506
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 4.0,
+        "mean": 4.033596837944664,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.001976284584980237,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 4.0,
+        "mean": 4.090909090909091,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 8.0,
+        "mean": 8.071146245059289,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 4.0,
+        "mean": 4.053359683794467,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 4.0,
+        "mean": 4.023715415019763,
+        "n": 506
+      },
+      "HBM_READ_BYTES": {
+        "median": 0.0,
+        "mean": 2.0237154150197627,
+        "n": 506
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 0.0,
+        "mean": 7.841897233201581,
+        "n": 506
+      },
+      "TCC_HIT_sum": {
+        "median": 13.0,
+        "mean": 15.011857707509881,
+        "n": 506
+      },
+      "TCC_MISS_sum": {
+        "median": 16.0,
+        "mean": 19.23715415019763,
+        "n": 506
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 0.0,
+        "mean": 0.3557312252964427,
+        "n": 506
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 100.0,
+        "mean": 100.39337473913044,
+        "n": 506
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 100.0,
+        "mean": 99.8320158083004,
+        "n": 506
+      }
+    },
+    "RCCL": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 720237.0,
+        "mean": 720496.5428571429,
+        "n": 35
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 229.0,
+        "mean": 303.42857142857144,
+        "n": 35
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 719860.0,
+        "mean": 720101.0285714286,
+        "n": 35
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 719802.0,
+        "mean": 720227.2285714286,
+        "n": 35
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 135.0,
+        "mean": 228.4857142857143,
+        "n": 35
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 719551.0,
+        "mean": 719902.4,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 718454.0,
+        "mean": 715513.7714285714,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 721226.0,
+        "mean": 721372.6,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 23.0,
+        "mean": 29.142857142857142,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 23.0,
+        "mean": 27.314285714285713,
+        "n": 35
+      },
+      "HBM_READ_BYTES": {
+        "median": 46160384.0,
+        "mean": 46178380.8,
+        "n": 35
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 45853056.0,
+        "mean": 45810210.74285714,
+        "n": 35
+      },
+      "TCC_HIT_sum": {
+        "median": 4928693.0,
+        "mean": 7638414.571428572,
+        "n": 35
+      },
+      "TCC_MISS_sum": {
+        "median": 15125326.0,
+        "mean": 15135721.57142857,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 1441039.0,
+        "mean": 1441229.6857142858,
+        "n": 35
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 0.0215150182,
+        "mean": 0.028247462314285713,
+        "n": 35
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 0.0209605484,
+        "mean": 0.026570567622857144,
+        "n": 35
+      }
+    },
+    "GEMM": {
+      "MALL_ALL_REQUESTS_1": {
+        "median": 455456.0,
+        "mean": 433474.2,
+        "n": 35
+      },
+      "MALL_HIT_REQUESTS_1": {
+        "median": 389846.0,
+        "mean": 370310.4,
+        "n": 35
+      },
+      "MALL_MISS_REQUESTS_1": {
+        "median": 65612.0,
+        "mean": 63171.8,
+        "n": 35
+      },
+      "MALL_ALL_REQUESTS_2": {
+        "median": 455235.0,
+        "mean": 431168.82857142854,
+        "n": 35
+      },
+      "MALL_HIT_REQUESTS_2": {
+        "median": 388530.0,
+        "mean": 366594.2571428571,
+        "n": 35
+      },
+      "MALL_MISS_REQUESTS_2": {
+        "median": 66348.0,
+        "mean": 64590.97142857143,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_128": {
+        "median": 0.0,
+        "mean": 0.0,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_WRITE_64": {
+        "median": 65437.0,
+        "mean": 61730.4,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_64": {
+        "median": 843725.0,
+        "mean": 801409.4285714285,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_WRITE_32": {
+        "median": 466.0,
+        "mean": 531.2,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_READ_32": {
+        "median": 4.0,
+        "mean": 4.0285714285714285,
+        "n": 35
+      },
+      "HBM_READ_BYTES": {
+        "median": 53999616.0,
+        "mean": 51136793.6,
+        "n": 35
+      },
+      "HBM_WRITE_BYTES": {
+        "median": 4217088.0,
+        "mean": 3978282.057142857,
+        "n": 35
+      },
+      "TCC_HIT_sum": {
+        "median": 56767730.0,
+        "mean": 53486212.0,
+        "n": 35
+      },
+      "TCC_MISS_sum": {
+        "median": 14549745.0,
+        "mean": 13775818.971428571,
+        "n": 35
+      },
+      "MALL_BANDWIDTH_ALL": {
+        "median": 909165.0,
+        "mean": 860819.8,
+        "n": 35
+      },
+      "MALL_HIT_RATE_1": {
+        "median": 85.551267,
+        "mean": 86.17604254285715,
+        "n": 35
+      },
+      "MALL_HIT_RATE_2": {
+        "median": 85.550518,
+        "mean": 86.17520394285714,
+        "n": 35
+      }
+    }
+  }
+}

@@ -313,12 +313,31 @@ class OrigamiMatmulSelector:
         else:
             self.COUNTERS_PER_XCD = 1
 
-        if total_tiles <= 1024:
-            self._workgroup_mapping = max(2, min(tiles_m // 8, 8))
-        elif total_tiles <= 4096:
-            self._workgroup_mapping = max(4, min(tiles_m // 4, 16))
-        else:
-            self._workgroup_mapping = max(8, min(tiles_m // 4, 16))
+        # GROUP_SIZE_M=8 is universally optimal for WS Hierarchical on MI300X
+        # (validated via autoresearch sweep across 4K-16K, Phase 4).
+        self._workgroup_mapping = min(8, tiles_m)
+
+    def hierarchical_split(self, num_xcds: int) -> tuple:
+        """Compute optimal local/global tile split for WS Hierarchical.
+
+        Adaptive split based on tiles-per-CU density (Phase 5b autoresearch).
+        Higher tile density → larger global pool for cross-XCD rebalancing:
+        - ≤4 tiles/CU:  100% local (global counter overhead dominates)
+        - >4 tiles/CU:  local_frac decreases linearly, floor at 50%
+        Calibrated on MI300X (304 CUs, 8 XCDs) across 4K-16K square GEMMs.
+
+        Returns (local_per_xcd, global_tiles).
+        """
+        bm = self._result.config.mt.m
+        bn = self._result.config.mt.n
+        total_tiles = ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
+        tiles_per_cu = total_tiles / max(self._N_CU, 1)
+
+        local_frac = max(0.5, 1.0 - max(0.0, tiles_per_cu - 4.0) * 0.05)
+        local_per_xcd = int(total_tiles * local_frac) // num_xcds
+        local_per_xcd = max(local_per_xcd, 1)
+        global_tiles = total_tiles - local_per_xcd * num_xcds
+        return local_per_xcd, global_tiles
 
     @property
     def block_m(self):

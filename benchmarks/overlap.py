@@ -95,6 +95,53 @@ def _cu_hog_mem_kernel(buf_ptr, n_iters, stride, BLOCK: tl.constexpr):
 # Matmul Backend Factories
 # ==============================================================================
 
+def _make_hierarchical_matmul(
+    A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
+) -> Tuple[Callable, Callable]:
+    """Create WS Hierarchical matmul (tuned: gm=8, no mask, grid=n_cu)."""
+    from tritonblas.config import COUNTER_STRIDE
+    from tritonblas.kernels.persistent_gemm_ws_hierarchical import ws_hierarchical_matmul
+
+    M, K = A.shape
+    _, N = B.shape
+    dev = A.device
+
+    sel = tritonblas.OrigamiMatmulSelector(M, N, K, A.dtype, B.dtype, C.dtype, dev, streamk=False)
+    BLK_M, BLK_N, BLK_K = sel.block_m, sel.block_n, sel.block_k
+    num_xcds = sel.num_sms
+    gsize_m = sel.group_m
+    n_cu = sel._N_CU
+    even_k = K % BLK_K == 0
+    local_per_xcd, global_tiles = sel.hierarchical_split(num_xcds)
+
+    tile_counter = torch.zeros(num_xcds * COUNTER_STRIDE, device=dev, dtype=torch.int32)
+    global_counter = torch.zeros(COUNTER_STRIDE, device=dev, dtype=torch.int32)
+    mask = torch.ones(n_cu, dtype=torch.int32, device=dev)
+
+    def matmul_fn():
+        ws_hierarchical_matmul[(n_cu,)](
+            A, B, C, None, None, None,
+            tile_counter, global_counter,
+            M, N, K, A.stride(0), B.stride(1), C.stride(0), C.stride(1), 0,
+            stride_ak=A.stride(1), stride_bk=B.stride(0),
+            BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m, NUM_SMS=n_cu, NUM_XCDS=num_xcds,
+            LOCAL_TILES_PER_XCD=local_per_xcd, GLOBAL_TILES=global_tiles,
+            COUNTER_STRIDE=COUNTER_STRIDE,
+            BIAS=False, EVEN_K=even_k,
+            CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None, QUANTIZED=False,
+            num_stages=2, num_warps=8, waves_per_eu=0,
+            matrix_instr_nonkdim=16, kpack=1,
+            mask_ptr=mask,
+        )
+
+    def reset_fn():
+        tile_counter.zero_()
+        global_counter.zero_()
+
+    return matmul_fn, reset_fn
+
+
 def _make_tritonblas_matmul(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -106,7 +153,7 @@ def _make_tritonblas_matmul(
     
     Args:
         A, B, C: Input/output tensors
-        backend: "persistent" | "streamk" | "ws" | "ws-global"
+        backend: "persistent" | "streamk" | "ws" | "ws-global" | "ws-hierarchical"
         total_cus: Override total CU count (for grid-sweep)
     
     Returns:
@@ -114,6 +161,9 @@ def _make_tritonblas_matmul(
     """
     M, K = A.shape
     _, N = B.shape
+
+    if backend == "ws-hierarchical":
+        return _make_hierarchical_matmul(A, B, C)
 
     enable_streamk = backend == "streamk"
     work_stealing = backend in ("ws", "ws-global")
@@ -136,6 +186,56 @@ def _make_tritonblas_matmul(
 
     def reset_fn():
         cfg.reset(streamk=enable_streamk, work_stealing=work_stealing)
+
+    return matmul_fn, reset_fn
+
+
+def _make_hierarchical_matmul(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+) -> Tuple[Callable, Callable]:
+    """Return (matmul_fn, reset_fn) for the hierarchical WS kernel (100% local)."""
+    from tritonblas.config import COUNTER_STRIDE
+    from tritonblas.kernels.persistent_gemm_ws_hierarchical import ws_hierarchical_matmul
+
+    M, K = A.shape
+    _, N = B.shape
+    dev = A.device
+
+    sel = tritonblas.OrigamiMatmulSelector(M, N, K, A.dtype, B.dtype, C.dtype, dev, streamk=False)
+    BLK_M, BLK_N, BLK_K = sel.block_m, sel.block_n, sel.block_k
+    total_tiles = triton.cdiv(M, BLK_M) * triton.cdiv(N, BLK_N)
+    num_xcds = sel.num_sms
+    gsize_m = sel.group_m
+    n_cu = sel._N_CU
+    even_k = K % BLK_K == 0
+    local_per_xcd = total_tiles // num_xcds
+    global_tiles = total_tiles - local_per_xcd * num_xcds
+
+    tile_counter = torch.zeros(num_xcds * COUNTER_STRIDE, device=dev, dtype=torch.int32)
+    global_counter = torch.zeros(COUNTER_STRIDE, device=dev, dtype=torch.int32)
+    mask = torch.ones(n_cu, dtype=torch.int32, device=dev)
+
+    def matmul_fn():
+        ws_hierarchical_matmul[(n_cu,)](
+            A, B, C, None, None, None,
+            tile_counter, global_counter,
+            M, N, K, A.stride(0), B.stride(1), C.stride(0), C.stride(1), 0,
+            stride_ak=A.stride(1), stride_bk=B.stride(0),
+            BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m, NUM_SMS=n_cu, NUM_XCDS=num_xcds,
+            LOCAL_TILES_PER_XCD=local_per_xcd, GLOBAL_TILES=global_tiles,
+            COUNTER_STRIDE=COUNTER_STRIDE,
+            BIAS=False, EVEN_K=even_k,
+            CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None, QUANTIZED=False,
+            num_stages=2, num_warps=8, waves_per_eu=0,
+            matrix_instr_nonkdim=16, kpack=1, mask_ptr=mask,
+        )
+
+    def reset_fn():
+        tile_counter.zero_()
+        global_counter.zero_()
 
     return matmul_fn, reset_fn
 
@@ -640,6 +740,13 @@ def mode_standard(args):
     if rank == 0:
         _print_standard_results(args, results, nccl_ch, world_size)
 
+        if args.output_json:
+            _save_standard_json(args, results, gemm_times, comm_times,
+                                rotating_gemm_times, serial_gemm_times,
+                                overlap_gemm_times, overlap_comm_times,
+                                wall_times, rot_mm, rot_co, rot_wall,
+                                world_size, nccl_ch)
+
     dist.destroy_process_group()
 
 
@@ -716,6 +823,49 @@ def _print_standard_results(args, results, nccl_ch, world_size):
                 writer.writeheader()
             writer.writerow(row)
         print(f"Results appended to {args.output_csv}\n")
+
+
+def _save_standard_json(args, results, gemm_times, comm_times,
+                        rotating_gemm_times, serial_gemm_times,
+                        overlap_gemm_times, overlap_comm_times,
+                        wall_times, rot_mm, rot_co, rot_wall,
+                        world_size, nccl_ch):
+    """Save all raw per-iteration data to JSON for downstream plotting."""
+    out = {
+        "meta": {
+            "backend": args.backend,
+            "m": args.m, "n": args.n, "k": args.k,
+            "dtype": args.dtype,
+            "collective": args.collective,
+            "comm_size": args.comm_size,
+            "world_size": world_size,
+            "nccl_max_nchannels": nccl_ch,
+            "warmup": args.warmup, "steps": args.steps,
+            "timestamp": datetime.now().isoformat(),
+        },
+        "alone_all": gemm_times,
+        "alone_median": results["gemm_alone"]["median"],
+        "comm_all": comm_times,
+        "comm_median": results["comm_alone"]["median"],
+        "rotating_all": rotating_gemm_times,
+        "rotating_median": results["rotating_gemm"]["median"],
+        "serial_all": serial_gemm_times,
+        "serial_median": results["serial_gemm"]["median"],
+        "overlap_all": overlap_gemm_times,
+        "overlap_median": results["overlap_gemm"]["median"],
+        "overlap_comm_all": overlap_comm_times,
+        "overlap_wall_all": wall_times,
+        "overlap_wall_median": results["overlap_wall"]["median"],
+        "rot_overlap_mm_all": rot_mm,
+        "rot_overlap_comm_all": rot_co,
+        "rot_overlap_wall_all": rot_wall,
+        "rot_overlap_mm_median": results["overlap_rot_gemm"]["median"],
+        "rot_overlap_wall_median": results["overlap_rot_wall"]["median"],
+    }
+    os.makedirs(os.path.dirname(args.output_json), exist_ok=True)
+    with open(args.output_json, "w") as f:
+        json.dump(out, f, indent=2)
+    print(f"JSON saved to {args.output_json}")
 
 
 # ------------------------------------------------------------------------------
@@ -1395,7 +1545,7 @@ def add_backend_arg(parser, required=False):
                        default="torch" if not required else None,
                        required=required,
                        dest="backend",
-                       choices=["torch", "persistent", "streamk", "ws", "ws-global"],
+                       choices=["torch", "persistent", "streamk", "ws", "ws-global", "ws-hierarchical"],
                        help="GEMM backend")
 
 
@@ -1431,6 +1581,8 @@ def parse_args():
     add_common_args(p_std)
     p_std.add_argument("--output-csv", type=str, default=None,
                       help="Append results to CSV file")
+    p_std.add_argument("--output-json", type=str, default=None,
+                      help="Save full per-iteration JSON data to file")
     
     # --- MODE: l2-profile ---
     p_l2 = subparsers.add_parser("l2-profile",
@@ -1503,7 +1655,7 @@ def parse_args():
     add_comm_args(p_se)
     p_se.add_argument("--backends", type=str, nargs="+",
                      default=["ws", "persistent", "torch"],
-                     choices=["torch", "persistent", "streamk", "ws", "ws-global"],
+                     choices=["torch", "persistent", "streamk", "ws", "ws-global", "ws-hierarchical"],
                      help="GEMM backends to test")
     p_se.add_argument("--shapes-preset", type=str, default="all",
                      choices=["small", "large", "all", "custom"],
