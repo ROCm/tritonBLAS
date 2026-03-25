@@ -12,6 +12,13 @@ from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
+
+def _maybe_wrap(fn):
+    """Use wrap_triton only under torch.compile tracing; direct call in eager."""
+    if torch.compiler.is_compiling():
+        return wrap_triton(fn)
+    return fn
+
 _tensor_cache = {}
 
 current_device_index = torch.cuda.current_device()
@@ -97,14 +104,9 @@ def persistent_matmul_lt(
         num_xcds = 1
 
     if work_stealing and config is not None:
-        device = a.device
-        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
-        for i in range(selector._ACTIVE_CU, len(mask), 1):
-            mask[i] = 0
-
         grids = selector._hardware.N_CU
 
-        kk = wrap_triton(ws_persistent_matmul)[(grids,)](
+        kk = _maybe_wrap(ws_persistent_matmul)[(grids,)](
             a,
             b,
             c,
@@ -138,7 +140,7 @@ def persistent_matmul_lt(
             QUANTIZED=quantized,
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
             GLOBAL_ATOMIC=config.global_atomic,
-            mask_ptr=mask,
+            mask_ptr=config.mask,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
@@ -148,7 +150,7 @@ def persistent_matmul_lt(
     else:
         grids = total_tiles
 
-        kk = wrap_triton(persistent_matmul)[(grids,)](
+        kk = _maybe_wrap(persistent_matmul)[(grids,)](
             a,
             b,
             c,
@@ -265,12 +267,7 @@ def streamk_matmul_lt(
         num_xcds = 1
 
     if work_stealing and config is not None:
-        device = a.device
-        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
-        for i in range(selector._ACTIVE_CU, len(mask), 1):
-            mask[i] = 0
-
-        kk = wrap_triton(ws_streamk_matmul)[(grids,)](
+        kk = _maybe_wrap(ws_streamk_matmul)[(grids,)](
             a,
             b,
             c,
@@ -308,7 +305,7 @@ def streamk_matmul_lt(
             QUANTIZED=quantized,
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
             GLOBAL_ATOMIC=config.global_atomic,
-            mask_ptr=mask,
+            mask_ptr=config.mask,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
@@ -316,7 +313,7 @@ def streamk_matmul_lt(
             kpack=kpack,
         )
     else:
-        kk = wrap_triton(streamk_matmul)[(grids,)](
+        kk = _maybe_wrap(streamk_matmul)[(grids,)](
             a,
             b,
             c,

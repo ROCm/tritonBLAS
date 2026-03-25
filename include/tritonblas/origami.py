@@ -315,8 +315,12 @@ class OrigamiMatmulSelector:
     def hierarchical_split(self, num_xcds: int) -> tuple:
         """Compute optimal local/global tile split for hierarchical WS.
 
+        Uses the full hardware CU count (not active CUs) so that the split
+        is a topology-level constant, avoiding Triton recompilation when the
+        active CU mask changes.
+
         Adaptive split based on tiles-per-CU density:
-        - ≤4 tiles/CU:  100% local (global counter overhead dominates)
+        - <=4 tiles/CU:  100% local (global counter overhead dominates)
         - >4 tiles/CU:  local_frac decreases linearly, floor at 50%
 
         Returns (local_per_xcd, global_tiles).
@@ -324,7 +328,8 @@ class OrigamiMatmulSelector:
         bm = self._result.config.mt.m
         bn = self._result.config.mt.n
         total_tiles = ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
-        tiles_per_cu = total_tiles / max(self._N_CU, 1)
+        hw_cus = self._hardware.NUM_XCD * self._hardware.CU_per_L2
+        tiles_per_cu = total_tiles / max(hw_cus, 1)
 
         local_frac = max(0.5, 1.0 - max(0.0, tiles_per_cu - 4.0) * 0.05)
         local_per_xcd = int(total_tiles * local_frac) // num_xcds
