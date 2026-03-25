@@ -66,7 +66,7 @@ def ws_persistent_matmul(
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,
-    ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    ALLOW_TF32: tl.constexpr = True,
     GLOBAL_ATOMIC: tl.constexpr = False,
     HIERARCHICAL: tl.constexpr = False,
     LOCAL_TILES_PER_XCD: tl.constexpr = 0,
