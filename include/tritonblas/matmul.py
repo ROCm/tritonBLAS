@@ -10,7 +10,7 @@ import triton
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
-from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE, MAX_SK_TILES
+from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 _tensor_cache = {}
 
@@ -91,12 +91,20 @@ def persistent_matmul_lt(
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
+    else:
+        num_xcds = 1
 
     if work_stealing and config is not None:
+        device = a.device
+        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
+        for i in range(selector._ACTIVE_CU, len(mask), 1):
+            mask[i] = 0
+
         grids = selector._hardware.N_CU
 
-        kk = ws_persistent_matmul[(grids,)](
+        kk = wrap_triton(ws_persistent_matmul)[(grids,)](
             a,
             b,
             c,
@@ -128,13 +136,14 @@ def persistent_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
             GLOBAL_ATOMIC=config.global_atomic,
+            mask_ptr=mask,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            mask_ptr=config.mask,
         )
     else:
         grids = total_tiles
@@ -210,21 +219,14 @@ def streamk_matmul_lt(
     # Grid Size
     ##
     if work_stealing:
-        total_programs_streamk = selector._N_CU
-        active_cus = min(selector._ACTIVE_CU, total_tiles)
-        # CUTLASS-style heuristic: only use SK when the tail wave is less
-        # than half full. When the tail is mostly full, the wave quantization
-        # cost is small and pure WS DP is faster (no SK reduction overhead).
-        remainder = total_tiles % active_cus if active_cus > 0 else 0
-        tail_occupancy = remainder / active_cus if active_cus > 0 else 0
-        total_tiles_streamk = remainder if tail_occupancy < 0.5 else 0
+        total_programs_streamk = selector._hardware.N_CU
     else:
         total_programs_streamk = selector.sk_grid
-        active_cus = total_programs_streamk
-        if total_programs_streamk > 0:
-            total_tiles_streamk = total_tiles % total_programs_streamk
-        else:
-            total_tiles_streamk = 0
+
+    if total_programs_streamk > 0:
+        total_tiles_streamk = total_tiles % total_programs_streamk
+    else:
+        total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
@@ -257,10 +259,18 @@ def streamk_matmul_lt(
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, grids // num_xcds) 
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, grids // num_xcds)
+    else:
+        num_xcds = 1
 
     if work_stealing and config is not None:
-        kk = ws_streamk_matmul[(grids,)](
+        device = a.device
+        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
+        for i in range(selector._ACTIVE_CU, len(mask), 1):
+            mask[i] = 0
+
+        kk = wrap_triton(ws_streamk_matmul)[(grids,)](
             a,
             b,
             c,
@@ -268,6 +278,7 @@ def streamk_matmul_lt(
             b_scale if quantized else None,
             bias if bias is not None else None,
             config.tile_counter,
+            config.streamk_tile_counter,
             P,
             locks,
             M,
@@ -284,25 +295,25 @@ def streamk_matmul_lt(
             BLOCK_SIZE_N=BLK_N,
             BLOCK_SIZE_K=BLK_K,
             GROUP_SIZE_M=gsize_m,
-            NUM_SMS=selector._N_CU,
-            ACTIVE_CUS=active_cus,
+            NUM_SMS=selector._ACTIVE_CU,
             NUM_XCDS=num_xcds,
-            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
-            COUNTER_STRIDE=COUNTER_STRIDE,
             CHUNK_SIZE=chunk_size,
             STREAMK_TILES=total_tiles_streamk,
+            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
+            COUNTER_STRIDE=COUNTER_STRIDE,
             BIAS=bias is not None,
             EVEN_K=even_k,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
             GLOBAL_ATOMIC=config.global_atomic,
+            mask_ptr=mask,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            mask_ptr=config.mask,
         )
     else:
         kk = wrap_triton(streamk_matmul)[(grids,)](
