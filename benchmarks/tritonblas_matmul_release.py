@@ -180,7 +180,7 @@ def bench_matmul(
 
         selector = tritonblas.OrigamiMatmulSelector(
             m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
-            streamk=enable_streamk, total_cus=active_cus, active_cus=active_cus
+            streamk=enable_streamk, total_cus=total_cus, active_cus=active_cus
         )
         if counters_per_xcd is not None:
             selector.COUNTERS_PER_XCD = counters_per_xcd

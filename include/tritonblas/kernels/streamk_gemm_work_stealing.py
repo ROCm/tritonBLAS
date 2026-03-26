@@ -51,9 +51,6 @@ def ws_streamk_matmul(
     pid = tl.program_id(0)
     xcd_id = pid % NUM_XCDS
 
-    if pid >= NUM_SMS:
-        return
-
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -205,8 +202,6 @@ def ws_streamk_matmul(
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, mask=mask)
 
-        raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
-
         num_cus = tl.atomic_add(numCUs_ptr, 0, scope="gpu")
         num_active_cus = tl.atomic_add(activeCUs_ptr, 0, scope="gpu")
         if num_cus < num_active_cus:
@@ -215,6 +210,9 @@ def ws_streamk_matmul(
                 num_active_cus = tl.atomic_add(activeCUs_ptr, 0, scope="gpu")
             if num_cus == num_active_cus:
                     release_cu = False
+
+        if not release_cu:
+            raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
 
 
     if STREAMK_TILES == 0:

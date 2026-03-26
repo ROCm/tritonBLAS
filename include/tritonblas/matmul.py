@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 from torch.library import triton_op, wrap_triton
 import triton
+import sys
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
@@ -242,6 +243,7 @@ def streamk_matmul_lt(
 
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
+#    print(f"grids: {grids}", file=sys.stderr)
 
     if config is not None:
         if grids <= config.locks.shape[0] and block_size <= config.P.shape[1]:
