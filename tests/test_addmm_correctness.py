@@ -16,15 +16,17 @@ import tritonblas
 
 from conftest import (
     STANDARD_DIMS, EDGE_CASE_DIMS, SKINNY_DIMS,
-    DTYPES, USE_COMPILE, ENABLE_STREAMK, MULTITRIAL_NUM_TRIALS,
+    DTYPES, USE_COMPILE, ENABLE_STREAMK, ENABLE_WORK_STEALING,
+    MULTITRIAL_NUM_TRIALS,
 )
 
 
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
+@pytest.mark.parametrize("work_stealing", ENABLE_WORK_STEALING)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
 @pytest.mark.parametrize("m, n, k", STANDARD_DIMS + EDGE_CASE_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_addmm_forward_correctness(m, n, k, dtype, enable_streamk, use_compile):
+def test_addmm_forward_correctness(m, n, k, dtype, enable_streamk, work_stealing, use_compile):
     """Test that tritonblas.addmm forward pass matches torch.addmm."""
     torch.manual_seed(42)
 
@@ -37,7 +39,7 @@ def test_addmm_forward_correctness(m, n, k, dtype, enable_streamk, use_compile):
         addmm_fn = torch.compile(tritonblas.addmm, fullgraph=True)
 
     # tritonblas result
-    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk)
+    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk, work_stealing=work_stealing)
 
     # torch reference
     expected = torch.addmm(bias, a, b)
@@ -48,10 +50,11 @@ def test_addmm_forward_correctness(m, n, k, dtype, enable_streamk, use_compile):
 
 @pytest.mark.parametrize("trial", range(MULTITRIAL_NUM_TRIALS))
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
+@pytest.mark.parametrize("work_stealing", ENABLE_WORK_STEALING)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
 @pytest.mark.parametrize("m, n, k", STANDARD_DIMS + EDGE_CASE_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_addmm_backward_correctness(m, n, k, dtype, enable_streamk, use_compile, trial):
+def test_addmm_backward_correctness(m, n, k, dtype, enable_streamk, work_stealing, use_compile, trial):
     """Test that tritonblas.addmm backward pass produces correct gradients."""
     torch.manual_seed(42 + trial)
 
@@ -70,7 +73,7 @@ def test_addmm_backward_correctness(m, n, k, dtype, enable_streamk, use_compile,
         addmm_fn = torch.compile(tritonblas.addmm, fullgraph=True)
 
     # Forward pass
-    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk)
+    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk, work_stealing=work_stealing)
     result_ref = torch.addmm(bias_ref, a_ref, b_ref)
 
     # Backward pass with same upstream gradient
@@ -88,10 +91,11 @@ def test_addmm_backward_correctness(m, n, k, dtype, enable_streamk, use_compile,
 
 
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
+@pytest.mark.parametrize("work_stealing", ENABLE_WORK_STEALING)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
 @pytest.mark.parametrize("m, n, k", SKINNY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_addmm_skinny_matrices(m, n, k, dtype, enable_streamk, use_compile):
+def test_addmm_skinny_matrices(m, n, k, dtype, enable_streamk, work_stealing, use_compile):
     """Test addmm with skinny matrices (large K dimension)."""
     torch.manual_seed(42)
 
@@ -108,7 +112,7 @@ def test_addmm_skinny_matrices(m, n, k, dtype, enable_streamk, use_compile):
         addmm_fn = torch.compile(tritonblas.addmm, fullgraph=True)
 
     # Forward
-    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk)
+    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk, work_stealing=work_stealing)
     result_ref = torch.addmm(bias_ref, a_ref, b_ref)
 
     torch.testing.assert_close(result, result_ref, atol=1e-1, rtol=1e-1)
@@ -123,8 +127,9 @@ def test_addmm_skinny_matrices(m, n, k, dtype, enable_streamk, use_compile):
 
 
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
+@pytest.mark.parametrize("work_stealing", ENABLE_WORK_STEALING)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
-def test_addmm_inplace_with_grad_raises(enable_streamk, use_compile):
+def test_addmm_inplace_with_grad_raises(enable_streamk, work_stealing, use_compile):
     """Test that addmm with out=... raises RuntimeError when autograd is enabled."""
     torch.manual_seed(42)
     m, n, k = 64, 64, 64
@@ -140,12 +145,13 @@ def test_addmm_inplace_with_grad_raises(enable_streamk, use_compile):
         addmm_fn = torch.compile(tritonblas.addmm, fullgraph=True)
 
     with pytest.raises(RuntimeError, match="don't support automatic differentiation"):
-        addmm_fn(bias, a, b, out=out, enable_streamk=enable_streamk)
+        addmm_fn(bias, a, b, out=out, enable_streamk=enable_streamk, work_stealing=work_stealing)
 
 
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
+@pytest.mark.parametrize("work_stealing", ENABLE_WORK_STEALING)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
-def test_addmm_inplace_without_grad_works(enable_streamk, use_compile):
+def test_addmm_inplace_without_grad_works(enable_streamk, work_stealing, use_compile):
     """Test that addmm with out=... works when autograd is disabled."""
     torch.manual_seed(42)
     m, n, k = 64, 64, 64
@@ -162,7 +168,7 @@ def test_addmm_inplace_without_grad_works(enable_streamk, use_compile):
 
     # Should work with torch.no_grad()
     with torch.no_grad():
-        result = addmm_fn(bias, a, b, out=out, enable_streamk=enable_streamk)
+        result = addmm_fn(bias, a, b, out=out, enable_streamk=enable_streamk, work_stealing=work_stealing)
 
     # In-place path returns None (custom ops don't support aliasing)
     assert result is None, "in-place addmm should return None"
@@ -173,8 +179,9 @@ def test_addmm_inplace_without_grad_works(enable_streamk, use_compile):
 
 
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
+@pytest.mark.parametrize("work_stealing", ENABLE_WORK_STEALING)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
-def test_addmm_inplace_output_correctness(enable_streamk, use_compile):
+def test_addmm_inplace_output_correctness(enable_streamk, work_stealing, use_compile):
     """Test that addmm in-place mode produces correct results."""
     torch.manual_seed(42)
     m, n, k = 128, 256, 512
@@ -190,15 +197,16 @@ def test_addmm_inplace_output_correctness(enable_streamk, use_compile):
         addmm_fn = torch.compile(tritonblas.addmm, fullgraph=True)
 
     with torch.no_grad():
-        addmm_fn(bias, a, b, out=out, enable_streamk=enable_streamk)
+        addmm_fn(bias, a, b, out=out, enable_streamk=enable_streamk, work_stealing=work_stealing)
 
     expected = torch.addmm(bias, a, b)
     torch.testing.assert_close(out, expected, atol=1e-1, rtol=1e-1)
 
 
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
+@pytest.mark.parametrize("work_stealing", ENABLE_WORK_STEALING)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
-def test_addmm_no_grad_tensors(enable_streamk, use_compile):
+def test_addmm_no_grad_tensors(enable_streamk, work_stealing, use_compile):
     """Test addmm works when input tensors don't require grad."""
     torch.manual_seed(42)
     m, n, k = 64, 64, 64
@@ -212,15 +220,16 @@ def test_addmm_no_grad_tensors(enable_streamk, use_compile):
     if use_compile:
         addmm_fn = torch.compile(tritonblas.addmm, fullgraph=True)
 
-    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk)
+    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk, work_stealing=work_stealing)
     expected = torch.addmm(bias, a, b)
 
     torch.testing.assert_close(result, expected, atol=1e-1, rtol=1e-1)
 
 
 @pytest.mark.parametrize("use_compile", USE_COMPILE)
+@pytest.mark.parametrize("work_stealing", ENABLE_WORK_STEALING)
 @pytest.mark.parametrize("enable_streamk", ENABLE_STREAMK)
-def test_addmm_partial_grad(enable_streamk, use_compile):
+def test_addmm_partial_grad(enable_streamk, work_stealing, use_compile):
     """Test addmm when only some inputs require grad."""
     torch.manual_seed(42)
     m, n, k = 64, 64, 64
@@ -239,7 +248,7 @@ def test_addmm_partial_grad(enable_streamk, use_compile):
     if use_compile:
         addmm_fn = torch.compile(tritonblas.addmm, fullgraph=True)
 
-    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk)
+    result = addmm_fn(bias, a, b, enable_streamk=enable_streamk, work_stealing=work_stealing)
     result_ref = torch.addmm(bias_ref, a_ref, b_ref)
 
     result.sum().backward()
