@@ -186,8 +186,7 @@ def ws_persistent_matmul(
                     c = acc + bias_float[None, :]
                     c = c.to(C.type.element_ty)
                 else:
-                    c = acc.to(C.type.element_ty)
-                    c += bias[None, :]
+                    c = (acc + bias[None, :]).to(C.type.element_ty)
             else:
                 c = acc.to(C.type.element_ty)
 
@@ -396,8 +395,7 @@ def ws_persistent_matmul(
                     c = acc + bias_float[None, :]
                     c = c.to(C.type.element_ty)
                 else:
-                    c = acc.to(C.type.element_ty)
-                    c += bias[None, :]
+                    c = (acc + bias[None, :]).to(C.type.element_ty)
             else:
                 c = acc.to(C.type.element_ty)
 

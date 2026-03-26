@@ -359,29 +359,28 @@ def ws_streamk_matmul(
                 end += streamk_iters_pcu + (next_pid < streamk_remainder_iters)
                 next_pid += 1
 
-            # Unified bias handling for Stream-K section
+            # Bias handling for Stream-K section
+            # Bias is per-N (shape BLOCK_SIZE_N), split into left/right halves
+            # to match the quadrant layout
             if BIAS:
-                # Split bias for top and bottom halves
-                bias_top = bias[:BLOCK_SIZE_M // 2]
-                bias_bottom = bias[BLOCK_SIZE_M // 2:]
+                rn_left_raw = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N // 2)
+                rn_right_raw = pid_n * BLOCK_SIZE_N + tl.arange(BLOCK_SIZE_N // 2, BLOCK_SIZE_N)
+                bias_left = tl.load(bias_ptr + (rn_left_raw % N) * stride_bias, mask=rn_left_raw < N, other=0.0)
+                bias_right = tl.load(bias_ptr + (rn_right_raw % N) * stride_bias, mask=rn_right_raw < N, other=0.0)
 
-                bias_top_reshaped = tl.reshape(bias_top, (BLOCK_SIZE_M // 2, 1))
-                bias_bottom_reshaped = tl.reshape(bias_bottom, (BLOCK_SIZE_M // 2, 1))
+                bias_left_row = tl.reshape(bias_left, (1, BLOCK_SIZE_N // 2))
+                bias_right_row = tl.reshape(bias_right, (1, BLOCK_SIZE_N // 2))
 
                 if QUANTIZED:
-                    # For quantized mode: convert bias to float32 before adding
-                    bias_top_float = bias_top_reshaped.to(tl.float32)
-                    bias_bottom_float = bias_bottom_reshaped.to(tl.float32)
-                    acc00 += bias_top_float
-                    acc01 += bias_top_float
-                    acc10 += bias_bottom_float
-                    acc11 += bias_bottom_float
+                    acc00 += bias_left_row.to(tl.float32)
+                    acc01 += bias_right_row.to(tl.float32)
+                    acc10 += bias_left_row.to(tl.float32)
+                    acc11 += bias_right_row.to(tl.float32)
                 else:
-                    # For non-quantized mode: add bias directly
-                    acc00 += bias_top_reshaped
-                    acc01 += bias_top_reshaped
-                    acc10 += bias_bottom_reshaped
-                    acc11 += bias_bottom_reshaped
+                    acc00 += bias_left_row
+                    acc01 += bias_right_row
+                    acc10 += bias_left_row
+                    acc11 += bias_right_row
 
             # Convert to output dtype
             c00 = acc00.to(C.type.element_ty)
