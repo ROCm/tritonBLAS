@@ -4,11 +4,10 @@
 > This project is intended for research purposes only. Use it at your own risk and discretion.
 
 ## Latest
-- [30 March 2026] Work-Stealing Persistent Kernel Released
-- [5 December 2025] FP4 Support Released
-- [21 November 2025] Software Pipelining Released
-- [22 July 2025] Stream-K GEMM Released
-- [8 July 2025] tritonBLAS Released
+- [30 March 2026] Work-Stealing Persistent Kernel Released — enables linear performance scaling with active CU count, avoiding nonlinear decay when partitioning CUs across concurrent kernels
+- [5 December 2025] FP4 Support Released — native FP4 matrix multiplication for low-precision matmul
+- [22 July 2025] Stream-K GEMM Released — fine-grained tile-based work partitioning for improved occupancy on small/skinny GEMMs
+- [8 July 2025] tritonBLAS Released — analytical model-driven GEMM library eliminating the need for autotuning
 
 Triton is a language and compiler for writing highly efficient ML primitives, one of the most common primitive is matrix-multiplication. Triton typically builds these primitives using just-in-time (JIT) compilation, and relies on functionality such as [`@triton.autotune`](https://triton-lang.org/main/python-api/generated/triton.autotune.html) to create efficient variants of the primitives. Autotune evaluates all the possible configurations defined by the user to produce a kernel perfect for a given inputs.
 
