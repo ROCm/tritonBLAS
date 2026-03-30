@@ -9,6 +9,8 @@
 - [22 July 2025] Stream-K GEMM Released — fine-grained tile-based work partitioning for improved occupancy on small/skinny GEMMs
 - [8 July 2025] tritonBLAS Released — analytical model-driven GEMM library eliminating the need for autotuning
 
+## About
+
 Triton is a language and compiler for writing highly efficient ML primitives, one of the most common primitive is matrix-multiplication. Triton typically builds these primitives using just-in-time (JIT) compilation, and relies on functionality such as [`@triton.autotune`](https://triton-lang.org/main/python-api/generated/triton.autotune.html) to create efficient variants of the primitives. Autotune evaluates all the possible configurations defined by the user to produce a kernel perfect for a given inputs.
 
 **Our work, tritonBLAS, removes the need for autotune and heuristics, and instead uses an analytical model to predict the correct configuration for common algorithms such as Matrix Multiplication. We believe this technique is also extensible to other dense, static, well-defined primitives in the Deep-learning applications.**
