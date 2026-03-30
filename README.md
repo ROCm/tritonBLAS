@@ -1,7 +1,14 @@
 # tritonBLAS: A Lightweight Triton-based General Matrix Multiplication (GEMM) Library
 
-> [!IMPORTANT]  
+> [!IMPORTANT]
 > This project is intended for research purposes only. Use it at your own risk and discretion.
+
+## Latest
+- [30 March 2026] Work-Stealing Persistent Kernel Released
+- [5 December 2025] FP4 Support Released
+- [21 November 2025] Software Pipelining Released
+- [22 July 2025] Stream-K GEMM Released
+- [8 July 2025] tritonBLAS Released
 
 Triton is a language and compiler for writing highly efficient ML primitives, one of the most common primitive is matrix-multiplication. Triton typically builds these primitives using just-in-time (JIT) compilation, and relies on functionality such as [`@triton.autotune`](https://triton-lang.org/main/python-api/generated/triton.autotune.html) to create efficient variants of the primitives. Autotune evaluates all the possible configurations defined by the user to produce a kernel perfect for a given inputs.
 
