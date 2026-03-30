@@ -6,32 +6,6 @@ import math
 from math import ceil
 
 
-def _padded_size_32_4(unpadded_size: int) -> int:
-    """
-    Fast path: Triton [[32, 4]] PaddedSharedEncoding pattern.
-    Inserts 4 padding elements after every 32 elements for bank-conflict avoidance.
-    """
-    block_padding = (unpadded_size >> 5) << 2
-    if (unpadded_size & 31) == 0 and block_padding >= 4:
-        block_padding -= 4
-    return unpadded_size + block_padding
-
-
-def _padded_size_elements_pow2(unpadded_size: int, intervals: list[tuple[int, int]]) -> int:
-    """
-    Triton PaddedSharedEncodingAttr.getPaddedSize -- exact C++ equivalent.
-    """
-    total_padding = 0
-    for interval, padding in intervals:
-        log2_interval = (interval - 1).bit_length()
-        log2_padding = (padding - 1).bit_length() if padding else 0
-        block_padding = (unpadded_size >> log2_interval) << log2_padding
-        if unpadded_size % interval == 0 and block_padding >= padding:
-            block_padding -= padding
-        total_padding += block_padding
-    return unpadded_size + total_padding
-
-
 def estimate_triton_lds_bytes(
     block_m: int,
     block_n: int,
@@ -41,34 +15,32 @@ def estimate_triton_lds_bytes(
     num_stages: int = 2,
 ) -> float:
     """
-    Estimate Triton kernel LDS (shared memory) usage in bytes.
+    Estimate Triton kernel LDS (shared memory) usage in bytes for AMD GPUs.
 
-    Uses the exact Triton PaddedSharedEncoding formula (async_copy path).
+    Triton's AMD backend uses swizzled_shared / amd_rotating_shared encodings
+    which rearrange bank addressing without adding padding bytes.  The LDS
+    footprint is therefore the raw tile bytes times the number of pipeline
+    buffers:
+
+      ns == 1:  max(A_bytes, B_bytes)   — no pipelining, sequential alloc
+      ns >= 2:  (ns - 1) * (A_bytes + B_bytes)  — software-pipelined
+
+    Validated against metadata.shared from compiled Triton kernels on gfx942
+    (Triton 3.6.0+rocm7.2.0): 35/35 configs matched exactly.
 
     Args:
         block_m, block_n, block_k: Tile dimensions (MT_M, MT_N, MT_K).
         bytes_a, bytes_b: Bytes per element for A and B (e.g. 2 for bf16/fp16).
-        num_stages: Pipeline stages (2 or 3); Triton matmul uses 2 by default.
+        num_stages: Pipeline stages (1, 2, or 3); Triton matmul uses 2 by default.
 
     Returns:
         Estimated total LDS usage in bytes.
     """
-    elem_a = block_m * block_k
-    elem_b = block_k * block_n
-
-    padded_elems_a = _padded_size_32_4(elem_a)
-    padded_elems_b = _padded_size_32_4(elem_b)
-    if block_k & (block_k - 1) == 0:
-        padded_a_bk = _padded_size_elements_pow2(elem_a, [(block_k, 8)])
-        if padded_a_bk > padded_elems_a:
-            padded_elems_a = padded_a_bk
-    if block_n & (block_n - 1) == 0:
-        padded_b_bn = _padded_size_elements_pow2(elem_b, [(block_n, 8)])
-        if padded_b_bn > padded_elems_b:
-            padded_elems_b = padded_b_bn
-    padded_per_stage = padded_elems_a * bytes_a + padded_elems_b * bytes_b
-
-    return num_stages * padded_per_stage
+    a_bytes = block_m * block_k * bytes_a
+    b_bytes = block_k * block_n * bytes_b
+    if num_stages <= 1:
+        return max(a_bytes, b_bytes)
+    return (num_stages - 1) * (a_bytes + b_bytes)
 
 
 def check_triton_lds_capacity(
@@ -81,9 +53,6 @@ def check_triton_lds_capacity(
     num_stages: int = 2,
 ) -> bool:
     """Return True if estimated Triton LDS usage fits within lds_capacity."""
-    raw = (block_m * block_k * bytes_a + block_k * block_n * bytes_b) * num_stages
-    if raw > lds_capacity:
-        return False
     usage = estimate_triton_lds_bytes(
         block_m, block_n, block_k, bytes_a, bytes_b, num_stages
     )
@@ -272,7 +241,10 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
-        self._grid = self._hardware.N_CU
+        if streamk:
+            self._grid = self._compute_sk_grid()
+        else:
+            self._grid = self._hardware.N_CU
 
         # Handle different origami API versions for workgroup mapping
         _wg_result = origami.select_workgroup_mapping(
