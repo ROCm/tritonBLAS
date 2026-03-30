@@ -33,11 +33,11 @@ C = tritonblas.matmul(A, B)
 
 | GPU Model | Support Status |
 |-----------|----------------|
-| MI300X | ✅ Supported |
-| MI300A | ✅ Supported |
-| MI308X | ✅ Supported |
-| MI350X | ✅ Supported |
-| MI355X | ✅ Supported |
+| MI300X | Supported |
+| MI300A | Supported |
+| MI308X | Supported |
+| MI350X | Supported |
+| MI355X | Supported |
 
 ## License
 

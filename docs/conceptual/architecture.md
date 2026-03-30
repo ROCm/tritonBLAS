@@ -49,7 +49,7 @@ tritonBLAS delivers high-performance matrix multiplication through an elegant, l
 
 tritonBLAS offers two paths to high performance:
 
-| | 🚀 **matmul()** | ⚡ **matmul_lt()** |
+| | **matmul()** | **matmul_lt()** |
 |---|---|---|
 | **Purpose** | Drop-in replacement | Peak performance |
 | **Config** | Automatic | Reusable selector |

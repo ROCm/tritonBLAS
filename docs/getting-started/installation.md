@@ -17,11 +17,11 @@ tritonBLAS supports the following AMD GPUs:
 
 | GPU Model | Support Status |
 |-----------|----------------|
-| MI300X | ✅ Supported |
-| MI300A | ✅ Supported |
-| MI308X | ✅ Supported |
-| MI350X | ✅ Supported |
-| MI355X | ✅ Supported |
+| MI300X | Supported |
+| MI300A | Supported |
+| MI308X | Supported |
+| MI350X | Supported |
+| MI355X | Supported |
 
 > **Note**: tritonBLAS is optimized for AMD Instinct MI300 and MI350 series GPUs.
 
@@ -54,7 +54,7 @@ B = torch.randn(1024, 1024, dtype=torch.float16, device='cuda')
 # Perform matrix multiplication
 C = tritonblas.matmul(A, B)
 
-print("✅ tritonBLAS is working correctly!")
+print("tritonBLAS is working correctly!")
 print(f"Result shape: {C.shape}")
 ```
 
