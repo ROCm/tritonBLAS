@@ -93,7 +93,7 @@ class OrigamiMatmulSelector:
     if hasattr(torch, "float8_e4m3fnuz"):
         dtype_to_str[torch.float8_e4m3fnuz] = "f8"
 
-    COUNTERS_PER_XCD = 1  # work-stealing: atomic counter slots per XCD
+    COUNTERS_PER_XCD = 4  # work-stealing: default, overridden by _select_ws_params()
 
     def __init__(
         self,
@@ -164,12 +164,22 @@ class OrigamiMatmulSelector:
 
         # Get hardware info from Origami
         self._hardware = origami.get_hardware_for_device(device.index)
-        
+
+        # Detect architecture name for MI instruction selection.
+        # Prefer origami's hardware_t.arch if available; fall back to
+        # torch's gcnArchName property (strip suffix like ":sramecc+:xnack-").
+        if hasattr(self._hardware, 'arch') and hasattr(self._hardware.arch, 'name'):
+            self._arch_name = self._hardware.arch.name
+        else:
+            import torch as _torch
+            _gcn = getattr(_torch.cuda.get_device_properties(device), "gcnArchName", "")
+            self._arch_name = _gcn.split(":")[0] if _gcn else "unknown"
+
         # The GPU-reported N_CU reflects any active CU mask.  Save it
         # before overriding so Stream-K can size its grid to the real
         # number of schedulable CUs.
         self._active_cus = active_cus
-        
+
         # When running under a CU mask (e.g. cu-sweep), the GPU reports a
         # reduced N_CU.  Override with the real total so architecture
         # detection and config generation use the correct value.
@@ -224,7 +234,6 @@ class OrigamiMatmulSelector:
         )
 
         # Heuristic to favor 256x256x64 tile when close~
-        # Only apply when the forced config fits in LDS on the current arch.
         if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
@@ -251,6 +260,55 @@ class OrigamiMatmulSelector:
             # origami >= 0.1.0: returns workgroup_mapping_t object
             self._xcc_workgroup_mapping = _wg_result.wgmxcc
             self._workgroup_mapping = _wg_result.wgm
+
+        self._select_ws_params()
+
+    def _select_ws_params(self):
+        """Select work-stealing parameters based on tile count.
+
+        Empirically tuned on MI300X (8 XCDs, 304 CUs) via autotune sweeps
+        across GEMM sizes 1K-16K.
+        """
+        bm = self._result.config.mt.m
+        bn = self._result.config.mt.n
+        total_tiles = ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
+        tiles_m = (self._m + bm - 1) // bm
+
+        if total_tiles <= 512:
+            self.COUNTERS_PER_XCD = 8
+        elif total_tiles <= 1536:
+            self.COUNTERS_PER_XCD = 4
+        elif total_tiles <= 2048:
+            self.COUNTERS_PER_XCD = 2
+        else:
+            self.COUNTERS_PER_XCD = 1
+
+        self._workgroup_mapping = min(8, tiles_m)
+
+    def hierarchical_split(self, num_xcds: int) -> tuple:
+        """Compute optimal local/global tile split for hierarchical WS.
+
+        Uses the full hardware CU count (not active CUs) so that the split
+        is a topology-level constant, avoiding Triton recompilation when the
+        active CU mask changes.
+
+        Adaptive split based on tiles-per-CU density:
+        - <=4 tiles/CU:  100% local (global counter overhead dominates)
+        - >4 tiles/CU:  local_frac decreases linearly, floor at 50%
+
+        Returns (local_per_xcd, global_tiles).
+        """
+        bm = self._result.config.mt.m
+        bn = self._result.config.mt.n
+        total_tiles = ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
+        hw_cus = self._hardware.NUM_XCD * self._hardware.CU_per_L2
+        tiles_per_cu = total_tiles / max(hw_cus, 1)
+
+        local_frac = max(0.5, 1.0 - max(0.0, tiles_per_cu - 4.0) * 0.05)
+        local_per_xcd = int(total_tiles * local_frac) // num_xcds
+        local_per_xcd = max(local_per_xcd, 1)
+        global_tiles = total_tiles - local_per_xcd * num_xcds
+        return local_per_xcd, global_tiles
 
     @property
     def block_m(self):
@@ -448,7 +506,7 @@ class OrigamiMatmulSelector:
 
         mi_dim = None
         # gfx950
-        if self._hardware.arch.name == "gfx950":
+        if self._arch_name == "gfx950":
             # FP32
             if largest_bitsize == 32:
                 mi_dim = origami.dim3_t(16, 16, 4)
@@ -464,7 +522,7 @@ class OrigamiMatmulSelector:
                 self._block_mn_range = [32, 64, 128, 256]
                 mi_dim = origami.dim3_t(16, 16, 128)
         # gfx942 (304 CUs full, 80 CUs partitioned, 64 CUs)
-        if self._hardware.arch.name == "gfx942":
+        if self._arch_name == "gfx942":
             # FP32
             if largest_bitsize == 32:
                 mi_dim = origami.dim3_t(16, 16, 4)
@@ -495,7 +553,7 @@ class OrigamiMatmulSelector:
             if largest_bitsize < 8:
                 raise ValueError("MI300A doesn't support F4/F6")
         # gfx90a
-        if self._hardware.arch.name == "gfx90a":
+        if self._arch_name == "gfx90a":
             # FP32
             if largest_bitsize == 32:
                 mi_dim = origami.dim3_t(16, 16, 4)

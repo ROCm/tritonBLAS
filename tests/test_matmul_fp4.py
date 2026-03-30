@@ -8,9 +8,13 @@ import time
 import argparse
 import pytest
 from tritonblas.utils import dynamic_mxfp4_quant, mxfp4_to_f32, e8m0_to_f32
+from conftest import requires_fp4
 
 torch.set_default_device("cuda")
 torch.set_printoptions(sci_mode=False)
+
+# Skip all tests in this module if the GPU doesn't support FP4
+pytestmark = requires_fp4
 
 
 def run_torch_reference(x_fp4, w_fp4, x_scales, w_scales, dtype):

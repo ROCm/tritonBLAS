@@ -5,12 +5,15 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch.library import triton_op, wrap_triton
+from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
 
 _tensor_cache = {}
 
@@ -21,6 +24,16 @@ MAX_BLOCK_SIZE = 65536
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+
+def _maybe_wrap(fn, probe_tensor):
+    # Use wrap_triton only under torch.compile tracing; otherwise direct call
+    # in eager.  Can't use torch.compiler.is_compiling() here because the code
+    # inside @triton_op but outside wrap_triton is part of the compile pass
+    # itself and is_compiling() is never True.
+    if is_fake(probe_tensor):
+        return wrap_triton(fn)
+    return fn
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -91,17 +104,15 @@ def persistent_matmul_lt(
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
+    else:
+        num_xcds = 1
 
     if work_stealing and config is not None:
-        device = a.device
-        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
-        for i in range(selector._ACTIVE_CU, len(mask), 1):
-            mask[i] = 0
-
         grids = selector._hardware.N_CU
 
-        kk = ws_persistent_matmul[(grids,)](
+        kk = _maybe_wrap(ws_persistent_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -109,6 +120,7 @@ def persistent_matmul_lt(
             b_scale if quantized else None,
             bias if bias is not None else None,
             config.tile_counter,
+            config.global_counter,
             M,
             N,
             K,
@@ -132,18 +144,23 @@ def persistent_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
             GLOBAL_ATOMIC=config.global_atomic,
+            HIERARCHICAL=False,
+            LOCAL_TILES_PER_XCD=0,
+            GLOBAL_TILES=0,
+            USE_MASK=True,
+            mask_ptr=config.mask,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            mask_ptr=mask,
         )
     else:
         grids = total_tiles
 
-        kk = wrap_triton(persistent_matmul)[(grids,)](
+        kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -218,9 +235,9 @@ def streamk_matmul_lt(
     else:
         total_programs_streamk = selector.sk_grid
 
-    if total_programs_streamk > 0:  # Stream-K
+    if total_programs_streamk > 0:
         total_tiles_streamk = total_tiles % total_programs_streamk
-    else:  # all tiles are computed using classical blocking
+    else:
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
@@ -254,15 +271,13 @@ def streamk_matmul_lt(
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
-    chunk_size = min(chunk_size, grids // num_xcds)
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, grids // num_xcds)
+    else:
+        num_xcds = 1
 
     if work_stealing and config is not None:
-        device = a.device
-        mask = torch.ones(selector._N_CU, dtype=torch.int32, device=device)
-        for i in range(selector._ACTIVE_CU, len(mask), 1):
-            mask[i] = 0
-
-        kk = ws_streamk_matmul[(grids,)](
+        kk = _maybe_wrap(ws_streamk_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -289,25 +304,26 @@ def streamk_matmul_lt(
             GROUP_SIZE_M=gsize_m,
             NUM_SMS=selector._ACTIVE_CU,
             NUM_XCDS=num_xcds,
-            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
-            COUNTER_STRIDE=COUNTER_STRIDE,
             CHUNK_SIZE=chunk_size,
             STREAMK_TILES=total_tiles_streamk,
+            COUNTERS_PER_XCD=selector.COUNTERS_PER_XCD,
+            COUNTER_STRIDE=COUNTER_STRIDE,
             BIAS=bias is not None,
             EVEN_K=even_k,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
             GLOBAL_ATOMIC=config.global_atomic,
+            mask_ptr=config.mask,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            mask_ptr=mask,
         )
     else:
-        kk = wrap_triton(streamk_matmul)[(grids,)](
+        kk = _maybe_wrap(streamk_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -339,6 +355,7 @@ def streamk_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
@@ -615,6 +632,7 @@ def _addmm(
     b: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
+    work_stealing: Optional[bool] = False,
 ) -> torch.Tensor:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -622,14 +640,15 @@ def _addmm(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    config = matmul_preamble(selector) if work_stealing else None
 
     # Allocate an output tensor
     out = a.new_empty(M, N)
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid)
+        return streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, out, selector, bias=bias)
+        return persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
 
 
 def _setup_context_addmm_backwards(
@@ -637,10 +656,11 @@ def _setup_context_addmm_backwards(
     inputs: tuple[Any, ...],
     output: Any
 ):
-    bias, a, b, enable_streamk, sk_grid = inputs
+    bias, a, b, enable_streamk, sk_grid, work_stealing = inputs
     ctx.save_for_backward(a, b)
     ctx.enable_streamk = enable_streamk
     ctx.sk_grid = sk_grid
+    ctx.work_stealing = work_stealing
 
 
 def _addmm_backwards(
@@ -650,25 +670,26 @@ def _addmm_backwards(
     a, b = ctx.saved_tensors
     enable_streamk = ctx.enable_streamk
     sk_grid = ctx.sk_grid
+    work_stealing = ctx.work_stealing
 
     # Make grad_output contiguous
     grad_output_cont = grad_output.contiguous()
 
     # grad_a = grad_output @ b^T
     b_t = b.T.contiguous()
-    grad_a = matmul(grad_output_cont, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid)
+    grad_a = matmul(grad_output_cont, b_t, enable_streamk=enable_streamk, sk_grid=sk_grid, work_stealing=work_stealing)
 
     # grad_b = a^T @ grad_output
     a_t = a.T.contiguous()
-    grad_b = matmul(a_t, grad_output_cont, enable_streamk=enable_streamk, sk_grid=sk_grid)
+    grad_b = matmul(a_t, grad_output_cont, enable_streamk=enable_streamk, sk_grid=sk_grid, work_stealing=work_stealing)
 
     # grad_bias = sum(grad_output)
     grad_bias = grad_output.sum(dim=0)
 
-    # tuple[bias, a, b, enable_streamk, sk_grid]
+    # tuple[bias, a, b, enable_streamk, sk_grid, work_stealing]
     #   First 3 must be in the order that matches addmm()'s forward args
-    #   Last 2 are not part of the gradient and so are None
-    return grad_bias, grad_a, grad_b, None, None
+    #   Last 3 are not part of the gradient and so are None
+    return grad_bias, grad_a, grad_b, None, None, None
 
 
 _addmm.register_autograd(_addmm_backwards,
@@ -683,6 +704,7 @@ def _addmm_out(
     out: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
+    work_stealing: Optional[bool] = False,
 ) -> None:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -690,11 +712,12 @@ def _addmm_out(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
-        streamk_matmul_lt(a, b, out, selector, bias=bias, sk_grid=sk_grid)
+        streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
-        persistent_matmul_lt(a, b, out, selector, bias=bias)
+        persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
 
     # Custom torch ops cannot return a value which is an alias of an input.  So
     # even though torch returns a pointer to the out arg when used, we can't.
@@ -707,11 +730,12 @@ def addmm(
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
     enable_streamk: Optional[bool] = False,
-    sk_grid: Optional[int] = None
+    sk_grid: Optional[int] = None,
+    work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
     # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
-        return _addmm(bias, a, b, enable_streamk, sk_grid)
+        return _addmm(bias, a, b, enable_streamk, sk_grid, work_stealing)
 
     # If out tensor provided - in-place - we do NOT support autograd
     # Check for autograd conditions (global and per-tensor)
@@ -725,5 +749,5 @@ def addmm(
             "tritonblas.addmm(): functions with out=... arguments don't support "
             "automatic differentiation, but one of the arguments requires grad."
         )
-    return _addmm_out(bias, a, b, out, enable_streamk, sk_grid)
+    return _addmm_out(bias, a, b, out, enable_streamk, sk_grid, work_stealing)
 
