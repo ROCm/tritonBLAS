@@ -14,19 +14,12 @@ version = "0.1.0"
 description = "A Lightweight Triton-based BLAS Library"
 requires-python = ">=3.8"
 
-dependencies = []
-
-[project.optional-dependencies]
-full = [
+dependencies = [
     "pandas",
-    "llnl-hatchet",
-]
-dev = [
     "pytest",
     "ruff",
+    "llnl-hatchet",
 ]
-# Note: origami (AMD internal C++ library) is required for full matmul
-# functionality but is not published on PyPI. Build from source.
 
 [tool.ruff]
 line-length = 120
