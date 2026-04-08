@@ -76,10 +76,18 @@ class CustomBuildExt(build_ext):
         super().run()
 
 
+build_origami = os.environ.get("TRITONBLAS_BUILD_ORIGAMI", "0") == "1"
+
 setup(
     name="tritonblas",
     version="0.1.0",
     package_dir={"": "include"},
-    cmdclass={"build_ext": CustomBuildExt},
-    ext_modules=[Extension("_trigger_ext", sources=[])],
+    **(
+        {
+            "cmdclass": {"build_ext": CustomBuildExt},
+            "ext_modules": [Extension("_trigger_ext", sources=[])],
+        }
+        if build_origami
+        else {}
+    ),
 )
