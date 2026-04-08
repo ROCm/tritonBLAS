@@ -14,7 +14,11 @@ version = "0.1.0"
 description = "A Lightweight Triton-based BLAS Library"
 requires-python = ">=3.8"
 
-dependencies = [
+dependencies = []
+
+[project.optional-dependencies]
+full = [
+    "origami",
     "pandas",
     "pytest",
     "ruff",
