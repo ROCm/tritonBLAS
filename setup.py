@@ -76,7 +76,7 @@ class CustomBuildExt(build_ext):
         super().run()
 
 
-build_origami = os.environ.get("TRITONBLAS_BUILD_ORIGAMI", "0") == "1"
+has_hipcc = shutil.which("hipcc") is not None
 
 setup(
     name="tritonblas",
@@ -87,7 +87,7 @@ setup(
             "cmdclass": {"build_ext": CustomBuildExt},
             "ext_modules": [Extension("_trigger_ext", sources=[])],
         }
-        if build_origami
+        if has_hipcc
         else {}
     ),
 )
