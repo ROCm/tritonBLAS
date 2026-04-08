@@ -18,12 +18,15 @@ dependencies = []
 
 [project.optional-dependencies]
 full = [
-    "origami",
     "pandas",
-    "pytest",
-    "ruff",
     "llnl-hatchet",
 ]
+dev = [
+    "pytest",
+    "ruff",
+]
+# Note: origami (AMD internal C++ library) is required for full matmul
+# functionality but is not published on PyPI. Build from source.
 
 [tool.ruff]
 line-length = 120
