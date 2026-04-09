@@ -405,7 +405,7 @@ def _matmul(
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
+    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
@@ -462,7 +462,7 @@ def _matmul_out(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
+    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
 
     if enable_streamk:
         streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -510,7 +510,7 @@ def matmul_a8w8(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
+    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
     else:
@@ -640,7 +640,7 @@ def _addmm(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
+    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
 
     # Allocate an output tensor
     out = a.new_empty(M, N)
@@ -712,7 +712,7 @@ def _addmm_out(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
+    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
 
     if enable_streamk:
         streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
