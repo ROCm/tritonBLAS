@@ -11,19 +11,7 @@ import triton
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
-from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
-
-
-
-_tensor_cache = {}
-
-current_device_index = torch.cuda.current_device()
-current_device = torch.cuda.get_device_properties(current_device_index)
-MAX_SMS = current_device.multi_processor_count
-MAX_BLOCK_SIZE = 65536
-
-_global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
-_global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+from .config import MatmulConfig, matmul_preamble, get_workspace, COUNTER_STRIDE
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -256,18 +244,17 @@ def streamk_matmul_lt(
 
     if config is not None:
         if grids <= config.locks.shape[0] and block_size <= config.P.shape[1]:
+            # Workspace buffers are large enough — slice from config
             locks = config.locks[:grids]
             P = config.P[:grids, :block_size]
         else:
+            # Workspace buffers undersized for this problem — allocate fresh
             locks = torch.empty(grids, device=config.device, dtype=torch.uint8)
             P = torch.empty(grids, block_size, device=config.device, dtype=torch.float32)
     else:
-        if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
-            locks = _global_locks[:grids]
-            P = _global_P[:grids, :block_size]
-        else:
-            locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
-            P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
+        # No workspace (direct streamk_matmul_lt call) — standalone buffers
+        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -405,7 +392,7 @@ def _matmul(
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
+    config = get_workspace(selector, a, enable_streamk, work_stealing)
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
@@ -462,7 +449,7 @@ def _matmul_out(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
+    config = get_workspace(selector, a, enable_streamk, work_stealing)
 
     if enable_streamk:
         streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -510,7 +497,7 @@ def matmul_a8w8(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
+    config = get_workspace(selector, a, enable_streamk, work_stealing)
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
     else:
@@ -640,7 +627,7 @@ def _addmm(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
+    config = get_workspace(selector, a, enable_streamk, work_stealing)
 
     # Allocate an output tensor
     out = a.new_empty(M, N)
@@ -712,7 +699,7 @@ def _addmm_out(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if (work_stealing or enable_streamk) else None
+    config = get_workspace(selector, a, enable_streamk, work_stealing)
 
     if enable_streamk:
         streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)

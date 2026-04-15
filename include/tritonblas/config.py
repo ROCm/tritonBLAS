@@ -1,4 +1,5 @@
 import torch
+from torch._subclasses.fake_tensor import is_fake
 
 # 256-byte separation between atomic counters to avoid false sharing
 # across L2 cache lines.  Each int32 is 4 bytes -> stride = 256 / 4 = 64 elements.
@@ -132,3 +133,36 @@ def matmul_preamble(selector, device: torch.device = None) -> MatmulConfig:
                         global_counter=global_counter,
                         sk_iter_counter=sk_iter_counter,
                         sk_locks=sk_locks, sk_done=sk_done, sk_P=sk_P)
+
+
+# Per-device cached workspace — allocated lazily on first use to avoid
+# initializing the GPU context at import time.
+_workspace_cache = {}
+
+
+def get_workspace(selector, probe_tensor, enable_streamk=False, work_stealing=False):
+    """Get a MatmulConfig workspace, using caching in eager mode.
+
+    Returns None if the kernel configuration does not require a workspace
+    (i.e. persistent path without work stealing).
+
+    During torch.compile tracing (FakeTensor inputs), always allocates
+    fresh configs — FakeTensor allocations are symbolic and free.
+
+    During eager execution, returns a per-device cached workspace with
+    mutable state reset.  The workspace is allocated lazily on first use.
+    """
+    if not (work_stealing or enable_streamk):
+        return None
+
+    if is_fake(probe_tensor):
+        return matmul_preamble(selector)
+
+    device = probe_tensor.device
+    idx = device.index if device.index is not None else torch.cuda.current_device()
+    if idx not in _workspace_cache:
+        _workspace_cache[idx] = matmul_preamble(selector, device=probe_tensor.device)
+    config = _workspace_cache[idx]
+    config.reset(streamk=enable_streamk, work_stealing=work_stealing)
+    return config
+
