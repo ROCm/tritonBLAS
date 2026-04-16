@@ -92,7 +92,8 @@ def try_get_selector_factory():
     candidates = [
         "_make_matmul_selector",
         "make_matmul_selector",
-        "MatmulHeuristicResult",  # class constructor
+        "OrigamiMatmulSelector",  # class constructor (updated API)
+        "MatmulHeuristicResult",  # class constructor (legacy)
         "matmul_selector",  # alternative
     ]
     # try on tritonblas
@@ -113,32 +114,46 @@ def try_get_selector_factory():
 
 def get_block_size_from_selector(factory, M, N, K, dtype):
     """
-    If factory is available, call it with (M,N,K,a_dtype,b_dtype,c_dtype) to obtain a selector-like
-    object and call selector.get_config() -> (BLK_M, BLK_N, BLK_K, gsize_m, ...)
+    If factory is available, call it with (M,N,K,a_dtype,b_dtype,c_dtype,device) to obtain a selector-like
+    object and access selector.block_m, selector.block_n properties
     If anything fails, return fallback (16,16).
     """
     fallback = (16, 16)
     if factory is None:
         return fallback
     try:
+        import torch
+        if not torch.cuda.is_available():
+            return fallback
+        device = torch.device("cuda:0")
+
         # Some factories are classes; some are functions. Try calling with dtype for a/b/c.
         selector = None
         try:
-            selector = factory(M, N, K, dtype, dtype, dtype)
+            # New API: OrigamiMatmulSelector(m, n, k, a_dtype, b_dtype, c_dtype, device)
+            selector = factory(M, N, K, dtype, dtype, dtype, device)
         except TypeError:
             # maybe factory expects different args or object constructor signature; try fewer args
             try:
-                selector = factory(M, N, K)
-            except Exception:
-                selector = None
+                selector = factory(M, N, K, dtype, dtype, dtype)
+            except TypeError:
+                try:
+                    selector = factory(M, N, K)
+                except Exception:
+                    selector = None
         if selector is None:
             return fallback
-        if hasattr(selector, "get_config"):
+
+        # Try new API with properties
+        if hasattr(selector, "block_m") and hasattr(selector, "block_n"):
+            return int(selector.block_m), int(selector.block_n)
+        # Try old API with get_config
+        elif hasattr(selector, "get_config"):
             cfg = selector.get_config()
             # expect first two entries BLK_M, BLK_N
             if len(cfg) >= 2:
                 return int(cfg[0]), int(cfg[1])
-        # fallback if no get_config
+        # fallback if no known interface
         return fallback
     except Exception:
         return fallback
