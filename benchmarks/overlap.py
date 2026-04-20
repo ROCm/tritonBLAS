@@ -95,53 +95,6 @@ def _cu_hog_mem_kernel(buf_ptr, n_iters, stride, BLOCK: tl.constexpr):
 # Matmul Backend Factories
 # ==============================================================================
 
-def _make_hierarchical_matmul(
-    A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
-) -> Tuple[Callable, Callable]:
-    """Create WS Hierarchical matmul (tuned: gm=8, no mask, grid=n_cu)."""
-    from tritonblas.config import COUNTER_STRIDE
-    from tritonblas.kernels.persistent_gemm_ws_hierarchical import ws_hierarchical_matmul
-
-    M, K = A.shape
-    _, N = B.shape
-    dev = A.device
-
-    sel = tritonblas.OrigamiMatmulSelector(M, N, K, A.dtype, B.dtype, C.dtype, dev, streamk=False)
-    BLK_M, BLK_N, BLK_K = sel.block_m, sel.block_n, sel.block_k
-    num_xcds = sel.num_sms
-    gsize_m = sel.group_m
-    n_cu = sel._N_CU
-    even_k = K % BLK_K == 0
-    local_per_xcd, global_tiles = sel.hierarchical_split(num_xcds)
-
-    tile_counter = torch.zeros(num_xcds * COUNTER_STRIDE, device=dev, dtype=torch.int32)
-    global_counter = torch.zeros(COUNTER_STRIDE, device=dev, dtype=torch.int32)
-    mask = torch.ones(n_cu, dtype=torch.int32, device=dev)
-
-    def matmul_fn():
-        ws_hierarchical_matmul[(n_cu,)](
-            A, B, C, None, None, None,
-            tile_counter, global_counter,
-            M, N, K, A.stride(0), B.stride(1), C.stride(0), C.stride(1), 0,
-            stride_ak=A.stride(1), stride_bk=B.stride(0),
-            BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
-            GROUP_SIZE_M=gsize_m, NUM_SMS=n_cu, NUM_XCDS=num_xcds,
-            LOCAL_TILES_PER_XCD=local_per_xcd, GLOBAL_TILES=global_tiles,
-            COUNTER_STRIDE=COUNTER_STRIDE,
-            BIAS=False, EVEN_K=even_k,
-            CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None, QUANTIZED=False,
-            num_stages=2, num_warps=8, waves_per_eu=0,
-            matrix_instr_nonkdim=16, kpack=1,
-            mask_ptr=mask,
-        )
-
-    def reset_fn():
-        tile_counter.zero_()
-        global_counter.zero_()
-
-    return matmul_fn, reset_fn
-
-
 def _make_tritonblas_matmul(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -776,20 +729,37 @@ def _print_standard_results(args, results, nccl_ch, world_size):
     _print_phase("Overlap rot (GEMM)", results["overlap_rot_gemm"])
     _print_phase("Overlap rot (Comm)", results["overlap_rot_comm"])
 
-    # Overlap metrics
-    ideal = max(results["gemm_alone"]["mean"], results["comm_alone"]["mean"])
-    actual = results["overlap_wall"]["mean"]
-    efficiency = ideal / actual * 100 if actual > 0 else 0
-    slowdown_gemm_warm = results["overlap_gemm"]["mean"] / results["gemm_alone"]["mean"]
-    slowdown_gemm_rot = results["overlap_rot_gemm"]["mean"] / results["rotating_gemm"]["mean"]
-    slowdown_comm = results["overlap_comm"]["mean"] / results["comm_alone"]["mean"]
+    # Overlap metrics. Report BOTH median- and mean-based efficiency: the
+    # mean is easily dominated by a single tail spike (we have observed
+    # `overlap_wall_max` of 700+ ms among iterations whose median is ~2 ms,
+    # which crashes mean efficiency from ~80% to ~18%). The median number is
+    # the one humans should compare; the mean is kept for back-compat.
+    ideal_mean = max(results["gemm_alone"]["mean"], results["comm_alone"]["mean"])
+    actual_mean = results["overlap_wall"]["mean"]
+    efficiency_mean = ideal_mean / actual_mean * 100 if actual_mean > 0 else 0
 
-    print(f"\n  Overlap efficiency:              {efficiency:.1f}%  "
-          f"(ideal {ideal:.3f} ms, actual {actual:.3f} ms)")
+    ideal_med = max(results["gemm_alone"]["median"], results["comm_alone"]["median"])
+    actual_med = results["overlap_wall"]["median"]
+    efficiency_med = ideal_med / actual_med * 100 if actual_med > 0 else 0
+
+    slowdown_gemm_warm = results["overlap_gemm"]["median"] / results["gemm_alone"]["median"]
+    slowdown_gemm_rot = (results["overlap_rot_gemm"]["median"] /
+                        results["rotating_gemm"]["median"])
+    slowdown_comm = results["overlap_comm"]["median"] / results["comm_alone"]["median"]
+
+    print(f"\n  Overlap efficiency (median):     {efficiency_med:.1f}%  "
+          f"(ideal {ideal_med:.3f} ms, actual {actual_med:.3f} ms)  ← report this")
+    print(f"  Overlap efficiency (mean):       {efficiency_mean:.1f}%  "
+          f"(ideal {ideal_mean:.3f} ms, actual {actual_mean:.3f} ms)  "
+          f"← noisy if any iter spiked")
     print(f"  GEMM slowdown (vs warm L2):      {slowdown_gemm_warm:.2f}x")
     print(f"  GEMM slowdown (vs rotating):     {slowdown_gemm_rot:.2f}x  ← correct baseline")
     print(f"  Comm slowdown (overlap):         {slowdown_comm:.2f}x")
     print()
+    # Aliases so the rest of the function (CSV export below) continues to
+    # write the existing column name `overlap_efficiency_pct` — but it now
+    # contains the median-based value.
+    efficiency = efficiency_med
 
     # ---- CSV export ----
     if args.output_csv:
@@ -811,7 +781,8 @@ def _print_standard_results(args, results, nccl_ch, world_size):
                       "overlap_rot_wall", "overlap_rot_gemm", "overlap_rot_comm"]:
             for stat, val in results[phase].items():
                 row[f"{phase}_{stat}"] = f"{val:.4f}"
-        row["overlap_efficiency_pct"] = f"{efficiency:.1f}"
+        row["overlap_efficiency_pct"] = f"{efficiency:.1f}"  # median-based
+        row["overlap_efficiency_pct_mean"] = f"{efficiency_mean:.1f}"
         row["gemm_slowdown_vs_warm"] = f"{slowdown_gemm_warm:.3f}"
         row["gemm_slowdown_vs_rotating"] = f"{slowdown_gemm_rot:.3f}"
         row["comm_slowdown"] = f"{slowdown_comm:.3f}"
@@ -862,7 +833,9 @@ def _save_standard_json(args, results, gemm_times, comm_times,
         "rot_overlap_mm_median": results["overlap_rot_gemm"]["median"],
         "rot_overlap_wall_median": results["overlap_rot_wall"]["median"],
     }
-    os.makedirs(os.path.dirname(args.output_json), exist_ok=True)
+    out_dir = os.path.dirname(args.output_json)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(args.output_json, "w") as f:
         json.dump(out, f, indent=2)
     print(f"JSON saved to {args.output_json}")
@@ -881,6 +854,9 @@ def mode_l2_profile(args):
         torch.cuda.set_device(0)
         dev = torch.device("cuda", 0)
     else:
+        # Apply NCCL channel override BEFORE init_process_group so it actually takes effect.
+        if args.nccl_max_nchannels is not None:
+            os.environ["NCCL_MAX_NCHANNELS"] = str(args.nccl_max_nchannels)
         dist.init_process_group(backend="nccl")
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
@@ -920,7 +896,9 @@ def mode_l2_profile(args):
         gemm_stream = torch.cuda.Stream(device=dev)
         
         for _ in range(args.warmup):
-            reset_fn()
+            with torch.cuda.stream(gemm_stream):
+                reset_fn()  # Run reset on the GEMM stream so its async device ops
+                            # complete before matmul_fn() reads the same counters.
             with torch.cuda.stream(pollution_stream):
                 pollution_buf.add_(1.0)
             with torch.cuda.stream(gemm_stream):
@@ -931,7 +909,8 @@ def mode_l2_profile(args):
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         for _ in range(args.steps):
-            reset_fn()
+            with torch.cuda.stream(gemm_stream):
+                reset_fn()
             with torch.cuda.stream(pollution_stream):
                 pollution_buf.add_(1.0)
             with torch.cuda.stream(gemm_stream):
@@ -953,7 +932,8 @@ def mode_l2_profile(args):
             dist.all_reduce(comm_tensor, op=dist.ReduceOp.SUM)
         
         for _ in range(args.warmup):
-            reset_fn()
+            with torch.cuda.stream(gemm_stream):
+                reset_fn()  # On the GEMM stream so reset finishes before matmul_fn().
             with torch.cuda.stream(comm_stream):
                 comm_fn()
             with torch.cuda.stream(gemm_stream):
@@ -965,7 +945,8 @@ def mode_l2_profile(args):
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         for _ in range(args.steps):
-            reset_fn()
+            with torch.cuda.stream(gemm_stream):
+                reset_fn()
             with torch.cuda.stream(comm_stream):
                 comm_fn()
             with torch.cuda.stream(gemm_stream):
@@ -1024,7 +1005,9 @@ def mode_l2_profile(args):
 
         for j in range(max(args.warmup, N_BUFS)):
             idx = j % N_BUFS
-            rot_fns[idx][1]()
+            with torch.cuda.stream(gemm_stream):
+                rot_fns[idx][1]()  # Reset on the GEMM stream — even with rotating
+                                    # buffers the race can corrupt counters silently.
             with torch.cuda.stream(comm_stream):
                 comm_fn()
             with torch.cuda.stream(gemm_stream):
@@ -1037,7 +1020,8 @@ def mode_l2_profile(args):
         start.record()
         for i in range(args.steps):
             idx = i % N_BUFS
-            rot_fns[idx][1]()
+            with torch.cuda.stream(gemm_stream):
+                rot_fns[idx][1]()
             with torch.cuda.stream(comm_stream):
                 comm_fn()
             with torch.cuda.stream(gemm_stream):
@@ -1316,17 +1300,15 @@ def mode_grid_sweep(args):
     
     base = None
     for grid_size in args.grid_sizes:
-        # Temporarily override the hardware CU count for this grid size
-        # Note: We monkey-patch the selector's hardware rather than creating new selector
-        # to avoid hardware capability detection issues with non-standard CU counts
-        orig_n_cu = selector._hardware.N_CU
-        selector._hardware.N_CU = grid_size
-        
-        # Build matmul (will use the overridden CU count)
-        matmul_fn, reset_fn = _make_tritonblas_matmul(A, B, C, "ws")
-        
-        # Restore original CU count
-        selector._hardware.N_CU = orig_n_cu
+        # Plumb the requested grid size into the selector that _make_tritonblas_matmul
+        # actually constructs. The previous implementation monkey-patched
+        # `selector._hardware.N_CU` and then called `_make_tritonblas_matmul` without
+        # the override, which built a *fresh* selector that never saw the patch — so
+        # every grid size silently ran with the hardware default and the sweep was a
+        # no-op. (Confirmed empirically: median was flat to 4 decimals across 128..304.)
+        matmul_fn, reset_fn = _make_tritonblas_matmul(
+            A, B, C, "ws", total_cus=grid_size,
+        )
         
         # Warmup
         for _ in range(10):
@@ -1474,11 +1456,13 @@ def mode_se_sweep(args):
             ovlp_wall, ovlp_mm, ovlp_co = _time_overlap_rotating(
                 rot_fns, rot_rfns, comm_fn, matmul_stream, comm_stream, 10, args.steps)
             
-            # Compute stats
+            # Compute stats. Drop iter-0 (warmup spike) when there's more than one
+            # sample; otherwise fall back to the full (single-element) list so
+            # `--steps 1` doesn't blow up with `max() arg is an empty sequence`.
             alone_mean = statistics.mean(alone_times)
-            alone_max = max(alone_times[1:])  # Exclude first
+            alone_max = max(alone_times[1:] if len(alone_times) > 1 else alone_times)
             ovlp_mean = statistics.mean(ovlp_mm)
-            ovlp_max = max(ovlp_mm[1:])
+            ovlp_max = max(ovlp_mm[1:] if len(ovlp_mm) > 1 else ovlp_mm)
             slowdown = ovlp_mean / alone_mean if alone_mean > 0 else 0
             
             result = {
