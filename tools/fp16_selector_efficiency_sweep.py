@@ -398,16 +398,18 @@ def main():
         return
     
     # Summary table
-    print(f"\n{'M':>6} {'N':>6} {'K':>6} | {'Selector':>17} | {'Sel TFLOPS':>10} | {'Best':>17} | {'Best TFLOPS':>11} | {'Eff%':>6} | {'Opt':>3}")
-    print("-" * 110)
+    print(f"\n{'M':>6} {'N':>6} {'K':>6} | {'Selector':>17} | {'Sel TFLOPS':>10} | {'Sel Time (us)':>16} | {'Best':>17} | {'Best TFLOPS':>11} | {'Best Time (us)':>16} | {'Eff%':>6} | {'Opt':>3}")
+    print("-" * 141)
     
     for r in all_results:
         optimal_mark = "✓" if r['is_optimal'] else ""
         print(f"{r['M']:6d} {r['N']:6d} {r['K']:6d} | "
               f"{r['selector_config']:>17} | "
               f"{r['selector_tflops']:10.2f} | "
+              f"{r['selector_time_us']:16.2f} | "
               f"{r['best_config']:>17} | "
               f"{r['best_tflops']:11.2f} | "
+              f"{r['best_time_us']:16.2f} | "
               f"{r['efficiency_pct']:6.1f} | "
               f"{optimal_mark:>3}")
     
