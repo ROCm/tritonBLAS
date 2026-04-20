@@ -914,7 +914,7 @@ def mode_l2_profile(args):
     elif args.profile_mode == "gemm-polluted":
         # GEMM + concurrent memory streaming
         n_elements = (args.pollution_mb * 1024 * 1024) // 2
-        pollution_buf = torch.randn(n_elements, dtype=torch.bfloat16, device=dev)
+        pollution_buf = torch.randn(n_elements, dtype=dtype, device=dev)
         
         pollution_stream = torch.cuda.Stream(device=dev)
         gemm_stream = torch.cuda.Stream(device=dev)
