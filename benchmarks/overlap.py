@@ -626,11 +626,13 @@ def mode_standard(args):
     nccl_ch = os.environ.get("NCCL_MAX_NCHANNELS", "unset")
 
     # ---- Build matmul callable (primary — single buffer) ----
+    total_cus = getattr(args, "total_cus", None)
     if args.backend == "torch":
         matmul_fn, reset_fn = _make_torch_matmul(A, B)
     else:
         C = torch.empty(args.m, args.n, dtype=dtype, device=dev)
-        matmul_fn, reset_fn = _make_tritonblas_matmul(A, B, C, args.backend)
+        matmul_fn, reset_fn = _make_tritonblas_matmul(
+            A, B, C, args.backend, total_cus=total_cus)
 
     # ---- Build rotating buffer sets ----
     N_ROTATING = 4
@@ -643,7 +645,8 @@ def mode_standard(args):
             mfn, rfn = _make_torch_matmul(rA, rB)
         else:
             rC = torch.empty(args.m, args.n, dtype=dtype, device=dev)
-            mfn, rfn = _make_tritonblas_matmul(rA, rB, rC, args.backend)
+            mfn, rfn = _make_tritonblas_matmul(
+                rA, rB, rC, args.backend, total_cus=total_cus)
         rot_matmul_fns.append(mfn)
         rot_reset_fns.append(rfn)
 
@@ -774,6 +777,7 @@ def _print_standard_results(args, results, nccl_ch, world_size):
             "warmup": args.warmup,
             "steps": args.steps,
             "world_size": world_size,
+            "total_cus": getattr(args, "total_cus", None) or "",
         }
         # Flatten stats
         for phase in ["gemm_alone", "comm_alone", "rotating_gemm", "serial_gemm",
@@ -1567,6 +1571,9 @@ def parse_args():
                       help="Append results to CSV file")
     p_std.add_argument("--output-json", type=str, default=None,
                       help="Save full per-iteration JSON data to file")
+    p_std.add_argument("--total-cus", type=int, default=None,
+                      help="Override #CUs given to GEMM (tritonBLAS backends only). "
+                           "Use to sweep the GEMM/COMM CU-allocation curve.")
     
     # --- MODE: l2-profile ---
     p_l2 = subparsers.add_parser("l2-profile",
