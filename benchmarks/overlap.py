@@ -1207,7 +1207,8 @@ def mode_chrome_trace(args):
     
     # Warmup
     for _ in range(args.warmup):
-        reset_fn()
+        with torch.cuda.stream(matmul_stream):
+            reset_fn()  # On the matmul stream so reset completes before matmul_fn().
         with torch.cuda.stream(comm_stream):
             comm_fn()
         with torch.cuda.stream(matmul_stream):
