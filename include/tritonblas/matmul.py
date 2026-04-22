@@ -25,6 +25,10 @@ MAX_BLOCK_SIZE = 65536
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
+# Map type encoding for counter and wait synchronization
+# 0=identity (one per tile), 1=row, 2=col, 3=block, 4=modulo, 5=launch_wave
+_MAP_TYPE_ENCODING = {"identity": 0, "row": 1, "col": 2, "block": 3, "modulo": 4, "launch_wave": 5}
+
 
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
@@ -77,6 +81,8 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    counter_config: Optional[Dict[str, Any]] = None,
+    wait_config: Optional[Dict[str, Any]] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -108,6 +114,10 @@ def persistent_matmul_lt(
         chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
     else:
         num_xcds = 1
+
+    # Validate wait_config compatibility before entering work-stealing branch
+    if work_stealing and wait_config is not None:
+        raise NotImplementedError("wait_config is only supported on the persistent_matmul path")
 
     if work_stealing and config is not None:
         grids = selector._hardware.N_CU
@@ -160,6 +170,59 @@ def persistent_matmul_lt(
     else:
         grids = total_tiles
 
+        # Extract counter parameters if provided
+        enable_counter = counter_config is not None
+        counter_ptr = counter_config["counter_buffer"] if enable_counter else None
+        counter_num = counter_config["num_counters"] if enable_counter else 0
+        counter_map_str = counter_config.get("map_type", "identity") if enable_counter else "identity"
+        counter_map_type = _MAP_TYPE_ENCODING.get(counter_map_str, 0)
+        counter_block_m = counter_config.get("block_group_m", 1) if enable_counter else 1
+        counter_block_n = counter_config.get("block_group_n", 1) if enable_counter else 1
+        enable_wait = wait_config is not None
+        wait_ptr = wait_config["wait_buffer"] if enable_wait else None
+        wait_expected_ptr = wait_config["expected_buffer"] if enable_wait else None
+        wait_num = wait_config["num_waits"] if enable_wait else 0
+        wait_map_str = wait_config.get("map_type", "identity") if enable_wait else "identity"
+        wait_map_type = _MAP_TYPE_ENCODING.get(wait_map_str, 0)
+        wait_block_m = wait_config.get("block_group_m", 1) if enable_wait else 1
+        wait_block_n = wait_config.get("block_group_n", 1) if enable_wait else 1
+        wait_expected_inc = wait_config.get("expected_inc", 1) if enable_wait else 1
+
+        # Validate buffer sizes for counter and wait configurations
+        if enable_counter:
+            required_size = _compute_required_buffer_size(
+                M, N, BLK_M, BLK_N, counter_map_str, counter_block_m, counter_block_n
+            )
+            if counter_num < required_size:
+                raise ValueError(
+                    f"counter_buffer too small: has {counter_num} elements, "
+                    f"but requires {required_size} for M={M}, N={N}, "
+                    f"BLOCK_M={BLK_M}, BLOCK_N={BLK_N}, map_type='{counter_map_str}'"
+                )
+
+        if enable_wait:
+            # Validate wait_buffer size
+            required_flag_size = _compute_required_buffer_size(
+                M, N, BLK_M, BLK_N, wait_map_str, wait_block_m, wait_block_n
+            )
+            if wait_num < required_flag_size:
+                raise ValueError(
+                    f"wait_buffer too small: has {wait_num} elements, "
+                    f"but requires {required_flag_size} for M={M}, N={N}, "
+                    f"BLOCK_M={BLK_M}, BLOCK_N={BLK_N}, map_type='{wait_map_str}'"
+                )
+            # Validate expected_buffer size (always needs one entry per tile)
+            num_tiles_m = (M + BLK_M - 1) // BLK_M
+            num_tiles_n = (N + BLK_N - 1) // BLK_N
+            total_tiles = num_tiles_m * num_tiles_n
+            expected_num = wait_config["expected_buffer"].numel()
+            if expected_num < total_tiles:
+                raise ValueError(
+                    f"expected_buffer too small: has {expected_num} elements, "
+                    f"but requires {total_tiles} (one per tile) for M={M}, N={N}, "
+                    f"BLOCK_M={BLK_M}, BLOCK_N={BLK_N}"
+                )
+
         kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
@@ -167,6 +230,9 @@ def persistent_matmul_lt(
             a_scale if quantized else None,
             b_scale if quantized else None,
             bias if bias is not None else None,
+            counter_ptr,
+            wait_ptr,
+            wait_expected_ptr,
             M,
             N,
             K,
@@ -186,6 +252,17 @@ def persistent_matmul_lt(
             CHUNK_SIZE=chunk_size,
             BIAS=bias is not None,
             EVEN_K=even_k,
+            ENABLE_COUNTER=enable_counter,
+            COUNTER_NUM=counter_num,
+            COUNTER_MAP_TYPE=counter_map_type,
+            COUNTER_BLOCK_GROUP_M=counter_block_m,
+            COUNTER_BLOCK_GROUP_N=counter_block_n,
+            ENABLE_WAIT=enable_wait,
+            WAIT_NUM=wait_num,
+            WAIT_MAP_TYPE=wait_map_type,
+            WAIT_BLOCK_GROUP_M=wait_block_m,
+            WAIT_BLOCK_GROUP_N=wait_block_n,
+            WAIT_EXPECTED_INC=wait_expected_inc,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
@@ -751,3 +828,184 @@ def addmm(
         )
     return _addmm_out(bias, a, b, out, enable_streamk, sk_grid, work_stealing)
 
+
+def _validate_sync_buffer(buffer: torch.Tensor, name: str) -> None:
+    if not isinstance(buffer, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor")
+    if buffer.ndim != 1:
+        raise ValueError(f"{name} must be 1D, got shape {tuple(buffer.shape)}")
+    if buffer.dtype != torch.int32:
+        raise TypeError(f"{name} must have dtype torch.int32, got {buffer.dtype}")
+    if buffer.numel() <= 0:
+        raise ValueError(f"{name} must contain at least one element")
+    if buffer.device.type != "cuda":
+        raise ValueError(f"{name} must live on a CUDA device, got {buffer.device}")
+
+
+def _compute_required_buffer_size(
+    M: int,
+    N: int,
+    block_m: int,
+    block_n: int,
+    map_type: str,
+    block_group_m: int = 1,
+    block_group_n: int = 1,
+) -> int:
+    """
+    Calculate required buffer size for a given mapping configuration.
+
+    Returns the minimum number of counters/flags needed for the given
+    matrix dimensions and mapping strategy.
+    """
+    num_tiles_m = (M + block_m - 1) // block_m
+    num_tiles_n = (N + block_n - 1) // block_n
+    total_tiles = num_tiles_m * num_tiles_n
+
+    if map_type == "row":
+        return num_tiles_m
+    elif map_type == "col":
+        return num_tiles_n
+    elif map_type == "block":
+        num_groups_m = (num_tiles_m + block_group_m - 1) // block_group_m
+        num_groups_n = (num_tiles_n + block_group_n - 1) // block_group_n
+        return num_groups_m * num_groups_n
+    elif map_type == "identity":
+        return total_tiles
+    elif map_type == "modulo":
+        # For modulo, any buffer size is valid (it wraps around)
+        return 1  # Minimum size
+    elif map_type == "launch_wave":
+        return (total_tiles + block_group_m - 1) // block_group_m
+    else:
+        raise ValueError(f"Unknown map_type: {map_type}")
+
+
+def create_counter_config(
+    counter_buffer: torch.Tensor,
+    map_type: str = "identity",
+    block_group_m: int = 1,
+    block_group_n: int = 1,
+) -> Dict[str, Any]:
+    """
+    Create a counter configuration for tile-level tracking in GEMM kernels.
+
+    Package a user-managed counter buffer with tile-to-counter mapping metadata.
+
+    Parameters
+    ----------
+    counter_buffer : torch.Tensor
+        User-provided ``int32`` CUDA tensor storing the counters. The number of
+        counters is derived from ``counter_buffer.numel()``.
+    map_type : str, optional
+        Mapping strategy (default: "identity")
+
+        - ``"row"``: All tiles in same M-row share a counter
+        - ``"col"``: All tiles in same N-column share a counter
+        - ``"block"``: Tiles in spatial groups share a counter
+        - ``"modulo"``: counter_id = tile_id % num_counters
+        - ``"launch_wave"``: counter_id = persistent launch-wave iteration
+        - ``"identity"``: One counter per tile
+
+    block_group_m : int, optional
+        For "block" mode: number of tiles per group in M dimension (default: 1).
+        For "launch_wave" mode: hardware wave size (active CUs), used to size
+        the number of launch-wave counters.
+    block_group_n : int, optional
+        For "block" mode: number of tiles per group in N dimension (default: 1)
+    Returns
+    -------
+    dict
+        Configuration dictionary with keys:
+
+        - ``counter_buffer``: torch.Tensor of int32[num_counters]
+        - ``num_counters``: int derived from ``counter_buffer.numel()``
+        - ``map_type``: str
+        - ``block_group_m``: int
+        - ``block_group_n``: int
+
+    Examples
+    --------
+    Track one counter per row:
+
+    >>> counter_buffer = torch.zeros(num_tiles_m, device="cuda", dtype=torch.int32)
+    >>> counter_cfg = create_counter_config(counter_buffer, map_type="row")
+    >>> matmul_lt(a, b, c, selector, counter_config=counter_cfg)
+    >>> print(counter_cfg["counter_buffer"])  # Shows tiles processed per row
+
+    Group 2x2 tiles:
+
+    >>> counter_buffer = torch.zeros(num_groups, device="cuda", dtype=torch.int32)
+    >>> counter_cfg = create_counter_config(
+    ...     counter_buffer, map_type="block",
+    ...     block_group_m=2, block_group_n=2
+    ... )
+
+    Notes
+    -----
+    ``create_counter_config()`` does not allocate. Reuse the same buffer across
+    launches and call ``counter_buffer.zero_()`` when you want to reset counts.
+
+    Buffer size validation happens at kernel launch time when matrix dimensions
+    are known. To pre-validate, use ``_compute_required_buffer_size()``.
+    """
+    _validate_sync_buffer(counter_buffer, "counter_buffer")
+
+    if map_type not in _MAP_TYPE_ENCODING:
+        raise ValueError(
+            f"Invalid map_type: {map_type}. "
+            f"Must be one of {list(_MAP_TYPE_ENCODING.keys())}"
+        )
+
+    return {
+        "counter_buffer": counter_buffer,
+        "num_counters": counter_buffer.numel(),
+        "map_type": map_type,
+        "block_group_m": block_group_m,
+        "block_group_n": block_group_n,
+    }
+
+
+def create_wait_config(
+    wait_buffer: torch.Tensor,
+    expected_buffer: torch.Tensor,
+    expected_inc: int = 1,
+    map_type: str = "identity",
+    block_group_m: int = 1,
+    block_group_n: int = 1,
+) -> Dict[str, Any]:
+    """
+    Package user-managed wait buffers for producer-consumer readiness.
+
+    Packages readiness buffers together with the mapping metadata used by
+    ``WaitView`` in the persistent GEMM prologue. The mapping modes mirror
+    ``create_counter_config()`` so producers and consumers can share the same
+    batch-to-flag assignment.
+
+    Notes
+    -----
+    Buffer size validation happens at kernel launch time when matrix dimensions
+    are known. To pre-validate, use ``_compute_required_buffer_size()``.
+    """
+    _validate_sync_buffer(wait_buffer, "wait_buffer")
+    _validate_sync_buffer(expected_buffer, "expected_buffer")
+    if wait_buffer.device != expected_buffer.device:
+        raise ValueError(
+            "wait_buffer and expected_buffer must live on the same device, "
+            f"got {wait_buffer.device} and {expected_buffer.device}"
+        )
+
+    if map_type not in _MAP_TYPE_ENCODING:
+        raise ValueError(
+            f"Invalid map_type: {map_type}. "
+            f"Must be one of {list(_MAP_TYPE_ENCODING.keys())}"
+        )
+
+    return {
+        "wait_buffer": wait_buffer,
+        "expected_buffer": expected_buffer,
+        "num_waits": wait_buffer.numel(),
+        "expected_inc": expected_inc,
+        "map_type": map_type,
+        "block_group_m": block_group_m,
+        "block_group_n": block_group_n,
+    }

@@ -7,6 +7,8 @@ Composable stage abstractions for tritonblas GEMM kernels.
 * :class:`ScheduleContext`: Unified scheduling with ``persistent_tile_range()``/``get_tile()``
 * :class:`InputView`, :class:`OutputView`: Matrix views with ``tile_ptrs()`` for memory access
 * :class:`ScaleView`, :class:`BiasView`: Epilogue views for quantized GEMM (scale and bias)
+* :class:`SignalView`: Producer-side view for signaling tile completion (epilogue)
+* :class:`WaitView`: Consumer-side view for waiting on tile readiness (prologue)
 * :class:`Tile`: 2D tile with coordinates (pid_m, pid_n) and shape (block_m, block_n)
 
 **Factory functions:**
@@ -15,6 +17,8 @@ Composable stage abstractions for tritonblas GEMM kernels.
 * :func:`make_output_view`: Create OutputView for C matrix with epilogue support
 * :func:`make_scale_view`: Create ScaleView for quantization scales
 * :func:`make_bias_view`: Create BiasView for bias addition
+* :func:`make_signal_view`: Create SignalView for tile-level tracking
+* :func:`make_wait_view`: Create WaitView for prologue waiting
 
 Example
 -------
@@ -76,6 +80,14 @@ from .matrix_view import (
     make_input_view, make_tensor_view, make_output_view,
     make_scale_view, make_bias_view,
 )
+from .signal_view import (
+    SignalView,
+    make_signal_view,
+)
+from .wait_view import (
+    WaitView,
+    make_wait_view,
+)
 
 # Grid utilities (used by streamk_gemm, fp4_matmul, persistent_gemm_monolithic)
 from .grid import chiplet_transform, chiplet_transform_chunked
@@ -89,12 +101,17 @@ __all__ = [
     'OutputView',
     'ScaleView',
     'BiasView',
+    'SignalView',
+    'WaitView',
     # Factory functions
     'make_input_view',
     'make_tensor_view',
     'make_output_view',
     'make_scale_view',
     'make_bias_view',
+    'make_signal_view',
+    'make_wait_view',
+    'make_schedule_context',
     # Grid utilities
     'chiplet_transform',
     'chiplet_transform_chunked',

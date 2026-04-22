@@ -15,11 +15,13 @@ import torch
 from tritonblas.kernels.stages import (
     ScheduleContext,
     make_schedule_context,
-    GemmContext, 
+    GemmContext,
     make_input_view,
     make_output_view,
     make_scale_view,
     make_bias_view,
+    make_signal_view,
+    make_wait_view,
 )
 
 
@@ -31,6 +33,9 @@ def persistent_matmul(
     A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
+    counter_ptr,  # Optional: int32[num_signals] for tile completion signaling
+    wait_ptr,     # Optional: int32[num_waits] for producer-consumer readiness
+    wait_expected_ptr,  # Optional: int32[num_waits] runtime target values
     M,
     N,
     K,
@@ -52,6 +57,17 @@ def persistent_matmul(
     CACHE_MODIFIER_B: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
+    ENABLE_COUNTER: tl.constexpr = False,
+    COUNTER_NUM: tl.constexpr = 0,
+    COUNTER_MAP_TYPE: tl.constexpr = 0,  # 0=identity, 1=row, 2=col, 3=block, 4=modulo
+    COUNTER_BLOCK_GROUP_M: tl.constexpr = 1,
+    COUNTER_BLOCK_GROUP_N: tl.constexpr = 1,
+    ENABLE_WAIT: tl.constexpr = False,
+    WAIT_NUM: tl.constexpr = 0,
+    WAIT_MAP_TYPE: tl.constexpr = 0,  # 0=identity, 1=row, 2=col, 3=block, 4=modulo
+    WAIT_BLOCK_GROUP_M: tl.constexpr = 1,
+    WAIT_BLOCK_GROUP_N: tl.constexpr = 1,
+    WAIT_EXPECTED_INC: tl.constexpr = 1,
     QUANTIZED: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = True,
 ):
@@ -83,10 +99,16 @@ def persistent_matmul(
     tensorC = make_output_view(C, M, N, stride_cm, stride_cn)
     
     # ════════════════════════════════════════════════════════════════════════
-    # CREATE EPILOGUE VIEWS (optional scale and bias)
+    # CREATE SYNCHRONIZATION/EPILOGUE VIEWS (optional wait, scale, bias, signal)
     # ════════════════════════════════════════════════════════════════════════
     scale_view = make_scale_view(A_scale_ptr, B_scale_ptr, M, N) if A_scale_ptr is not None else None
     bias_view = make_bias_view(bias_ptr, N, stride_bias) if BIAS else None
+    wait_view = make_wait_view(wait_ptr, wait_expected_ptr) if ENABLE_WAIT else None
+
+    # Create signal view if enabled
+    signal_view = None
+    if ENABLE_COUNTER:
+        signal_view = make_signal_view(counter_ptr)
     
     # ════════════════════════════════════════════════════════════════════════
     # CONSTRUCT GEMM CONTEXT TO MANAGE MATH RELEVANT CONTEXT
@@ -108,11 +130,24 @@ def persistent_matmul(
     # PERSISTENT LOOP: Process multiple tiles per workgroup
     # ════════════════════════════════════════════════════════════════════════
     start_tile, total_tiles, stride = sched.persistent_tile_range()
+    launch_program_id = tl.program_id(0)
     for tile_id in range(start_tile, total_tiles, stride):
         # ════════════════════════════════════════════════════
         # Get schedule aware output tile to be processed this loop iteration
         # ════════════════════════════════════════════════════
         out_tile = sched.get_tile_from_idx(tile_id)
+
+        # Wait until the producer has made the batch containing this tile
+        # visible in memory before entering the GEMM K-loop.
+        if wait_view is not None:
+            wait_view.wait_for_tile(
+                out_tile, M, N,
+                num_flags=WAIT_NUM,
+                map_type=WAIT_MAP_TYPE,
+                block_group_m=WAIT_BLOCK_GROUP_M,
+                block_group_n=WAIT_BLOCK_GROUP_N,
+                expected_inc=WAIT_EXPECTED_INC,
+            )
         
         # ════════════════════════════════════════════════════════════════════
         # COMPUTE GEMM: K-loop handled by GemmContext
@@ -120,7 +155,10 @@ def persistent_matmul(
         acc = ctx.reduce_axis(tensorA, tensorB, out_tile)
         
         # ════════════════════════════════════════════════════════════════════
-        # STORE RESULT: Epilogue (scale, bias, convert) handled by OutputView
+        # STORE RESULT: Epilogue (scale, bias, convert, signal) handled by OutputView
         # Store Accumulator to output matrix C at pointers defined by out_tile
         # ════════════════════════════════════════════════════════════════════
-        tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
+        tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view, signal=signal_view,
+                     signal_num=COUNTER_NUM, signal_map_type=COUNTER_MAP_TYPE,
+                     signal_block_m=COUNTER_BLOCK_GROUP_M, signal_block_n=COUNTER_BLOCK_GROUP_N,
+                     signal_launch_wave_id=launch_program_id)
