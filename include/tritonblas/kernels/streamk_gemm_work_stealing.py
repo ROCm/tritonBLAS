@@ -131,7 +131,7 @@ def ws_streamk_matmul(
         loop_k = tl.cdiv(K, BLOCK_SIZE_K)
         if not EVEN_K:
             loop_k -= 1
-        tl.assume(loop_k > 1)
+        tl.assume(loop_k >= 0)
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for k in range(0, loop_k):

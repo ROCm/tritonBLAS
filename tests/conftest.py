@@ -51,6 +51,9 @@ EDGE_CASE_DIMS = [
     (15, 17, 512),        # Weird and small M and N
     (19, 13, 512),        # Weird and small M and N
     (128, 64, 12),        # Small K
+    (256, 256, 1),        # K=1: K < BLOCK_K, main K-loop is 0 iters
+    (256, 256, 8),        # K < min BLOCK_K(16), same issue
+    (2048, 32, 1),        # Skinny N + tiny K
 ]
 
 # Skinny matrix dimensions (stress tests)

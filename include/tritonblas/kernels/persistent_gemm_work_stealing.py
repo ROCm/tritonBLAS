@@ -101,7 +101,7 @@ def ws_persistent_matmul(
     has_remainder = not EVEN_K
     if has_remainder:
         loop_k -= 1
-    tl.assume(loop_k > 1)
+    tl.assume(loop_k >= 0)
 
     if HIERARCHICAL:
         # ================================================================
