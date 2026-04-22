@@ -89,7 +89,11 @@ class InputView:
         tl.assume(self.stride_row > 0)
         tl.assume(self.stride_col > 0)
         r_row, r_col, mask = tile.layout(self.rows, self.cols)
-        ptrs = self.ptr + r_row[:, None] * self.stride_row + r_col[None, :] * self.stride_col
+        ptrs = (
+            self.ptr
+            + r_row.to(tl.int64)[:, None] * self.stride_row.to(tl.int64)
+            + r_col.to(tl.int64)[None, :] * self.stride_col.to(tl.int64)
+        )
         return ptrs, mask
     
     @triton.jit
@@ -257,13 +261,18 @@ class OutputView:
         tl.assume(self.stride_row > 0)
         tl.assume(self.stride_col > 0)
         r_row, r_col, mask = tile.layout(self.rows, self.cols)
-        ptrs = self.ptr + r_row[:, None] * self.stride_row + r_col[None, :] * self.stride_col
+        ptrs = (
+            self.ptr
+            + r_row.to(tl.int64)[:, None] * self.stride_row.to(tl.int64)
+            + r_col.to(tl.int64)[None, :] * self.stride_col.to(tl.int64)
+        )
         return ptrs, mask
     
     @triton.jit
     def store(self, data, tile: Tile, mask=None, scale: ScaleView = None, bias: BiasView = None, signal: SignalView = None,
               signal_num: tl.constexpr = 0, signal_map_type: tl.constexpr = 0,
-              signal_block_m: tl.constexpr = 1, signal_block_n: tl.constexpr = 1):
+              signal_block_m: tl.constexpr = 1, signal_block_n: tl.constexpr = 1,
+              signal_launch_wave_id=0):
         """
         Store data to a tile with optional epilogue operations.
 
@@ -280,6 +289,8 @@ class OutputView:
             signal_map_type: Mapping type (constexpr, for signal tracking)
             signal_block_m: Block group M (constexpr, for signal tracking)
             signal_block_n: Block group N (constexpr, for signal tracking)
+            signal_launch_wave_id: Runtime launch-wave iteration index for
+                persistent-kernel signaling
 
         Example::
 
@@ -315,7 +326,8 @@ class OutputView:
         # Update counter after store completes
         if signal is not None:
             tl.debug_barrier()  # Ensure store visible before signal increment
-            signal.apply(tile, self.rows, self.cols, signal_num, signal_map_type,
+            signal.apply(tile, self.rows, self.cols, signal_launch_wave_id,
+                         signal_num, signal_map_type,
                          signal_block_m, signal_block_n)
     
     @triton.jit

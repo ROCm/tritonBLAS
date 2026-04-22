@@ -43,6 +43,7 @@ class SignalView:
     - ``"col"``: All tiles in same N-column share a signal (signal_id = pid_n)
     - ``"block"``: Tiles in (block_m_group × block_n_group) regions share a signal
     - ``"modulo"``: signal_id = tile_id % num_signals (uniform distribution)
+    - ``"launch_wave"``: signal_id = launch_program_id // block_group_m
     - ``"identity"``: signal_id = tile_id (one signal per tile)
 
     Attributes
@@ -65,6 +66,7 @@ class SignalView:
         tile: Tile,
         M,
         N,
+        launch_wave_id,
         num_signals: tl.constexpr,
         map_type: tl.constexpr,
         block_group_m: tl.constexpr,
@@ -82,6 +84,7 @@ class SignalView:
         - 2: col (all tiles in same N-column share signal)
         - 3: block (tiles in spatial groups share signal)
         - 4: modulo (distribute tiles across signals)
+        - 5: launch_wave (group launched programs into hardware waves)
         """
         num_pid_m = tl.cdiv(M, tile.block_m)
         num_pid_n = tl.cdiv(N, tile.block_n)
@@ -98,6 +101,8 @@ class SignalView:
         elif map_type == 4:  # "modulo"
             tile_id = tile.pid_m * num_pid_n + tile.pid_n
             signal_id = tile_id % num_signals
+        elif map_type == 5:  # "launch_wave"
+            signal_id = launch_wave_id // block_group_m
         else:  # 0 = "identity" (default)
             tile_id = tile.pid_m * num_pid_n + tile.pid_n
             signal_id = tile_id

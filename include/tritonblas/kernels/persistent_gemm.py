@@ -130,6 +130,7 @@ def persistent_matmul(
     # PERSISTENT LOOP: Process multiple tiles per workgroup
     # ════════════════════════════════════════════════════════════════════════
     start_tile, total_tiles, stride = sched.persistent_tile_range()
+    launch_program_id = tl.program_id(0)
     for tile_id in range(start_tile, total_tiles, stride):
         # ════════════════════════════════════════════════════
         # Get schedule aware output tile to be processed this loop iteration
@@ -159,4 +160,5 @@ def persistent_matmul(
         # ════════════════════════════════════════════════════════════════════
         tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view, signal=signal_view,
                      signal_num=COUNTER_NUM, signal_map_type=COUNTER_MAP_TYPE,
-                     signal_block_m=COUNTER_BLOCK_GROUP_M, signal_block_n=COUNTER_BLOCK_GROUP_N)
+                     signal_block_m=COUNTER_BLOCK_GROUP_M, signal_block_n=COUNTER_BLOCK_GROUP_N,
+                     signal_launch_wave_id=launch_program_id)

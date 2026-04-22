@@ -26,8 +26,8 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 # Map type encoding for counter and wait synchronization
-# 0=identity (one per tile), 1=row, 2=col, 3=block, 4=modulo
-_MAP_TYPE_ENCODING = {"identity": 0, "row": 1, "col": 2, "block": 3, "modulo": 4}
+# 0=identity (one per tile), 1=row, 2=col, 3=block, 4=modulo, 5=launch_wave
+_MAP_TYPE_ENCODING = {"identity": 0, "row": 1, "col": 2, "block": 3, "modulo": 4, "launch_wave": 5}
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -874,6 +874,8 @@ def _compute_required_buffer_size(
     elif map_type == "modulo":
         # For modulo, any buffer size is valid (it wraps around)
         return 1  # Minimum size
+    elif map_type == "launch_wave":
+        return (total_tiles + block_group_m - 1) // block_group_m
     else:
         raise ValueError(f"Unknown map_type: {map_type}")
 
@@ -901,10 +903,13 @@ def create_counter_config(
         - ``"col"``: All tiles in same N-column share a counter
         - ``"block"``: Tiles in spatial groups share a counter
         - ``"modulo"``: counter_id = tile_id % num_counters
+        - ``"launch_wave"``: counter_id = persistent launch-wave iteration
         - ``"identity"``: One counter per tile
 
     block_group_m : int, optional
-        For "block" mode: number of tiles per group in M dimension (default: 1)
+        For "block" mode: number of tiles per group in M dimension (default: 1).
+        For "launch_wave" mode: hardware wave size (active CUs), used to size
+        the number of launch-wave counters.
     block_group_n : int, optional
         For "block" mode: number of tiles per group in N dimension (default: 1)
     Returns
