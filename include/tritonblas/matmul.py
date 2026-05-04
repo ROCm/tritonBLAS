@@ -112,6 +112,17 @@ def persistent_matmul_lt(
     if work_stealing and config is not None:
         grids = selector._hardware.N_CU
 
+        # Mutual-exclusion guard: only one work-stealing scheduling mode
+        # may be active at a time. Without this, NEIGHBOR_STEALING silently
+        # masks GLOBAL_ATOMIC due to kernel branch precedence.
+        _neighbor = getattr(config, 'neighbor_stealing', False)
+        if config.global_atomic and _neighbor:
+            raise ValueError(
+                "MatmulConfig.global_atomic and MatmulConfig.neighbor_stealing "
+                "are mutually exclusive work-stealing scheduling modes; set at "
+                "most one to True."
+            )
+
         kk = _maybe_wrap(ws_persistent_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
@@ -149,6 +160,7 @@ def persistent_matmul_lt(
             HIERARCHICAL=False,
             LOCAL_TILES_PER_XCD=0,
             GLOBAL_TILES=0,
+            NEIGHBOR_STEALING=getattr(config, 'neighbor_stealing', False),
             USE_MASK=True,
             mask_ptr=config.mask,
             num_stages=num_stages,
@@ -277,6 +289,18 @@ def streamk_matmul_lt(
         num_xcds = 1
 
     if work_stealing and config is not None:
+        # NEIGHBOR_STEALING is currently only implemented in
+        # ws_persistent_matmul. The Stream-K work-stealing kernel does not
+        # support it yet; warn the user rather than silently dropping the flag.
+        if getattr(config, 'neighbor_stealing', False):
+            import warnings
+            warnings.warn(
+                "MatmulConfig.neighbor_stealing=True is not yet implemented "
+                "for the Stream-K work-stealing kernel; falling back to the "
+                "per-XCD/slot scheduling mode for this launch.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         kk = _maybe_wrap(ws_streamk_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
