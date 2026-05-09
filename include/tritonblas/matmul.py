@@ -32,6 +32,8 @@ from ._route_predicate import (
     _k1361_p12_square_mid_routeout as _R_K1361_P12_square_mid_routeout,
     # K-1367 (S-002): P13 skinny_N128 K-COMPLEMENT 18-cell route-OUT (7th-position).
     _k1367_p13_skinny_n128_routeout as _R_K1367_P13_skinny_n128_routeout,
+    # K-1397 (S-002): P13 skinny_N256 K-COMPLEMENT 12-cell route-OUT (8th-position).
+    _k1397_p13_skinny_n256_routeout as _R_K1397_P13_skinny_n256_routeout,
 )
 
 
@@ -97,6 +99,17 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # column-narrow LDS layout). Disjoint by construction with all P1–P12
     # sub-frozensets via cross-frozenset asserts at module load.
     if _R_K1367_P13_skinny_n128_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1397 (S-002): P13 skinny_N256 K-COMPLEMENT 12-cell route-OUT (8th-position
+    # envelope). Stacks AFTER K-1389 productionised K-1367 P13 per K-1175 stacked-
+    # predicate convention; closes the K-1365 4-bucket decomposition's last
+    # skinny_N256 residual at the K-extreme corners (K ∈ {2048, 32768}) where
+    # hipBLASLt's split-K kernel selection wins over triton.persistent_matmul at
+    # extreme aspect ratios.  Verified at paired n=30 + B=10000 vectorised
+    # bootstrap CI95: 12/12 ROUTE-OUT, per-cell speedups 1.04–1.12×.  Same K-913
+    # §3 LDS-bank-conflict mechanism as K-1367 P13 N=128, extended to the N=256
+    # column-narrow regime.  Disjoint by construction with all P1–P13(N128)
+    # sub-frozensets via cross-frozenset asserts at module load.
+    if _R_K1397_P13_skinny_n256_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 
