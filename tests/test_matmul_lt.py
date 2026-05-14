@@ -69,16 +69,18 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, mode):
 @pytest.mark.parametrize(
     "m, n, k",
     [
+        (128, 128, 128),
         (1024, 1024, 1024),
         (4352, 4352, 4096),
     ],
 )
 def test_ws_scheduling_modes_agree(m, n, k):
-    """All three WS scheduling modes must produce identical results to each other.
+    """Cross-validate that all three WS scheduling modes produce identical
+    results to each other, catching inter-mode divergences in the scheduling
+    layer that could hide within the loose per-mode tolerance against torch.
 
-    A regression that affects all three modes equally vs. torch.matmul could
-    slip past test_matmul; this catches mode-specific divergences in the
-    scheduling layer.
+    The (128, 128, 128) shape exercises the empty-XCD edge case where
+    total_tiles < NUM_XCDS (e.g. 1 tile across 8 XCDs on MI300X).
     """
     dtype = torch.bfloat16
     base = generate_matmul_inputs(m, n, k, dtype, dtype, "N", "N", "randn")
@@ -114,3 +116,45 @@ def test_ws_mode_mutual_exclusion():
     with pytest.raises(ValueError, match="mutually exclusive"):
         tritonblas.matmul_lt(inputs.A, inputs.B, inputs.C, selector, config,
                              enable_streamk=False, work_stealing=True)
+
+
+def test_ws_mode_mutual_exclusion_streamk():
+    """The Stream-K path must also reject both flags, matching persistent."""
+    dtype = torch.bfloat16
+    inputs = generate_matmul_inputs(1024, 1024, 1024, dtype, dtype, "N", "N", "randn")
+    selector = tritonblas.OrigamiMatmulSelector(
+        1024, 1024, 1024, dtype, dtype, dtype, inputs.A.device, streamk=True,
+    )
+    config = tritonblas.matmul_preamble(selector)
+    config.global_atomic = True
+    config.neighbor_stealing = True
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        tritonblas.matmul_lt(inputs.A, inputs.B, inputs.C, selector, config,
+                             enable_streamk=True, work_stealing=True)
+
+
+@pytest.mark.parametrize(
+    "ws_mode",
+    ["slot", "global_atomic", "neighbor_stealing"],
+)
+def test_ws_bias(ws_mode):
+    """Bias (addmm-style) path must work for all WS scheduling modes."""
+    m, n, k = 1024, 1024, 1024
+    dtype = torch.bfloat16
+    inputs = generate_matmul_inputs(m, n, k, dtype, dtype, "N", "N", "randn")
+    bias = torch.randn(n, device="cuda", dtype=dtype)
+
+    selector = tritonblas.OrigamiMatmulSelector(
+        m, n, k, dtype, dtype, dtype, inputs.A.device, streamk=False,
+    )
+    config = tritonblas.matmul_preamble(selector)
+    config.global_atomic = (ws_mode == "global_atomic")
+    config.neighbor_stealing = (ws_mode == "neighbor_stealing")
+
+    from tritonblas.matmul import persistent_matmul_lt
+    c = torch.empty_like(inputs.C)
+    persistent_matmul_lt(inputs.A, inputs.B, c, selector, config,
+                         bias=bias, work_stealing=True)
+
+    expected = torch.addmm(bias, inputs.A, inputs.B)
+    torch.testing.assert_close(c.to(dtype), expected, atol=1, rtol=1)
