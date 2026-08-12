@@ -32,6 +32,7 @@ class MatmulConfig:
     def __init__(self, device: torch.device, tile_counter: torch.Tensor,
                  streamk_tile_counter: torch.Tensor, locks: torch.Tensor,
                  P: torch.Tensor, global_atomic: bool = False,
+                 neighbor_stealing: bool = False,
                  global_counter: torch.Tensor = None,
                  mask: torch.Tensor = None,
                  sk_iter_counter: torch.Tensor = None,
@@ -44,6 +45,7 @@ class MatmulConfig:
         self.locks = locks
         self.P = P
         self.global_atomic = global_atomic
+        self.neighbor_stealing = neighbor_stealing
         self.global_counter = global_counter
         self.mask = mask
         self.sk_iter_counter = sk_iter_counter
