@@ -197,18 +197,21 @@ class OrigamiMatmulSelector:
         # Create Origami problem_t based on problem metadata (needed for fallback)
         self._problem = self._make_problem()
 
-        # Filter configs by Triton LDS capacity (async_copy + num_stages + padding).
-        # Origami's check_lds_capacity uses raw tile size only; Triton allocates
-        # num_stages buffers with padding for bank conflicts.
-        # LDS issues only affect largest tiles; smaller configs should always pass.
+        # Filter configs by Triton LDS capacity.
+        # Keep any tile that fits with at least num_stages=2 (minimum useful
+        # pipelining).  After Origami selects the best tile we clamp
+        # self._num_stages to the maximum that fits, so large tiles like
+        # 256x256x128 are not needlessly excluded when only the requested
+        # num_stages is too high for this hardware's LDS.
         bytes_a = self._a_dtype_bitsize / 8
         bytes_b = self._b_dtype_bitsize / 8
         lds_cap = self._hardware.lds_capacity
+        min_stages = 2  # minimum for software pipelining
         self._configs = [
             c
             for c in self._configs
             if check_triton_lds_capacity(
-                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, self._num_stages
+                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, min_stages
             )
         ]
         if not self._configs:
@@ -233,13 +236,31 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+        # Heuristic to favor 256x256x64 tile when close.
+        # Check LDS capacity at min_stages (not the requested num_stages)
+        # because the post-selection clamping below will adjust num_stages
+        # to fit.  Using the requested value would incorrectly block this
+        # heuristic when num_stages is high but the tile fits after clamping.
+        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, min_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
+
+        # Clamp num_stages to the maximum the selected tile can support.
+        # max_stages = floor(lds_capacity / per_stage_bytes) + 1
+        # where the swizzled LDS formula is:
+        #   (num_stages - 1) * (bm*bk*bpe_a + bk*bn*bpe_b)
+        sel_m = self._result.config.mt.m
+        sel_n = self._result.config.mt.n
+        sel_k = self._result.config.mt.k
+        per_stage = sel_m * sel_k * bytes_a + sel_k * sel_n * bytes_b
+        if per_stage > 0:
+            max_stages = int(lds_cap // per_stage) + 1
+        else:
+            max_stages = self._num_stages
+        self._num_stages = min(self._num_stages, max(1, max_stages))
 
         if streamk:
             self._grid = self._compute_sk_grid()

@@ -32,10 +32,10 @@ def _get_hardware():
         return None
     try:
         import origami
-        device_id = torch.cuda.current_device()
-        return origami.get_hardware_for_device(device_id)
-    except Exception:
+    except ImportError:
         return None
+    device_id = torch.cuda.current_device()
+    return origami.get_hardware_for_device(device_id)
 
 
 class TestEstimateTritonLdsBytes:
@@ -226,6 +226,49 @@ class TestLdsArchitectureDependent:
             f"Selector chose {selector.block_m}x{selector.block_n}x{selector.block_k} "
             f"(LDS={usage}) which exceeds {hardware.lds_capacity} (N_CU={hardware.N_CU})"
         )
+
+    def test_selector_caps_num_stages_when_lds_overflows(self):
+        """num_stages must be capped so the selected tile fits in LDS.
+
+        When num_stages=3 would cause the selected tile to overflow LDS,
+        the selector should reduce num_stages until the config fits.
+        On MI300X (64KB LDS), even num_stages=2 constrains large tiles;
+        on MI355X (160KB LDS), num_stages=3 with 256x256x128 overflows.
+        """
+        hardware = _get_hardware()
+        if hardware is None:
+            pytest.skip("Could not get hardware")
+        from tritonblas import OrigamiMatmulSelector
+        m, n, k = 8192, 8192, 8192
+        dtype = torch.bfloat16
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        selector = OrigamiMatmulSelector(
+            m, n, k, dtype, dtype, dtype, device, num_stages=3
+        )
+        lds_cap = hardware.lds_capacity
+        # The selected config with the (possibly capped) num_stages must fit
+        usage = estimate_triton_lds_bytes(
+            selector.block_m, selector.block_n, selector.block_k,
+            2, 2, selector.num_stages
+        )
+        assert usage <= lds_cap, (
+            f"Selector chose {selector.block_m}x{selector.block_n}x{selector.block_k} "
+            f"ns={selector.num_stages} (LDS={usage}) exceeds capacity={lds_cap}"
+        )
+        # num_stages must have been capped (<=3, possibly reduced)
+        assert selector.num_stages <= 3
+        assert selector.num_stages >= 1
+        # Verify capping was minimal: num_stages+1 should NOT fit (if it was capped)
+        if selector.num_stages < 3:
+            usage_plus1 = estimate_triton_lds_bytes(
+                selector.block_m, selector.block_n, selector.block_k,
+                2, 2, selector.num_stages + 1
+            )
+            assert usage_plus1 > lds_cap, (
+                f"num_stages was reduced to {selector.num_stages} but "
+                f"ns={selector.num_stages + 1} (LDS={usage_plus1}) still fits "
+                f"in {lds_cap} — capping was too aggressive"
+            )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
