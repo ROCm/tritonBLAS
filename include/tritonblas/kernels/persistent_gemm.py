@@ -59,12 +59,12 @@ def persistent_matmul(
     EVEN_K: tl.constexpr,
     ENABLE_COUNTER: tl.constexpr = False,
     COUNTER_NUM: tl.constexpr = 0,
-    COUNTER_MAP_TYPE: tl.constexpr = 0,  # 0=identity, 1=row, 2=col, 3=block, 4=modulo
+    COUNTER_MAP_TYPE: tl.constexpr = 0,  # 0=identity, 1=row, 2=col, 3=block, 4=launch_wave
     COUNTER_BLOCK_GROUP_M: tl.constexpr = 1,
     COUNTER_BLOCK_GROUP_N: tl.constexpr = 1,
     ENABLE_WAIT: tl.constexpr = False,
     WAIT_NUM: tl.constexpr = 0,
-    WAIT_MAP_TYPE: tl.constexpr = 0,  # 0=identity, 1=row, 2=col, 3=block, 4=modulo
+    WAIT_MAP_TYPE: tl.constexpr = 0,  # 0=identity, 1=row, 2=col, 3=block
     WAIT_BLOCK_GROUP_M: tl.constexpr = 1,
     WAIT_BLOCK_GROUP_N: tl.constexpr = 1,
     WAIT_EXPECTED_INC: tl.constexpr = 1,

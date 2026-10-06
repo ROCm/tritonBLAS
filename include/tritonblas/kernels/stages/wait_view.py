@@ -58,8 +58,6 @@ class WaitView:
             group_n = tile.pid_n // block_group_n
             num_groups_n = tl.cdiv(num_pid_n, block_group_n)
             flag_id = group_m * num_groups_n + group_n
-        elif map_type == 4:  # "modulo"
-            flag_id = tile_id % num_flags
         else:  # 0 = "identity"
             flag_id = tile_id
 
