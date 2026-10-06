@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-import triton
-import triton.language as tl
-from triton.language.core import _aggregate as aggregate
-
-from .tile import Tile
-from .signal_view import SignalView
-
 """
 Matrix view aggregates for tritonblas shards.
 
@@ -38,6 +31,13 @@ Example
     acc = ctx.reduce_axis(tensorA, tensorB, out_tile)
     tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
 """
+
+import triton
+import triton.language as tl
+from triton.language.core import _aggregate as aggregate
+
+from .tile import Tile
+from .signal_view import SignalView
 
 
 @aggregate
@@ -89,11 +89,7 @@ class InputView:
         tl.assume(self.stride_row > 0)
         tl.assume(self.stride_col > 0)
         r_row, r_col, mask = tile.layout(self.rows, self.cols)
-        ptrs = (
-            self.ptr
-            + r_row.to(tl.int64)[:, None] * self.stride_row.to(tl.int64)
-            + r_col.to(tl.int64)[None, :] * self.stride_col.to(tl.int64)
-        )
+        ptrs = self.ptr + r_row[:, None] * self.stride_row + r_col[None, :] * self.stride_col
         return ptrs, mask
     
     @triton.jit
@@ -261,11 +257,7 @@ class OutputView:
         tl.assume(self.stride_row > 0)
         tl.assume(self.stride_col > 0)
         r_row, r_col, mask = tile.layout(self.rows, self.cols)
-        ptrs = (
-            self.ptr
-            + r_row.to(tl.int64)[:, None] * self.stride_row.to(tl.int64)
-            + r_col.to(tl.int64)[None, :] * self.stride_col.to(tl.int64)
-        )
+        ptrs = self.ptr + r_row[:, None] * self.stride_row + r_col[None, :] * self.stride_col
         return ptrs, mask
     
     @triton.jit
@@ -316,7 +308,7 @@ class OutputView:
 
         # Type conversion to output dtype
         result = result.to(self.ptr.type.element_ty)
-
+        
         # Compute pointers and store
         ptrs, bounds_mask = self.tile_ptrs(tile)
         if mask is None:
