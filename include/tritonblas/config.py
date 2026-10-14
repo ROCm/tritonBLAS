@@ -169,7 +169,7 @@ class _TileMapMixin:
         # Group sizes are divisors / index strides in the slot mapping, so they must be positive.
         for name in ("block_group_m", "block_group_n"):
             value = getattr(self, name)
-            if not isinstance(value, int) or value < 1:
+            if value < 1:
                 raise ValueError(f"{name} must be a positive integer, got {value!r}")
 
     def required_size(self, M: int, N: int, block_m: int, block_n: int) -> int:
@@ -301,7 +301,7 @@ class PrologueConfig(_TileMapMixin):
         if self.map_type == "launch_wave":
             raise ValueError("map_type 'launch_wave' is not supported for PrologueConfig")
         # expected_inc <= 0 makes the wait target already satisfied, defeating the synchronization.
-        if not isinstance(self.expected_inc, int) or self.expected_inc < 1:
+        if self.expected_inc < 1:
             raise ValueError(f"expected_inc must be a positive integer, got {self.expected_inc!r}")
 
     @property
