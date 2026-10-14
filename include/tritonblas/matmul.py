@@ -110,9 +110,12 @@ def persistent_matmul_lt(
     else:
         num_xcds = 1
 
-    # Validate prologue_config compatibility before entering work-stealing branch
-    if work_stealing and prologue_config is not None:
-        raise NotImplementedError("prologue_config is only supported on the persistent_matmul path")
+    # Work-stealing never forwards the sync configs, so reject them instead of silently dropping them
+    if work_stealing and (epilogue_config is not None or prologue_config is not None):
+        raise NotImplementedError(
+            "epilogue_config and prologue_config are only supported on the persistent_matmul path "
+            "(work_stealing=False)"
+        )
 
     if work_stealing and config is not None:
         grids = selector._hardware.N_CU
@@ -381,14 +384,24 @@ def streamk_matmul_lt(
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
-    enable_streamk=False, work_stealing=False
+    enable_streamk=False, work_stealing=False,
+    epilogue_config: Optional[EpilogueConfig] = None,
+    prologue_config: Optional[PrologueConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
+        if epilogue_config is not None or prologue_config is not None:
+            raise NotImplementedError(
+                "epilogue_config and prologue_config are only supported on the persistent_matmul path "
+                "(enable_streamk=False)"
+            )
         return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+        return persistent_matmul_lt(
+            a, b, c, selector, config, work_stealing=work_stealing,
+            epilogue_config=epilogue_config, prologue_config=prologue_config,
+        )
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,

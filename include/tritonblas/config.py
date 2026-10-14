@@ -161,11 +161,16 @@ class _TileMapMixin:
     block_group_m: int
     block_group_n: int
 
-    def _validate_map_type(self) -> None:
+    def _validate_mapping(self) -> None:
         if self.map_type not in MAP_TYPE_ENCODING:
             raise ValueError(
                 f"Invalid map_type: {self.map_type}. Must be one of {list(MAP_TYPE_ENCODING.keys())}"
             )
+        # Group sizes are divisors / index strides in the slot mapping, so they must be positive.
+        for name in ("block_group_m", "block_group_n"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
 
     def required_size(self, M: int, N: int, block_m: int, block_n: int) -> int:
         """Minimum number of counters/flags needed for an ``M x N`` problem with this mapping."""
@@ -224,7 +229,7 @@ class EpilogueConfig(_TileMapMixin):
 
     def __post_init__(self):
         _validate_sync_buffer(self.counter_buffer, "counter_buffer")
-        self._validate_map_type()
+        self._validate_mapping()
 
     @property
     def num_counters(self) -> int:
@@ -291,7 +296,13 @@ class PrologueConfig(_TileMapMixin):
                 "wait_buffer and expected_buffer must live on the same device, "
                 f"got {self.wait_buffer.device} and {self.expected_buffer.device}"
             )
-        self._validate_map_type()
+        self._validate_mapping()
+        # WaitView has no launch-wave slot mapping: it would fall back to one flag per tile.
+        if self.map_type == "launch_wave":
+            raise ValueError("map_type 'launch_wave' is not supported for PrologueConfig")
+        # expected_inc <= 0 makes the wait target already satisfied, defeating the synchronization.
+        if not isinstance(self.expected_inc, int) or self.expected_inc < 1:
+            raise ValueError(f"expected_inc must be a positive integer, got {self.expected_inc!r}")
 
     @property
     def num_waits(self) -> int:
