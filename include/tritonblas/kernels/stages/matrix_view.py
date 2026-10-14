@@ -4,9 +4,9 @@
 """
 Matrix view aggregates for tritonblas shards.
 
-Provides :class:`InputView`, :class:`OutputView`, :class:`ScaleView`, and 
-:class:`BiasView` aggregates that encapsulate matrix pointers, dimensions, 
-and strides. The kernel writer just describes their matrices and uses them - 
+Provides :class:`InputView`, :class:`OutputView`, :class:`ScaleView`, and
+:class:`BiasView` aggregates that encapsulate matrix pointers, dimensions,
+and strides. The kernel writer just describes their matrices and uses them -
 no need to worry about layout flags or transpose.
 
 Example
@@ -16,17 +16,17 @@ Example
 
     # A [M, K] with strides stride_am, stride_ak
     tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
-    
+
     # B [K, N] with strides stride_bk, stride_bn
     tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
-    
+
     # C [M, N] with strides stride_cm, stride_cn
     tensorC = make_output_view(C, M, N, stride_cm, stride_cn)
-    
+
     # Optional: Scale and bias views for quantized GEMM epilogue
     scale_view = make_scale_view(A_scale_ptr, B_scale_ptr, M, N)
     bias_view = make_bias_view(bias_ptr, M, stride_bias)
-    
+
     # Use them - store handles scaling, bias, and type conversion
     acc = ctx.reduce_axis(tensorA, tensorB, out_tile)
     tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
@@ -37,6 +37,7 @@ import triton.language as tl
 from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
+from .signal_view import SignalView
 
 
 @aggregate
@@ -260,37 +261,51 @@ class OutputView:
         return ptrs, mask
     
     @triton.jit
-    def store(self, data, tile: Tile, mask=None, scale: ScaleView = None, bias: BiasView = None):
+    def store(self, data, tile: Tile, mask=None, scale: ScaleView = None, bias: BiasView = None, signal: SignalView = None,
+              signal_num: tl.constexpr = 0, signal_map_type: tl.constexpr = 0,
+              signal_block_m: tl.constexpr = 1, signal_block_n: tl.constexpr = 1,
+              signal_launch_wave_id=0):
         """
         Store data to a tile with optional epilogue operations.
-        
-        Applies epilogue in order: scale -> bias -> type convert -> store
-        
+
+        Applies epilogue in order: scale -> bias -> type convert -> store -> signal
+
         Args:
             data: Data to store [BLOCK_ROW, BLOCK_COL]
             tile: Tile with coordinates and shape
             mask: Optional mask (if None, computes from bounds)
             scale: Optional ScaleView for quantization scaling
             bias: Optional BiasView for bias addition
-        
+            signal: Optional SignalView for tile-level tracking
+            signal_num: Number of signals (constexpr, for signal tracking)
+            signal_map_type: Mapping type (constexpr, for signal tracking)
+            signal_block_m: Block group M (constexpr, for signal tracking)
+            signal_block_n: Block group N (constexpr, for signal tracking)
+            signal_launch_wave_id: Runtime launch-wave iteration index for
+                persistent-kernel signaling
+
         Example::
-        
+
             # Simple store (no epilogue)
             tensorC.store(acc.to(C.type.element_ty), out_tile)
-            
+
             # With full epilogue
             tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
+
+            # With signal tracking
+            tensorC.store(acc, out_tile, signal=signal_view,
+                         signal_num=16, signal_map_type=1)
         """
         result = data
-        
+
         # Apply quantization scales if provided
         if scale is not None:
             result = scale.apply(result, tile)
-        
+
         # Add bias if provided
         if bias is not None:
             result = bias.apply(result, tile)
-        
+
         # Type conversion to output dtype
         result = result.to(self.ptr.type.element_ty)
         
@@ -299,6 +314,13 @@ class OutputView:
         if mask is None:
             mask = bounds_mask
         tl.store(ptrs, result, mask=mask)
+
+        # Update counter after store completes
+        if signal is not None:
+            tl.debug_barrier()  # Ensure store visible before signal increment
+            signal.apply(tile, self.rows, self.cols, signal_launch_wave_id,
+                         signal_num, signal_map_type,
+                         signal_block_m, signal_block_n)
     
     @triton.jit
     def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = None):
