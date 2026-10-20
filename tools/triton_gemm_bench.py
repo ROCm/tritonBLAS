@@ -171,11 +171,17 @@ def get_tuning_space_with_selector(M, N, K, dtype_a, dtype_b, dtype_c, num_cus):
     Use origami selector to determine tile sizes, only tune other parameters.
     This dramatically reduces tuning space from ~40,000 to ~500 configs!
     """
-    from tritonblas.origami import MatmulHeuristicResult
+    from tritonblas.origami import OrigamiMatmulSelector
 
     # Get optimal tile configuration from selector
-    selector = MatmulHeuristicResult(M, N, K, dtype_a, dtype_b, dtype_c, streamk=False)
-    BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for OrigamiMatmulSelector")
+    device = torch.device("cuda:0")
+    selector = OrigamiMatmulSelector(M, N, K, dtype_a, dtype_b, dtype_c, device, streamk=False)
+    BLK_M = selector.block_m
+    BLK_N = selector.block_n
+    BLK_K = selector.block_k
+    gsize_m = selector.group_m
 
     # Only tune these parameters
     num_warps_range = [4, 8, 16]

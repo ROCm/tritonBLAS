@@ -1,7 +1,7 @@
 import functools
 import random
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 from torch.library import triton_op, wrap_triton
@@ -11,7 +11,7 @@ import triton
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
-from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .config import MatmulConfig, EpilogueConfig, PrologueConfig, matmul_preamble, COUNTER_STRIDE
 
 
 
@@ -24,7 +24,6 @@ MAX_BLOCK_SIZE = 65536
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
-
 
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
@@ -77,6 +76,8 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    epilogue_config: Optional[EpilogueConfig] = None,
+    prologue_config: Optional[PrologueConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -108,6 +109,13 @@ def persistent_matmul_lt(
         chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
     else:
         num_xcds = 1
+
+    # Work-stealing never forwards the sync configs, so reject them instead of silently dropping them
+    if work_stealing and (epilogue_config is not None or prologue_config is not None):
+        raise NotImplementedError(
+            "epilogue_config and prologue_config are only supported on the persistent_matmul path "
+            "(work_stealing=False)"
+        )
 
     if work_stealing and config is not None:
         grids = selector._hardware.N_CU
@@ -160,6 +168,9 @@ def persistent_matmul_lt(
     else:
         grids = total_tiles
 
+        (counter_ptr,), counter_kw = EpilogueConfig.resolve_launch_args(epilogue_config, M, N, BLK_M, BLK_N)
+        (wait_ptr, wait_expected_ptr), wait_kw = PrologueConfig.resolve_launch_args(prologue_config, M, N, BLK_M, BLK_N)
+
         kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
@@ -167,6 +178,9 @@ def persistent_matmul_lt(
             a_scale if quantized else None,
             b_scale if quantized else None,
             bias if bias is not None else None,
+            counter_ptr,
+            wait_ptr,
+            wait_expected_ptr,
             M,
             N,
             K,
@@ -186,6 +200,8 @@ def persistent_matmul_lt(
             CHUNK_SIZE=chunk_size,
             BIAS=bias is not None,
             EVEN_K=even_k,
+            **counter_kw,
+            **wait_kw,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
@@ -368,14 +384,24 @@ def streamk_matmul_lt(
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
-    enable_streamk=False, work_stealing=False
+    enable_streamk=False, work_stealing=False,
+    epilogue_config: Optional[EpilogueConfig] = None,
+    prologue_config: Optional[PrologueConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
+        if epilogue_config is not None or prologue_config is not None:
+            raise NotImplementedError(
+                "epilogue_config and prologue_config are only supported on the persistent_matmul path "
+                "(enable_streamk=False)"
+            )
         return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+        return persistent_matmul_lt(
+            a, b, c, selector, config, work_stealing=work_stealing,
+            epilogue_config=epilogue_config, prologue_config=prologue_config,
+        )
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
@@ -750,4 +776,3 @@ def addmm(
             "automatic differentiation, but one of the arguments requires grad."
         )
     return _addmm_out(bias, a, b, out, enable_streamk, sk_grid, work_stealing)
-

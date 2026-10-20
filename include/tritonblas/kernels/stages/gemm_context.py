@@ -96,8 +96,8 @@ class GemmContext:
         num_xcds=1,
         group_size_m=8,
         chunk_size=1,
-        cache_modifier_a=".cg",
-        cache_modifier_b=".cg",
+        cache_modifier_a=None,
+        cache_modifier_b=None,
         acc_dtype=tl.float32,
         allow_tf32=True,
         even_k=True,
@@ -114,8 +114,8 @@ class GemmContext:
             num_xcds: Number of XCDs for chiplet transform (default: 1)
             group_size_m: Group size for tile scheduling (default: 8)
             chunk_size: Chunk size for chiplet scheduling (default: 1)
-            cache_modifier_a: Cache modifier for A loads (default: ".cg")
-            cache_modifier_b: Cache modifier for B loads (default: ".cg")
+            cache_modifier_a: Cache modifier for A loads (default: None = compiler default)
+            cache_modifier_b: Cache modifier for B loads (default: None = compiler default)
             acc_dtype: Accumulator dtype (default: tl.float32)
             allow_tf32: Allow TF32 for matmul (default: True)
             even_k: Whether K is evenly divisible by BLOCK_K (default: True)

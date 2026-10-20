@@ -1,5 +1,6 @@
 import json
 import argparse
+import torch
 import tritonblas  # Ensure this module is available in your environment
 
 
@@ -10,10 +11,21 @@ def load_input_configs(filename):
 
 def process_configs(configs):
     results = []
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for OrigamiMatmulSelector")
+    device = torch.device("cuda:0")
+    # Default dtypes - can be made configurable if needed
+    a_dtype = torch.float16
+    b_dtype = torch.float16
+    c_dtype = torch.float16
+
     for cfg in configs:
         m, n, k = cfg["m"], cfg["n"], cfg["k"]
-        selector = tritonblas.MatmulHeuristicResult(m, n, k)
-        BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
+        selector = tritonblas.OrigamiMatmulSelector(m, n, k, a_dtype, b_dtype, c_dtype, device)
+        BLK_M = selector.block_m
+        BLK_N = selector.block_n
+        BLK_K = selector.block_k
+        gsize_m = selector.group_m
         results.append({"m": m, "n": n, "k": k, "BLK_M": BLK_M, "BLK_N": BLK_N, "BLK_K": BLK_K, "gsize_m": gsize_m})
     return results
 

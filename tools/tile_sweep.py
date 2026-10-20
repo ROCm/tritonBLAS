@@ -21,13 +21,13 @@ def perf_ms(ms, m, n, k):
 
 
 # Custom heuristic selector that forces TritonBLAS to use the provided macro tile.
-class CustomHeuristic(tritonblas.MatmulHeuristicResult):
-    def __init__(self, m, n, k, custom_tile, a_dtype, b_dtype, c_dtype):
+class CustomHeuristic(tritonblas.OrigamiMatmulSelector):
+    def __init__(self, m, n, k, custom_tile, a_dtype, b_dtype, c_dtype, device):
         """
         custom_tile: A tuple (BLK_M, BLK_N, BLK_K)
         """
         self.custom_tile = custom_tile
-        super().__init__(m, n, k, a_dtype, b_dtype, c_dtype)
+        super().__init__(m, n, k, a_dtype, b_dtype, c_dtype, device)
 
     def _get_best_tile_size(self):
         return self.custom_tile
@@ -69,8 +69,9 @@ def run_tritonblas_matmul(
         a_dtype=A.dtype,
         b_dtype=B.dtype,
         c_dtype=C.dtype,
+        device=torch.device("cuda:0"),
     )
-    config = selector.get_config()  # (BLK_M, BLK_N, BLK_K, group_size)
+    config = (selector.block_m, selector.block_n, selector.block_k, selector.group_m)
 
     # Benchmark
     cfg = tritonblas.matmul_preamble(selector)
@@ -87,12 +88,11 @@ def sweep_macro_tiles_tritonblas(m, n, k, a_dtype, b_dtype, c_dtype, transA, tra
     valid_tiles = list(itertools.product(block_mn_range, block_mn_range, block_k_range))
 
     # Default heuristic (for comparison)
-    default_selector = tritonblas.MatmulHeuristicResult(
-        m, n, k, a_dtype, b_dtype, c_dtype
+    default_selector = tritonblas.OrigamiMatmulSelector(
+        m, n, k, a_dtype, b_dtype, c_dtype, torch.device("cuda:0")
     )
-    heur_config = default_selector.get_config()
-    heur_tile = (heur_config[0], heur_config[1], heur_config[2])
-    gsize_m = heur_config[3]
+    heur_tile = (default_selector.block_m, default_selector.block_n, default_selector.block_k)
+    gsize_m = default_selector.group_m
     print(f"Default heuristic selected tile and gsize_m: {heur_tile} {gsize_m}\n")
 
     results = []

@@ -133,7 +133,20 @@ if __name__ == "__main__":
         0,
     )
     # Build configs for S0
-    full_list0 = tritonblas.MatmulHeuristicResult(S0, S0, S0)._get_valid_tiles()
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for OrigamiMatmulSelector")
+    device = torch.device("cuda:0")
+    dtype = torch.float16  # Default dtype for selector
+    selector0 = tritonblas.OrigamiMatmulSelector(S0, S0, S0, dtype, dtype, dtype, device)
+    # Try to access _get_valid_tiles if it exists, otherwise generate default tiles
+    if hasattr(selector0, '_get_valid_tiles'):
+        full_list0 = selector0._get_valid_tiles()
+    else:
+        # Fallback: generate default tile list
+        block_mn_range = [16, 32, 64, 128, 256]
+        block_k_range = [16, 32, 64, 128, 256, 512]
+        import itertools
+        full_list0 = list(itertools.product(block_mn_range, block_mn_range, block_k_range))
     unique0 = {(m, n, k) for (m, n, k, *_) in full_list0}
     tiles0 = sorted(unique0)[::-1]
     configs0 = [
@@ -184,7 +197,12 @@ if __name__ == "__main__":
         )
 
         # get tiles & configs
-        fl = tritonblas.MatmulHeuristicResult(S, S, S)._get_valid_tiles()
+        selector = tritonblas.OrigamiMatmulSelector(S, S, S, dtype, dtype, dtype, device)
+        if hasattr(selector, '_get_valid_tiles'):
+            fl = selector._get_valid_tiles()
+        else:
+            # Fallback: generate default tile list
+            fl = list(itertools.product(block_mn_range, block_mn_range, block_k_range))
         uniq = {(m, n, k) for (m, n, k, *_) in fl}
         tiles = sorted(uniq)[::-1]
         num_tiles = len(tiles)
