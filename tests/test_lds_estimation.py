@@ -367,7 +367,7 @@ class TestLdsVsPersistentKernel:
     """
 
     @staticmethod
-    def _compile_persistent(block_m, block_n, block_k, num_stages, dtype):
+    def _compile_persistent(block_m, block_n, block_k, num_stages, dtype, selector=None):
         import importlib
         import types
 
@@ -383,10 +383,11 @@ class TestLdsVsPersistentKernel:
                     compiled["kernel"] = self.fn.warmup(*args, grid=grid, **kwargs)
                 return call
 
-        selector = types.SimpleNamespace(
-            block_m=block_m, block_n=block_n, block_k=block_k,
-            group_m=8, num_sms=8, num_stages=num_stages,
-        )
+        if selector is None:
+            selector = types.SimpleNamespace(
+                block_m=block_m, block_n=block_n, block_k=block_k,
+                group_m=8, num_sms=8, num_stages=num_stages,
+            )
         a = torch.randn(1024, 1024, device="cuda").to(dtype)
         b = torch.randn(1024, 2048, device="cuda").to(dtype)
         c = torch.empty(1024, 2048, device="cuda").to(dtype)
@@ -419,3 +420,36 @@ class TestLdsVsPersistentKernel:
             assert actual <= estimated <= actual * 1.08, f"{desc}: estimated={estimated}, compiled={actual}"
         else:
             assert estimated == actual, f"{desc}: estimated={estimated}, compiled={actual}"
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("m,n,k", [
+        (64, 64, 32),
+        (256, 512, 512),
+        (512, 2048, 1024),
+        (1024, 2048, 1024),
+        (2048, 2048, 2048),
+        (4096, 4096, 4096),
+        (4096, 3584, 8192),
+        (8192, 8192, 8192),
+        (16384, 3584, 8192),
+    ])
+    def test_selected_tile_fits_device_lds(self, m, n, k, dtype):
+        """Whatever tile the selector picks must compile within the device's LDS.
+
+        This is the end-to-end property behind the "out of resource: shared
+        memory" launch failures: the LDS filter in OrigamiMatmulSelector must
+        never let through a tile persistent_matmul cannot fit.
+        """
+        import importlib
+
+        mm = importlib.import_module("tritonblas.matmul")
+        selector = mm._make_matmul_selector(m, n, k, dtype, dtype, dtype, torch.device("cuda", 0))
+        if selector._arch_name != get_arch():
+            pytest.skip("cross-compiling for a different arch than the selector's hardware")
+        shared = self._compile_persistent(
+            selector.block_m, selector.block_n, selector.block_k, selector.num_stages, dtype, selector=selector
+        )
+        assert shared <= selector._hardware.lds_capacity, (
+            f"{selector.block_m}x{selector.block_n}x{selector.block_k} {dtype} on {selector._arch_name}: "
+            f"needs {shared} B, device has {selector._hardware.lds_capacity} B"
+        )
