@@ -1,0 +1,24 @@
+name: Lint
+
+# ruff, moved here from the GPU-runner Tests workflow (test.yml) so it runs on every PR.
+# Advisory like it was there: findings show as annotations without failing the check.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ruff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ruff
+        run: |
+          pip3 install ruff
+          ruff check include/ tests/ --output-format=github
+        continue-on-error: true
