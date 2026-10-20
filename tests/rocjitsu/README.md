@@ -60,7 +60,7 @@ Recorded as xfail so the tiers stay green and new failures stand out. `--rj-run-
 |---|---|
 | `test_rj_exact.py::test_k1_known_bug` | K=1: Triton specializes `K == 1` to a constant, so `GemmContext.reduce_axis` computes `num_k_tiles = cdiv(1, BLOCK_K) - 1 = 0` and `tl.assume(num_k_tiles > 0)` becomes `assume(false)`; the kernel body is dropped. gfx950 memory fault, gfx942 wrong result. |
 | `test_rj_exact.py::test_addmm_exact[*-streamk]` | Stream-K's non-quantized epilogue adds the bias after rounding to the output dtype, so it can be 1 ulp off `torch.addmm` at a tie. |
-| 17 `enable_streamk=True, work_stealing=True` cases in the matmul/addmm correctness suites (listed in `pytest_rj.py`) | Wrong results under rocjitsu, up to half the output, on gfx942 and gfx950. Not yet reproduced on hardware. |
+| every `enable_streamk=True, work_stealing=True` case in the matmul/addmm correctness suites | Wrong results under rocjitsu, up to ~all of the output. Which cases fail depends on earlier launches in the same process (a shape passes fresh and fails mid-session), so all are non-strict xfail. Not yet reproduced on hardware. |
 | `*_skinny_matrices` on gfx942 (skipped) | The tests' `torch.mm` reference (hipBLASLt) never completes under rocjitsu on gfx942 for these shapes; tritonBLAS itself finishes in ~1 s. Emulator/reference issue, not tritonBLAS. |
 
 ## Arch coverage

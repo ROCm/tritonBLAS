@@ -18,32 +18,15 @@ _PERF_FILES = {"test_performance.py"}
 # Known failures under rocjitsu, marked so the tiers stay green and a new failure stands out.
 # --rj-run-known-failures runs them as plain tests.
 #
-# Stream-K + work stealing (enable_streamk=True, work_stealing=True) gives wrong results for these
-# parametrizations (up to half the output), deterministically. Union over gfx942/gfx950 and two
-# rocjitsu builds; the exact set shifts slightly between them, hence xfail(strict=False). Keyed by
-# (test, dtype, m, n, k) so the torch.compile variants are covered too. Not yet reproduced on
-# hardware.
-_BF16, _FP16 = "torch.bfloat16", "torch.float16"
-_SK_WS_FAILURES = {
-    ("test_matmul_forward_correctness", _FP16, 8, 128, 256),
-    ("test_matmul_backward_correctness", _BF16, 128, 256, 512),
-    ("test_matmul_backward_correctness", _BF16, 256, 256, 256),
-    ("test_matmul_backward_correctness", _FP16, 128, 256, 512),
-    ("test_matmul_backward_correctness", _FP16, 256, 256, 256),
-    ("test_matmul_skinny_matrices", _BF16, 32, 32, 8192),
-    ("test_matmul_skinny_matrices", _FP16, 32, 32, 8192),
-    ("test_matmul_inplace_without_grad_works",),
-    ("test_addmm_forward_correctness", _BF16, 256, 256, 256),
-    ("test_addmm_forward_correctness", _FP16, 256, 256, 256),
-    ("test_addmm_backward_correctness", _BF16, 128, 256, 512),
-    ("test_addmm_backward_correctness", _BF16, 256, 256, 256),
-    ("test_addmm_backward_correctness", _FP16, 8, 128, 256),
-    ("test_addmm_backward_correctness", _FP16, 128, 256, 512),
-    ("test_addmm_backward_correctness", _FP16, 256, 256, 256),
-    ("test_addmm_skinny_matrices", _BF16, 32, 32, 8192),
-    ("test_addmm_skinny_matrices", _FP16, 32, 32, 8192),
-}
-_SK_WS_REASON = "Stream-K + work stealing gives wrong results under rocjitsu; unconfirmed on hardware"
+# Stream-K + work stealing (enable_streamk=True, work_stealing=True) gives wrong results under
+# rocjitsu (up to ~all of the output). Which parametrizations fail depends on what ran earlier in
+# the same process: the same shape passes in a fresh process and fails mid-session, and the set
+# differs between CI shards and machines. So every such case is xfail(strict=False) rather than a
+# fixed list. Not yet reproduced on hardware.
+_SK_WS_REASON = (
+    "Stream-K + work stealing gives wrong results under rocjitsu, depending on prior launches in "
+    "the process; unconfirmed on hardware"
+)
 # On gfx942 the tests' torch.mm reference (hipBLASLt) never completes for the skinny shapes under
 # rocjitsu (tritonBLAS itself finishes in ~1 s), so each would burn the whole per-test timeout.
 _GFX942_SKINNY_REASON = "torch.mm reference (hipBLASLt) hangs under rocjitsu on gfx942 for skinny shapes"
@@ -100,10 +83,7 @@ def _mark_known_failures(item, params, arch):
     if arch == "gfx942" and "skinny" in name:
         item.add_marker(pytest.mark.skip(reason=_GFX942_SKINNY_REASON))
         return
-    if not (params.get("enable_streamk") is True and params.get("work_stealing") is True):
-        return
-    key = (name,) if "m" not in params else (name, str(params.get("dtype")), params["m"], params["n"], params["k"])
-    if key in _SK_WS_FAILURES:
+    if params.get("enable_streamk") is True and params.get("work_stealing") is True:
         item.add_marker(pytest.mark.xfail(strict=False, reason=_SK_WS_REASON))
 
 
