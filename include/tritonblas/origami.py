@@ -4,6 +4,13 @@ import torch
 import origami
 import math
 from math import ceil
+from typing import Optional
+
+
+# gfx950 pads 16-bit LDS tiles. The amount depends on the kernel and operand
+# layout: observed 1/64..1/32 of A and 1/32..1/16 of B per stage, so 1/16 is
+# used as an upper bound for every 16-bit operand. fp32/fp8/int8 are unpadded.
+_GFX950_PADDING_16BIT = 17 / 16
 
 
 def estimate_triton_lds_bytes(
@@ -13,25 +20,37 @@ def estimate_triton_lds_bytes(
     bytes_a: float,
     bytes_b: float,
     num_stages: int = 2,
+    arch: Optional[str] = None,
 ) -> float:
     """
     Estimate Triton kernel LDS (shared memory) usage in bytes for AMD GPUs.
 
     Triton's AMD backend uses swizzled_shared / amd_rotating_shared encodings
-    which rearrange bank addressing without adding padding bytes.  The LDS
-    footprint is therefore the raw tile bytes times the number of pipeline
-    buffers:
+    which rearrange bank addressing without adding padding bytes on gfx942.
 
-      ns == 1:  max(A_bytes, B_bytes)   — no pipelining, sequential alloc
-      ns >= 2:  (ns - 1) * (A_bytes + B_bytes)  — software-pipelined
+    gfx942 and other architectures (default, ``arch=None``):
 
-    Validated against metadata.shared from compiled Triton kernels on gfx942
-    (Triton 3.6.0+rocm7.2.0): 35/35 configs matched exactly.
+      ns == 1:  max(A_bytes, B_bytes)   - no pipelining, sequential alloc
+      ns >= 2:  (ns - 1) * (A_bytes + B_bytes)   - software-pipelined
+
+      Validated against metadata.shared from compiled Triton kernels on gfx942
+      (Triton 3.6.0+rocm7.2.0): exact for bf16/fp16/fp32/fp8/int8, ns = 1..4.
+
+    gfx950:
+
+      ns == 1:  max(A_bytes, B_bytes)
+      ns >= 2:  ns * (A_bytes + B_bytes), one buffer set per stage instead of
+                ns - 1, and 16-bit operands are padded by up to ~6%.
+
+      The ns >= 2 figure is an upper bound: the padding varies with the kernel
+      and operand layout, so the estimate never undercounts the compiled kernel.
 
     Args:
         block_m, block_n, block_k: Tile dimensions (MT_M, MT_N, MT_K).
         bytes_a, bytes_b: Bytes per element for A and B (e.g. 2 for bf16/fp16).
         num_stages: Pipeline stages (1, 2, or 3); Triton matmul uses 2 by default.
+        arch: GPU architecture name such as "gfx950". None selects the
+            gfx942 model.
 
     Returns:
         Estimated total LDS usage in bytes.
@@ -40,6 +59,10 @@ def estimate_triton_lds_bytes(
     b_bytes = block_k * block_n * bytes_b
     if num_stages <= 1:
         return max(a_bytes, b_bytes)
+    if arch == "gfx950":
+        pad_a = _GFX950_PADDING_16BIT if bytes_a == 2 else 1
+        pad_b = _GFX950_PADDING_16BIT if bytes_b == 2 else 1
+        return math.ceil(num_stages * (a_bytes * pad_a + b_bytes * pad_b))
     return (num_stages - 1) * (a_bytes + b_bytes)
 
 
@@ -51,10 +74,11 @@ def check_triton_lds_capacity(
     bytes_b: float,
     lds_capacity: int,
     num_stages: int = 2,
+    arch: Optional[str] = None,
 ) -> bool:
     """Return True if estimated Triton LDS usage fits within lds_capacity."""
     usage = estimate_triton_lds_bytes(
-        block_m, block_n, block_k, bytes_a, bytes_b, num_stages
+        block_m, block_n, block_k, bytes_a, bytes_b, num_stages, arch
     )
     return usage <= lds_capacity
 
@@ -68,10 +92,11 @@ class OrigamiMatmulSelector:
         bytes_a: float,
         bytes_b: float,
         num_stages: int = 2,
+        arch: Optional[str] = None,
     ) -> float:
         """Class-level wrapper for estimate_triton_lds_bytes."""
         return estimate_triton_lds_bytes(
-            block_m, block_n, block_k, bytes_a, bytes_b, num_stages
+            block_m, block_n, block_k, bytes_a, bytes_b, num_stages, arch
         )
 
     # https://docs.pytorch.org/docs/stable/tensors.html
@@ -208,7 +233,8 @@ class OrigamiMatmulSelector:
             c
             for c in self._configs
             if check_triton_lds_capacity(
-                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, self._num_stages
+                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, self._num_stages,
+                self._arch_name,
             )
         ]
         if not self._configs:
@@ -234,7 +260,7 @@ class OrigamiMatmulSelector:
         )
 
         # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages, self._arch_name) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256
