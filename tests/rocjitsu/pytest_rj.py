@@ -63,7 +63,8 @@ def pytest_configure(config):
 
 
 def _gflop(params):
-    m, n, k = params.get("m"), params.get("n"), params.get("k")
+    # Most suites name the dimensions m, n, k; test_matmul_fp4.py uses M, N, K.
+    m, n, k = (params.get(d, params.get(d.upper())) for d in "mnk")
     if not all(isinstance(v, int) for v in (m, n, k)):
         return None
     return 2.0 * m * n * k / 1e9

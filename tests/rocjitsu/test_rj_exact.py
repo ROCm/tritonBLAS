@@ -48,8 +48,10 @@ LAYOUTS = [("row", "row"), ("col", "row"), ("row", "col"), ("col", "col")]
 
 
 def _ints(rows, cols, dtype, layout, gen):
+    # Explicit device="cpu" throughout: another test module (test_matmul_fp4.py) sets the default
+    # device to CUDA at import, which would otherwise move these CPU-generator draws onto CUDA.
     shape = (rows, cols) if layout == "row" else (cols, rows)
-    t = torch.randint(-2, 3, shape, generator=gen, dtype=torch.int32).to(dtype)
+    t = torch.randint(-2, 3, shape, generator=gen, dtype=torch.int32, device="cpu").to(dtype)
     t = t.cuda()
     return t if layout == "row" else t.T
 
@@ -143,7 +145,7 @@ ADDMM_MODES = [pytest.param(m, marks=[_SK_BIAS_ROUNDING] if m == "streamk" else 
 def test_addmm_exact(m, n, k, in_dtype, out_dtype, mode):
     a, b = _inputs(m, n, k, in_dtype, seed=2)
     gen = torch.Generator().manual_seed(3)
-    bias = torch.randint(-8, 9, (n,), generator=gen, dtype=torch.int32).to(out_dtype).cuda()
+    bias = torch.randint(-8, 9, (n,), generator=gen, dtype=torch.int32, device="cpu").to(out_dtype).cuda()
     out = torch.full((m, n), float("nan"), dtype=out_dtype, device="cuda")
     tritonblas.addmm(bias, a, b, out=out, **_flags(mode))
     _assert_exact(out, _ref(a, b, out_dtype, bias))
