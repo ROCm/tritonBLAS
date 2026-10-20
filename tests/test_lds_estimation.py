@@ -9,7 +9,7 @@ The AMD LDS model (validated 35/35 against Triton 3.6.0+rocm7.2.0 on gfx942):
   ns >= 2:  (ns - 1) * (A_bytes + B_bytes)   — software-pipelined buffers
 
 gfx950 differs: ns >= 2 allocates ns buffer sets (not ns - 1) and pads 16-bit
-operands, so the estimate there is an upper bound (see the gfx950 tests).
+operands by 16 elements per 512 (see the gfx950 tests).
 
 Tests cover:
 - estimate_triton_lds_bytes: AMD LDS model
@@ -119,7 +119,11 @@ class TestEstimateTritonLdsBytes:
 
 
 class TestEstimateTritonLdsBytesGfx950:
-    """gfx950 model: ns buffer sets (not ns - 1) plus padding on 16-bit operands."""
+    """gfx950 model: ns buffer sets (not ns - 1) plus padding on 16-bit operands.
+
+    Expected values were measured from compiled kernels (persistent_matmul and
+    a plain tl.dot loop, 16x16 MFMA) with Triton 3.6.0.
+    """
 
     def test_default_arch_is_unchanged(self):
         """arch=None and non-gfx950 archs keep the gfx942 model."""
@@ -140,18 +144,28 @@ class TestEstimateTritonLdsBytesGfx950:
         assert estimate_triton_lds_bytes(128, 128, 64, 1, 1, 2, "gfx950") == 32768
         assert estimate_triton_lds_bytes(256, 256, 64, 1, 1, 3, "gfx950") == 98304
 
-    def test_16bit_is_padded_upper_bound(self):
-        """16-bit operands carry padding, so the estimate exceeds ns * (A + B)."""
-        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950") > 2 * 32768
-        # Triton reported 135104 for 256x256x64 f16 ns=2 (persistent_matmul)
-        assert estimate_triton_lds_bytes(256, 256, 64, 2, 2, 2, "gfx950") >= 135104
+    def test_16bit_padded_layout(self):
+        """16-bit operands add 16 elements after every 512 (per operand buffer)."""
+        # Without padding these would be 65536 and 131072
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950") == 67520
+        assert estimate_triton_lds_bytes(256, 256, 64, 2, 2, 2, "gfx950") == 135104
+        assert estimate_triton_lds_bytes(64, 64, 256, 2, 2, 3, "gfx950") == 202688
+        assert estimate_triton_lds_bytes(32, 16, 256, 2, 2, 2, "gfx950") == 50624
+
+    def test_padding_formula(self):
+        """n + ((n - 1) // 512) * 16 elements, for n = ns * tile elements."""
+        # A: 2 * 128*128 = 32768 -> +63*16; B: 2 * 128*256 = 65536 -> +127*16
+        assert estimate_triton_lds_bytes(128, 256, 128, 2, 2, 2, "gfx950") == (
+            (32768 + 63 * 16) * 2 + (65536 + 127 * 16) * 2
+        )
 
     def test_mixed_dtypes_pad_only_16bit_operand(self):
-        """Only the 2-byte operand is padded."""
+        """Only the 2-byte operand is padded (derived from Triton's per-operand
+        layout choice; not measured on a compiled mixed-dtype kernel)."""
         both = estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950")
         mixed = estimate_triton_lds_bytes(128, 128, 64, 1, 2, 2, "gfx950")
-        # A: 8192 unpadded, B: 16384 padded by 17/16
-        assert mixed == 2 * (8192 + 16384 * 17 // 16)
+        # A: 2 * 128*64 elems, 1 B, unpadded. B: 2 * 64*128 = 16384 elems + 31*16, 2 B
+        assert mixed == 16384 + (16384 + 31 * 16) * 2
         assert mixed < both
 
     def test_ci_oom_regression_128x256x128_f16(self):
@@ -162,12 +176,12 @@ class TestEstimateTritonLdsBytesGfx950:
         """
         gfx950_lds = 163840
         assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2) is True  # old, wrong
-        assert estimate_triton_lds_bytes(128, 256, 128, 2, 2, 2, "gfx950") >= 202688
+        assert estimate_triton_lds_bytes(128, 256, 128, 2, 2, 2, "gfx950") == 202688
         assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2, "gfx950") is False
         assert check_triton_lds_capacity(256, 128, 128, 2, 2, gfx950_lds, 2, "gfx950") is False
 
     def test_tiles_that_fit_on_gfx950_still_pass(self):
-        """The upper bound must not reject tiles that really fit in 160KB."""
+        """The model must not reject tiles that really fit in 160KB."""
         gfx950_lds = 163840
         # Triton reported 135104 and 67520 B for these f16 tiles
         assert check_triton_lds_capacity(256, 256, 64, 2, 2, gfx950_lds, 2, "gfx950") is True
@@ -293,17 +307,13 @@ class TestLdsVsCompiledKernel:
     """Validate LDS estimates against metadata.shared from compiled Triton kernels.
 
     This is the ground truth: Triton's compiler reports exact LDS allocation.
-    The estimate must match exactly on gfx942; on gfx950 it is an upper bound
-    (never below the compiled size, at most 8% above).  Kernels are compiled
-    for the architecture of the GPU running the tests.
+    Our model must match exactly.  Kernels are compiled for the architecture of
+    the GPU running the tests, with the options tritonBLAS uses (16x16 MFMA).
     """
 
     @staticmethod
     def _check(estimated, actual, desc):
-        if get_arch() == "gfx950":
-            assert actual <= estimated <= actual * 1.08, f"{desc}: estimated={estimated}, compiled={actual}"
-        else:
-            assert estimated == actual, f"{desc}: estimated={estimated}, compiled={actual}"
+        assert estimated == actual, f"{desc}: estimated={estimated}, compiled={actual}"
 
     @staticmethod
     def _compile_and_get_lds(block_m, block_n, block_k, num_stages, dtype):
@@ -361,9 +371,8 @@ class TestLdsVsCompiledKernel:
 class TestLdsVsPersistentKernel:
     """Validate the estimate against the real persistent_matmul kernel.
 
-    The padding on gfx950 depends on the kernel, so the plain-loop kernel above
-    is not enough: the estimate must also never undercount what
-    persistent_matmul compiles to, since that is what OutOfResources hits.
+    The gfx950 padding depends on the kernel's MFMA shape, so also check the
+    kernel that actually launches: persistent_matmul is what OutOfResources hits.
     """
 
     @staticmethod
@@ -409,17 +418,15 @@ class TestLdsVsPersistentKernel:
         (128, 256, 128),
         (256, 256, 64),
     ])
-    def test_estimate_never_undercounts(self, block_m, block_n, block_k, dtype, bytes_per_elem):
+    def test_estimate_matches_compiled(self, block_m, block_n, block_k, dtype, bytes_per_elem):
         num_stages = 2
         actual = self._compile_persistent(block_m, block_n, block_k, num_stages, dtype)
         estimated = estimate_triton_lds_bytes(
             block_m, block_n, block_k, bytes_per_elem, bytes_per_elem, num_stages, get_arch()
         )
-        desc = f"{block_m}x{block_n}x{block_k} {dtype} ns={num_stages}"
-        if get_arch() == "gfx950":
-            assert actual <= estimated <= actual * 1.08, f"{desc}: estimated={estimated}, compiled={actual}"
-        else:
-            assert estimated == actual, f"{desc}: estimated={estimated}, compiled={actual}"
+        assert estimated == actual, (
+            f"{block_m}x{block_n}x{block_k} {dtype} ns={num_stages}: estimated={estimated}, compiled={actual}"
+        )
 
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
     @pytest.mark.parametrize("m,n,k", [

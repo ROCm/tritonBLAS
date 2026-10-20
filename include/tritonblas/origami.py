@@ -7,10 +7,20 @@ from math import ceil
 from typing import Optional
 
 
-# gfx950 pads 16-bit LDS tiles. The amount depends on the kernel and operand
-# layout: observed 1/64..1/32 of A and 1/32..1/16 of B per stage, so 1/16 is
-# used as an upper bound for every 16-bit operand. fp32/fp8/int8 are unpadded.
-_GFX950_PADDING_16BIT = 17 / 16
+# gfx950 (CDNA4) pipelines loads with async copies and, for 16-bit operands,
+# stores tiles in a padded LDS layout: PADDING elements are inserted after every
+# INTERVAL elements (Triton: composePaddedLayoutForAsyncCopyCDNA4 in
+# third_party/amd/lib/TritonAMDGPUTransforms/Utility.cpp).
+#   INTERVAL = warp_size (64) * 8 elements
+#   PADDING  = 16 for both operands with 16x16 MFMA (matrix_instr_nonkdim=16,
+#              kWidth=8), which is what the tritonBLAS kernels use
+_GFX950_PAD_INTERVAL = 512
+_GFX950_PAD_ELEMS = 16
+
+
+def _gfx950_padded_elems(num_elems: int) -> int:
+    """Elements occupied by a padded buffer of num_elems elements."""
+    return num_elems + ((num_elems - 1) // _GFX950_PAD_INTERVAL) * _GFX950_PAD_ELEMS
 
 
 def estimate_triton_lds_bytes(
@@ -25,10 +35,9 @@ def estimate_triton_lds_bytes(
     """
     Estimate Triton kernel LDS (shared memory) usage in bytes for AMD GPUs.
 
-    Triton's AMD backend uses swizzled_shared / amd_rotating_shared encodings
-    which rearrange bank addressing without adding padding bytes on gfx942.
-
-    gfx942 and other architectures (default, ``arch=None``):
+    gfx942 and other architectures (default, ``arch=None``): swizzled_shared /
+    amd_rotating_shared encodings rearrange bank addressing without adding
+    padding bytes.
 
       ns == 1:  max(A_bytes, B_bytes)   - no pipelining, sequential alloc
       ns >= 2:  (ns - 1) * (A_bytes + B_bytes)   - software-pipelined
@@ -39,11 +48,16 @@ def estimate_triton_lds_bytes(
     gfx950:
 
       ns == 1:  max(A_bytes, B_bytes)
-      ns >= 2:  ns * (A_bytes + B_bytes), one buffer set per stage instead of
-                ns - 1, and 16-bit operands are padded by up to ~6%.
+      ns >= 2:  one buffer set per stage, i.e. ns * tile elements per operand
+                (not ns - 1).  16-bit operands use a padded layout that adds
+                16 elements after every 512, so each operand occupies
+                ``n + ((n - 1) // 512) * 16`` elements for ``n = ns * tile``.
+                Other dtypes are unpadded.
 
-      The ns >= 2 figure is an upper bound: the padding varies with the kernel
-      and operand layout, so the estimate never undercounts the compiled kernel.
+      This is exact when the padded layout is used, which needs the async-copy
+      path, 16x16 MFMA with kWidth 8 and a tile large enough to wrap the
+      padding.  Otherwise Triton falls back to the unpadded layout and uses
+      less, so the estimate is then a safe upper bound.
 
     Args:
         block_m, block_n, block_k: Tile dimensions (MT_M, MT_N, MT_K).
@@ -60,9 +74,13 @@ def estimate_triton_lds_bytes(
     if num_stages <= 1:
         return max(a_bytes, b_bytes)
     if arch == "gfx950":
-        pad_a = _GFX950_PADDING_16BIT if bytes_a == 2 else 1
-        pad_b = _GFX950_PADDING_16BIT if bytes_b == 2 else 1
-        return math.ceil(num_stages * (a_bytes * pad_a + b_bytes * pad_b))
+        a_elems = num_stages * block_m * block_k
+        b_elems = num_stages * block_k * block_n
+        if bytes_a == 2:
+            a_elems = _gfx950_padded_elems(a_elems)
+        if bytes_b == 2:
+            b_elems = _gfx950_padded_elems(b_elems)
+        return a_elems * bytes_a + b_elems * bytes_b
     return (num_stages - 1) * (a_bytes + b_bytes)
 
 
