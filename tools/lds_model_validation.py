@@ -11,9 +11,13 @@ Usage:
     python tools/lds_model_validation.py --arch gfx950  # cross-compile for gfx950
 
 Model (see estimate_triton_lds_bytes for the full description):
-- gfx942 and others: ns == 1: max(A, B); ns >= 2: (ns - 1) * (A + B), exact.
-- gfx950: ns >= 2: ns * (A + B), plus up to ~6% padding on 16-bit operands,
-  so the estimate is an upper bound there.
+- gfx942 and others: ns == 1: max(A, B); ns >= 2: (ns - 1) * (A + B).
+- gfx950: ns >= 2: ns buffer sets, with 16 padding elements after every 512 on
+  16-bit operands (CDNA4 async-copy padded layout).
+
+Kernels are compiled with the options tritonBLAS uses (16x16 MFMA, 8 warps),
+since the gfx950 padding depends on the MFMA instruction shape.  The model is
+expected to match exactly.
 """
 import os
 import sys
@@ -90,15 +94,9 @@ def get_lds(kernel, bm, bn, bk, ns, dtype):
         a, b, c, M, N, K,
         a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1),
         BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, NUM_STAGES=ns, grid=(1,),
+        matrix_instr_nonkdim=16, num_warps=8,  # as in tritonblas.matmul
     )
     return compiled.metadata.shared
-
-
-def is_match(model, actual):
-    """gfx942: exact. gfx950: the estimate is an upper bound within 8%."""
-    if get_arch() == "gfx950":
-        return actual <= model <= actual * 1.08
-    return model == actual
 
 
 def model_lds(bm, bn, bk, bpe, ns):
@@ -150,7 +148,7 @@ if __name__ == "__main__":
             print(f"  {bm:>3d}x{bn:>3d}x{bk:>3d} ns={ns}   {bpe}  {model:>8d}  {'ERR':>8s}  {'':>5s}  {str(e)[:20]}")
             continue
 
-        match = is_match(model, actual)
+        match = model == actual
         total += 1
         if not match:
             mismatches += 1
@@ -178,7 +176,7 @@ if __name__ == "__main__":
             print(f"  {bm:>3d}x{bn:>3d}x{bk:>3d} ns={ns}   {bpe}  {model:>8d}  {'ERR':>8s}  {'':>5s}  {str(e)[:40]}")
             continue
 
-        match = is_match(model, actual)
+        match = model == actual
         total += 1
         if not match:
             mismatches += 1
