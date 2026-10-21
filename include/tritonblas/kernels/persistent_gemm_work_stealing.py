@@ -8,7 +8,7 @@ available tile via an atomic counter that is local to its XCD.
 PIDs are assigned round-robin across XCDs:
     pid 0 -> XCD 0, pid 1 -> XCD 1, ..., pid 7 -> XCD 7, pid 8 -> XCD 0, ...
 
-Supports three scheduling modes (selected via constexpr flags):
+Supports four scheduling modes (selected via constexpr flags):
 
 1. Per-XCD/Slot (default):
    Each XCD has COUNTERS_PER_XCD independent counters. The XCD's tile region
@@ -24,6 +24,13 @@ Supports three scheduling modes (selected via constexpr flags):
    Level 2: Global fallback counter -- once an XCD exhausts its local pool,
    WGs steal from a shared global_counter covering the remaining tiles.
    This absorbs wave quantization imbalance across XCDs.
+
+4. Neighbor Stealing (NEIGHBOR_STEALING=True):
+   Each XCD has a per-XCD counter with tiles_per_xcd tiles. When a WG
+   exhausts its own XCD's tiles, it rotates to steal from the next XCD's
+   counter (XCD+1, XCD+2, ..., wrapping around). This provides the same
+   cross-XCD load balancing as hierarchical mode but without a centralized
+   global queue -- contention stays distributed across per-XCD counters.
 """
 
 import triton
@@ -71,6 +78,7 @@ def ws_persistent_matmul(
     HIERARCHICAL: tl.constexpr = False,
     LOCAL_TILES_PER_XCD: tl.constexpr = 0,
     GLOBAL_TILES: tl.constexpr = 0,
+    NEIGHBOR_STEALING: tl.constexpr = False,
     USE_MASK: tl.constexpr = True,
     mask_ptr=None,
 ):
@@ -277,8 +285,10 @@ def ws_persistent_matmul(
                         c = acc + bias_float[None, :]
                         c = c.to(C.type.element_ty)
                     else:
-                        c = acc.to(C.type.element_ty)
-                        c += bias[None, :]
+                        # Add bias in fp32 accumulator precision before
+                        # downcasting; matches the canonical pattern used
+                        # in the other branches.
+                        c = (acc + bias[None, :]).to(C.type.element_ty)
                 else:
                     c = acc.to(C.type.element_ty)
 
@@ -289,6 +299,135 @@ def ws_persistent_matmul(
                 tl.store(C_, c, c_mask)
 
                 raw_idx = next_raw_idx
+    elif NEIGHBOR_STEALING:
+        # ================================================================
+        # Neighbor-Stealing: per-XCD counters with cross-XCD rotation
+        #
+        # Each XCD has its own atomic counter bounded by tiles_per_xcd.
+        # When a WG exhausts its home XCD, it probes neighbor XCD counters
+        # (XCD+1, +2, ...) and steals remaining tiles using THEIR counter
+        # to coordinate. This avoids a centralized global queue while
+        # providing cross-XCD load balancing.
+        #
+        # Implemented as a flat state-machine while loop:
+        #   - `steal_offset` tracks which XCD we're targeting (0=home)
+        #   - inner branch: if raw_idx < bound, process tile; else advance
+        #   - advancing: increment steal_offset, probe next counter
+        #
+        # Key advantage over global atomic: at most ~38 native CUs + a few
+        # stealers compete on any counter (vs 304 CUs on one global).
+        # ================================================================
+        tiles_per_xcd = tl.cdiv(total_tiles, NUM_XCDS)
+
+        # Start with home XCD. The maximum(0, ...) clamp guards against
+        # the case total_tiles < target_base (an empty trailing XCD when
+        # tiles_per_xcd * NUM_XCDS > total_tiles). Without the clamp, the
+        # signed-int comparison still works, but the explicit clamp avoids
+        # relying on signed-overflow semantics in the Triton lowering.
+        steal_offset = 0
+        target_xcd = xcd_id
+        target_base = target_xcd * tiles_per_xcd
+        target_count = tl.maximum(0, tl.minimum(tiles_per_xcd, total_tiles - target_base))
+        counter_ptr = tile_counter + target_xcd * COUNTER_STRIDE
+        raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
+
+        while steal_offset < NUM_XCDS:
+            if raw_idx < target_count:
+                tile_id = target_base + raw_idx
+
+                group_id = tile_id // num_pid_in_group
+                first_pid_m = group_id * GROUP_SIZE_M
+                group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+                pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+                pid_n = (tile_id % num_pid_in_group) // group_size_m
+                tl.assume(pid_m >= 0)
+                tl.assume(pid_n >= 0)
+
+                rm_raw = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                rn_raw = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+                mask_m = rm_raw < M
+                mask_n = rn_raw < N
+
+                rm = tl.max_contiguous(tl.multiple_of(rm_raw % M, BLOCK_SIZE_M), BLOCK_SIZE_M)
+                rn = tl.max_contiguous(tl.multiple_of(rn_raw % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+                A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
+                B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+
+                if BIAS:
+                    bias_ = bias_ptr + rn * stride_bias
+                    bias = tl.load(bias_, mask=mask_n, other=0.0)
+
+                acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+                for k in range(0, loop_k):
+                    if stride_ak == 1:
+                        a = tl.load(tl.multiple_of(A_BASE, (1, 16)), mask=mask_m[:, None], other=0.0, cache_modifier=CACHE_MODIFIER_A)
+                    else:
+                        a = tl.load(tl.multiple_of(A_BASE, (16, 1)), mask=mask_m[:, None], other=0.0, cache_modifier=CACHE_MODIFIER_A)
+                    if stride_bk == 1:
+                        b = tl.load(tl.multiple_of(B_BASE, (16, 1)), mask=mask_n[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_B)
+                    else:
+                        b = tl.load(tl.multiple_of(B_BASE, (1, 16)), mask=mask_n[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_B)
+                    if QUANTIZED:
+                        acc += tl.dot(a, b, input_precision="ieee")
+                    else:
+                        acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+                    A_BASE += BLOCK_SIZE_K * stride_ak
+                    B_BASE += BLOCK_SIZE_K * stride_bk
+
+                if has_remainder:
+                    k = loop_k
+                    rk_rem = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+                    A_REM = A + rm[:, None] * stride_am + rk_rem[None, :] * stride_ak
+                    B_REM = B + rk_rem[:, None] * stride_bk + rn[None, :] * stride_bn
+                    if stride_ak == 1:
+                        A_REM = tl.multiple_of(A_REM, (1, 16))
+                    else:
+                        A_REM = tl.multiple_of(A_REM, (16, 1))
+                    if stride_bk == 1:
+                        B_REM = tl.multiple_of(B_REM, (16, 1))
+                    else:
+                        B_REM = tl.multiple_of(B_REM, (1, 16))
+                    a = tl.load(A_REM, mask=mask_m[:, None] & (rk_rem[None, :] < K), other=0.0, cache_modifier=CACHE_MODIFIER_A)
+                    b = tl.load(B_REM, mask=mask_n[None, :] & (rk_rem[:, None] < K), other=0.0, cache_modifier=CACHE_MODIFIER_B)
+                    if QUANTIZED:
+                        acc += tl.dot(a, b, input_precision="ieee")
+                    else:
+                        acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+
+                if QUANTIZED:
+                    A_scale = tl.load(A_scale_ptr + rm_raw, mask=mask_m, other=1.0)
+                    B_scale = tl.load(B_scale_ptr + rn_raw, mask=mask_n, other=1.0)
+                    acc *= A_scale[:, None] * B_scale[None, :]
+
+                if BIAS:
+                    if QUANTIZED:
+                        bias_float = bias.to(tl.float32)
+                        c = acc + bias_float[None, :]
+                        c = c.to(C.type.element_ty)
+                    else:
+                        c = (acc + bias[None, :]).to(C.type.element_ty)
+                else:
+                    c = acc.to(C.type.element_ty)
+
+                # Issue next atomic_add early so the long-latency cross-XCD
+                # atomic overlaps with the global store. Matches the pattern
+                # used in the per-XCD/slot, hierarchical, and global modes.
+                next_raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
+
+                c_mask = mask_m[:, None] & mask_n[None, :]
+                C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+                tl.store(C_, c, c_mask)
+
+                raw_idx = next_raw_idx
+            else:
+                # Current target exhausted, advance to next neighbor
+                steal_offset += 1
+                if steal_offset < NUM_XCDS:
+                    target_xcd = (xcd_id + steal_offset) % NUM_XCDS
+                    target_base = target_xcd * tiles_per_xcd
+                    target_count = tl.maximum(0, tl.minimum(tiles_per_xcd, total_tiles - target_base))
+                    counter_ptr = tile_counter + target_xcd * COUNTER_STRIDE
+                    raw_idx = tl.atomic_add(counter_ptr, 1, scope="gpu")
     else:
         # ================================================================
         # Flat work-stealing: per-XCD/slot or global atomic
