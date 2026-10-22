@@ -1,0 +1,124 @@
+# tritonBLAS correctness on a CPU-emulated AMD GPU (rocjitsu, ROCm/rocm-systems emulation/rocjitsu).
+#
+# rocjitsu executes the GPU ISA on the CPU behind an LD_PRELOAD KFD/DRM interposer, so the
+# unmodified torch + Triton + tritonBLAS stack runs on a plain CPU runner. It is functional only:
+# it checks the bytes, never timing. See tests/rocjitsu/README.md.
+#
+# Runner: GitHub-hosted ubuntu-24.04 by default. Set the repository variable ROCJITSU_RUNNER to a
+# runner label (e.g. a ROCm org CPU build runner) to run there instead.
+name: rocjitsu
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "include/**"
+      - "tests/**"
+      - "setup.py"
+      - "pyproject.toml"
+      - "docker/rocjitsu/**"
+      - ".github/workflows/rocjitsu.yml"
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "smoke | pr | nightly"
+        type: choice
+        options: [smoke, pr, nightly]
+        default: pr
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rocjitsu-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Shards per arch: smoke 1, pr 4, nightly 8. A 4-vCPU GitHub-hosted runner runs the smoke tier
+  # in ~5 min per arch, so pr/nightly are sharded to keep each job near that.
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      tier: ${{ steps.p.outputs.tier }}
+      matrix: ${{ steps.p.outputs.matrix }}
+    steps:
+      - id: p
+        run: |
+          tier="${{ inputs.tier }}"
+          [ -n "$tier" ] || tier=$([ "${{ github.event_name }}" = schedule ] && echo nightly || echo pr)
+          case $tier in
+            smoke) shards='[""]' ;;
+            pr) shards='["0/4","1/4","2/4","3/4"]' ;;
+            *) shards='["0/8","1/8","2/8","3/8","4/8","5/8","6/8","7/8"]' ;;
+          esac
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          echo "matrix={\"arch\":[\"gfx942\",\"gfx950\"],\"shard\":$shards}" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: plan
+    name: ${{ matrix.arch }} ${{ needs.plan.outputs.tier }} ${{ matrix.shard }}
+    # Advisory until it has a green track record (same policy as hipBLASLt's rocjitsu job).
+    continue-on-error: true
+    runs-on: ${{ vars.ROCJITSU_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      TIER: ${{ needs.plan.outputs.tier }}
+      IMAGE: tritonblas-rocjitsu
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk for the ~15 GB image
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+      - name: Build image
+        run: docker build -t "$IMAGE" docker/rocjitsu
+      - name: Run ${{ env.TIER }} tier on simulated ${{ matrix.arch }}
+        run: |
+          mkdir -p results
+          # One xdist worker (= one simulated GPU) per RJ_THREADS cores (mirage --cpu-thread-budget),
+          # and at most one per 6 GB of RAM (each worker holds torch + Triton + the emulator, ~5 GB).
+          threads=2
+          jobs=$(( $(nproc) / threads ))
+          mem_jobs=$(( $(awk '/MemAvailable/ {print int($2 / 1048576)}' /proc/meminfo) / 6 ))
+          [ "$mem_jobs" -lt "$jobs" ] && jobs=$mem_jobs
+          [ "$jobs" -ge 1 ] || jobs=1
+          docker run --rm --init --shm-size 8g --user "$(id -u):$(id -g)" -e HOME=/tmp/home \
+            -e RJ_JOBS="$jobs" -e RJ_THREADS="$threads" -e RJ_SHARD="${{ matrix.shard }}" \
+            -e RJ_TEST_TIMEOUT=300 \
+            -v "$PWD:/work" -w /work "$IMAGE" \
+            rjsim "${{ matrix.arch }}" -- tests/rocjitsu/run-tier.sh "$TIER" results \
+            2>&1 | grep --line-buffered -v 'amdgpu.ids' | tee results/pytest.log
+          exit "${PIPESTATUS[0]}"
+      - name: Summary
+        if: always()
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          try:
+              s = ET.parse("results/junit.xml").getroot().find("testsuite")
+          except Exception as e:
+              print(f"no junit.xml ({e})"); raise SystemExit
+          a = s.attrib
+          print(f"### rocjitsu {a['name']}\n")
+          print(f"tests {a['tests']} · failures {a['failures']} · errors {a['errors']} · skipped {a['skipped']} · {float(a['time']):.0f}s\n")
+          for tc in s.iter("testcase"):
+              f = tc.find("failure") if tc.find("failure") is not None else tc.find("error")
+              if f is not None:
+                  print(f"- ❌ `{tc.get('classname')}::{tc.get('name')}`: {(f.get('message') or '')[:200]}")
+          EOF
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocjitsu-${{ matrix.arch }}-${{ env.TIER }}-${{ strategy.job-index }}
+          path: results/
+          retention-days: 30

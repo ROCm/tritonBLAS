@@ -1,10 +1,10 @@
 name: Tests
 
+# Manual only: the GPU runners these jobs target (linux-mi325-8gpu-ossci-rad, self-hosted amd-gpu)
+# no longer pick up jobs, so on every PR they sat queued for 24 h and were cancelled. Correctness
+# CI now runs on CPU-emulated GPUs in rocjitsu.yml and lint in lint.yml. Run this by hand if a GPU
+# runner becomes available again.
 on:
-  push:
-    branches: [ main]
-  pull_request:
-    branches: [ main]
   workflow_dispatch:
 
 jobs:
