@@ -8,6 +8,11 @@ The AMD LDS model (validated 35/35 against Triton 3.6.0+rocm7.2.0 on gfx942):
   ns == 1:  max(A_bytes, B_bytes)            — sequential inline alloc
   ns >= 2:  (ns - 1) * (A_bytes + B_bytes)   — software-pipelined buffers
 
+gfx950 with async copy differs: ns >= 2 allocates ns buffer sets (not ns - 1)
+and pads 16-bit operands by 16 elements per 512 (see the gfx950 tests).
+Whether Triton uses async copy depends on its version/knob (off by default in
+3.6.0, on for gfx950 in newer releases), so the estimate follows that knob.
+
 Tests cover:
 - estimate_triton_lds_bytes: AMD LDS model
 - check_triton_lds_capacity: capacity check
@@ -17,13 +22,18 @@ Tests cover:
   actual Triton compiled kernels
 """
 
+import sys
+import types
+
 import pytest
 import torch
 
 from tritonblas.origami import (
     estimate_triton_lds_bytes,
     check_triton_lds_capacity,
+    triton_async_copy_enabled,
 )
+from tritonblas.utils import get_arch
 
 
 def _get_hardware():
@@ -112,6 +122,129 @@ class TestEstimateTritonLdsBytes:
         assert lds > 0
         lds_bf16 = estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2)
         assert lds == lds_bf16 / 4
+
+
+class TestEstimateTritonLdsBytesGfx950:
+    """gfx950 model: ns buffer sets (not ns - 1) plus padding on 16-bit operands.
+
+    Expected values were measured from compiled kernels (persistent_matmul and
+    a plain tl.dot loop, 16x16 MFMA) with Triton 3.6.0.
+    """
+
+    def test_default_arch_is_unchanged(self):
+        """arch=None and non-gfx950 archs keep the gfx942 model."""
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2) == 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx942") == 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx90a") == 32768
+
+    def test_num_stages_1_unchanged(self):
+        """ns=1 matches the compiled kernel on gfx950 as on gfx942."""
+        # A = 256*64*2 = 32768, B = 64*128*2 = 16384
+        assert estimate_triton_lds_bytes(256, 128, 64, 2, 2, 1, "gfx950", use_async_copy=True) == 32768
+
+    def test_fp32_and_8bit_are_exact(self):
+        """Unpadded dtypes: exactly ns * (A + B), measured against compiled kernels."""
+        assert estimate_triton_lds_bytes(64, 64, 32, 4, 4, 2, "gfx950", use_async_copy=True) == 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 4, 4, 2, "gfx950", use_async_copy=True) == 131072
+        assert estimate_triton_lds_bytes(128, 128, 64, 4, 4, 3, "gfx950", use_async_copy=True) == 196608
+        assert estimate_triton_lds_bytes(128, 128, 64, 1, 1, 2, "gfx950", use_async_copy=True) == 32768
+        assert estimate_triton_lds_bytes(256, 256, 64, 1, 1, 3, "gfx950", use_async_copy=True) == 98304
+
+    def test_16bit_padded_layout(self):
+        """16-bit operands add 16 elements after every 512 (per operand buffer)."""
+        # Without padding these would be 65536 and 131072
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950", use_async_copy=True) == 67520
+        assert estimate_triton_lds_bytes(256, 256, 64, 2, 2, 2, "gfx950", use_async_copy=True) == 135104
+        assert estimate_triton_lds_bytes(64, 64, 256, 2, 2, 3, "gfx950", use_async_copy=True) == 202688
+        assert estimate_triton_lds_bytes(32, 16, 256, 2, 2, 2, "gfx950", use_async_copy=True) == 50624
+
+    def test_padding_formula(self):
+        """n + ((n - 1) // 512) * 16 elements, for n = ns * tile elements."""
+        # A: 2 * 128*128 = 32768 -> +63*16; B: 2 * 128*256 = 65536 -> +127*16
+        assert estimate_triton_lds_bytes(128, 256, 128, 2, 2, 2, "gfx950", use_async_copy=True) == (
+            (32768 + 63 * 16) * 2 + (65536 + 127 * 16) * 2
+        )
+
+    def test_mixed_dtypes_pad_only_16bit_operand(self):
+        """Only the 2-byte operand is padded (derived from Triton's per-operand
+        layout choice; not measured on a compiled mixed-dtype kernel)."""
+        both = estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950", use_async_copy=True)
+        mixed = estimate_triton_lds_bytes(128, 128, 64, 1, 2, 2, "gfx950", use_async_copy=True)
+        # A: 2 * 128*64 elems, 1 B, unpadded. B: 2 * 64*128 = 16384 elems + 31*16, 2 B
+        assert mixed == 16384 + (16384 + 31 * 16) * 2
+        assert mixed < both
+
+    def test_ci_oom_regression_128x256x128_f16(self):
+        """Triton needs 202688 B for 128x256x128 f16 ns=2 on gfx950 (limit 163840).
+
+        The gfx942 model estimated 98304 B and let this tile through, which
+        failed at launch with OutOfResources.
+        """
+        gfx950_lds = 163840
+        assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2) is True  # old, wrong
+        assert estimate_triton_lds_bytes(128, 256, 128, 2, 2, 2, "gfx950", use_async_copy=True) == 202688
+        assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2, "gfx950", use_async_copy=True) is False
+        assert check_triton_lds_capacity(256, 128, 128, 2, 2, gfx950_lds, 2, "gfx950", use_async_copy=True) is False
+
+    def test_tiles_that_fit_on_gfx950_still_pass(self):
+        """The model must not reject tiles that really fit in 160KB."""
+        gfx950_lds = 163840
+        # Triton reported 135104 and 67520 B for these f16 tiles
+        assert check_triton_lds_capacity(256, 256, 64, 2, 2, gfx950_lds, 2, "gfx950", use_async_copy=True) is True
+        assert check_triton_lds_capacity(128, 128, 64, 2, 2, gfx950_lds, 2, "gfx950", use_async_copy=True) is True
+
+
+class TestAsyncCopyKnob:
+    """The gfx950 model applies only when Triton compiles with async copy."""
+
+    @staticmethod
+    def _fake_triton(monkeypatch, knob):
+        amd = types.SimpleNamespace(use_async_copy=knob)
+        fake = types.SimpleNamespace(knobs=types.SimpleNamespace(amd=amd))
+        monkeypatch.setitem(sys.modules, "triton", fake)
+
+    def test_knob_false_uses_gfx942_model_on_gfx950(self, monkeypatch):
+        """Triton 3.6.0: knob defaults to False, so gfx950 is unpadded (ns - 1)."""
+        self._fake_triton(monkeypatch, False)
+        assert triton_async_copy_enabled("gfx950") is False
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950") == 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 4, 4, 2, "gfx950") == 65536
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 3, "gfx950") == 65536
+
+    def test_knob_unset_defaults_to_async_on_gfx950_only(self, monkeypatch):
+        """Newer Triton: knob None enables async copy on gfx950, not gfx942."""
+        self._fake_triton(monkeypatch, None)
+        assert triton_async_copy_enabled("gfx950") is True
+        assert triton_async_copy_enabled("gfx942") is False
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950") == 67520
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx942") == 32768
+
+    def test_knob_true_enables_gfx950_model(self, monkeypatch):
+        self._fake_triton(monkeypatch, True)
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950") == 67520
+
+    def test_async_copy_does_not_change_other_archs(self, monkeypatch):
+        self._fake_triton(monkeypatch, True)
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx942") == 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2) == 32768
+
+    def test_explicit_argument_overrides_knob(self, monkeypatch):
+        self._fake_triton(monkeypatch, False)
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950", use_async_copy=True) == 67520
+        self._fake_triton(monkeypatch, True)
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950", use_async_copy=False) == 32768
+
+    def test_capacity_check_follows_knob(self, monkeypatch):
+        """128x256x128 f16 ns=2 needs 202688 B with async copy, 98304 B without."""
+        gfx950_lds = 163840
+        self._fake_triton(monkeypatch, True)
+        assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2, "gfx950") is False
+        self._fake_triton(monkeypatch, False)
+        assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2, "gfx950") is True
+
+    def test_missing_triton_knobs_means_no_async_copy(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "triton", types.SimpleNamespace())
+        assert triton_async_copy_enabled("gfx950") is False
 
 
 class TestCheckTritonLdsCapacity:
@@ -233,8 +366,13 @@ class TestLdsVsCompiledKernel:
     """Validate LDS estimates against metadata.shared from compiled Triton kernels.
 
     This is the ground truth: Triton's compiler reports exact LDS allocation.
-    Our model must match exactly.
+    Our model must match exactly.  Kernels are compiled for the architecture of
+    the GPU running the tests, with the options tritonBLAS uses (16x16 MFMA).
     """
+
+    @staticmethod
+    def _check(estimated, actual, desc):
+        assert estimated == actual, f"{desc}: estimated={estimated}, compiled={actual}"
 
     @staticmethod
     def _compile_and_get_lds(block_m, block_n, block_k, num_stages, dtype):
@@ -270,12 +408,9 @@ class TestLdsVsCompiledKernel:
     ])
     def test_bf16_estimate_matches_compiled(self, block_m, block_n, block_k, num_stages):
         """estimate_triton_lds_bytes must match Triton metadata.shared for bf16."""
-        estimated = estimate_triton_lds_bytes(block_m, block_n, block_k, 2, 2, num_stages)
+        estimated = estimate_triton_lds_bytes(block_m, block_n, block_k, 2, 2, num_stages, get_arch())
         actual = self._compile_and_get_lds(block_m, block_n, block_k, num_stages, torch.bfloat16)
-        assert estimated == actual, (
-            f"{block_m}x{block_n}x{block_k} ns={num_stages} bf16: "
-            f"estimated={estimated}, compiled={actual}"
-        )
+        self._check(estimated, actual, f"{block_m}x{block_n}x{block_k} ns={num_stages} bf16")
 
     @pytest.mark.parametrize("block_m,block_n,block_k,num_stages", [
         (64, 64, 32, 1),
@@ -286,9 +421,101 @@ class TestLdsVsCompiledKernel:
     ])
     def test_f32_estimate_matches_compiled(self, block_m, block_n, block_k, num_stages):
         """estimate_triton_lds_bytes must match Triton metadata.shared for f32."""
-        estimated = estimate_triton_lds_bytes(block_m, block_n, block_k, 4, 4, num_stages)
+        estimated = estimate_triton_lds_bytes(block_m, block_n, block_k, 4, 4, num_stages, get_arch())
         actual = self._compile_and_get_lds(block_m, block_n, block_k, num_stages, torch.float32)
+        self._check(estimated, actual, f"{block_m}x{block_n}x{block_k} ns={num_stages} f32")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestLdsVsPersistentKernel:
+    """Validate the estimate against the real persistent_matmul kernel.
+
+    The gfx950 padding depends on the kernel's MFMA shape, so also check the
+    kernel that actually launches: persistent_matmul is what OutOfResources hits.
+    """
+
+    @staticmethod
+    def _compile_persistent(block_m, block_n, block_k, num_stages, dtype, selector=None):
+        import importlib
+        import types
+
+        mm = importlib.import_module("tritonblas.matmul")
+        compiled = {}
+
+        class _CompileOnly:
+            def __init__(self, fn):
+                self.fn = fn
+
+            def __getitem__(self, grid):
+                def call(*args, **kwargs):
+                    compiled["kernel"] = self.fn.warmup(*args, grid=grid, **kwargs)
+                return call
+
+        if selector is None:
+            selector = types.SimpleNamespace(
+                block_m=block_m, block_n=block_n, block_k=block_k,
+                group_m=8, num_sms=8, num_stages=num_stages,
+            )
+        a = torch.randn(1024, 1024, device="cuda").to(dtype)
+        b = torch.randn(1024, 2048, device="cuda").to(dtype)
+        c = torch.empty(1024, 2048, device="cuda").to(dtype)
+        original = mm._maybe_wrap
+        mm._maybe_wrap = lambda fn, probe_tensor: _CompileOnly(fn)
+        try:
+            mm.persistent_matmul_lt(a, b, c, selector, None)
+        finally:
+            mm._maybe_wrap = original
+        return compiled["kernel"].metadata.shared
+
+    @pytest.mark.parametrize("dtype,bytes_per_elem", [(torch.float16, 2), (torch.bfloat16, 2), (torch.float32, 4)])
+    @pytest.mark.parametrize("block_m,block_n,block_k", [
+        (64, 64, 64),
+        (128, 64, 128),
+        (128, 128, 64),
+        (128, 256, 64),
+        (256, 128, 64),
+        (128, 256, 128),
+        (256, 256, 64),
+    ])
+    def test_estimate_matches_compiled(self, block_m, block_n, block_k, dtype, bytes_per_elem):
+        num_stages = 2
+        actual = self._compile_persistent(block_m, block_n, block_k, num_stages, dtype)
+        estimated = estimate_triton_lds_bytes(
+            block_m, block_n, block_k, bytes_per_elem, bytes_per_elem, num_stages, get_arch()
+        )
         assert estimated == actual, (
-            f"{block_m}x{block_n}x{block_k} ns={num_stages} f32: "
-            f"estimated={estimated}, compiled={actual}"
+            f"{block_m}x{block_n}x{block_k} {dtype} ns={num_stages}: estimated={estimated}, compiled={actual}"
+        )
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("m,n,k", [
+        (64, 64, 32),
+        (256, 512, 512),
+        (512, 2048, 1024),
+        (1024, 2048, 1024),
+        (2048, 2048, 2048),
+        (4096, 4096, 4096),
+        (4096, 3584, 8192),
+        (8192, 8192, 8192),
+        (16384, 3584, 8192),
+    ])
+    def test_selected_tile_fits_device_lds(self, m, n, k, dtype):
+        """Whatever tile the selector picks must compile within the device's LDS.
+
+        This is the end-to-end property behind the "out of resource: shared
+        memory" launch failures: the LDS filter in OrigamiMatmulSelector must
+        never let through a tile persistent_matmul cannot fit.
+        """
+        import importlib
+
+        mm = importlib.import_module("tritonblas.matmul")
+        selector = mm._make_matmul_selector(m, n, k, dtype, dtype, dtype, torch.device("cuda", 0))
+        if selector._arch_name != get_arch():
+            pytest.skip("cross-compiling for a different arch than the selector's hardware")
+        shared = self._compile_persistent(
+            selector.block_m, selector.block_n, selector.block_k, selector.num_stages, dtype, selector=selector
+        )
+        assert shared <= selector._hardware.lds_capacity, (
+            f"{selector.block_m}x{selector.block_n}x{selector.block_k} {dtype} on {selector._arch_name}: "
+            f"needs {shared} B, device has {selector._hardware.lds_capacity} B"
         )

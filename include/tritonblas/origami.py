@@ -4,6 +4,42 @@ import torch
 import origami
 import math
 from math import ceil
+from typing import Optional
+
+
+# gfx950 (CDNA4) pipelines loads with async copies and, for 16-bit operands,
+# stores tiles in a padded LDS layout: PADDING elements are inserted after every
+# INTERVAL elements (Triton: composePaddedLayoutForAsyncCopyCDNA4 in
+# third_party/amd/lib/TritonAMDGPUTransforms/Utility.cpp).
+#   INTERVAL = warp_size (64) * 8 elements
+#   PADDING  = 16 for both operands with 16x16 MFMA (matrix_instr_nonkdim=16,
+#              kWidth=8), which is what the tritonBLAS kernels use
+_GFX950_PAD_INTERVAL = 512
+_GFX950_PAD_ELEMS = 16
+
+
+def _gfx950_padded_elems(num_elems: int) -> int:
+    """Elements occupied by a padded buffer of num_elems elements."""
+    return num_elems + ((num_elems - 1) // _GFX950_PAD_INTERVAL) * _GFX950_PAD_ELEMS
+
+
+def triton_async_copy_enabled(arch: Optional[str]) -> bool:
+    """Whether the installed Triton compiles for ``arch`` with async copies.
+
+    Mirrors Triton's ``is_async_copy_enabled``: an explicit
+    ``TRITON_HIP_USE_ASYNC_COPY`` / ``triton.knobs.amd.use_async_copy`` wins.
+    Triton 3.6 defaults the knob to False; newer versions leave it unset
+    (None) and enable async copy on gfx950.
+    """
+    try:
+        import triton
+
+        knob = triton.knobs.amd.use_async_copy
+    except (ImportError, AttributeError):
+        return False
+    if knob is None:
+        return arch == "gfx950"
+    return bool(knob)
 
 
 def estimate_triton_lds_bytes(
@@ -13,25 +49,45 @@ def estimate_triton_lds_bytes(
     bytes_a: float,
     bytes_b: float,
     num_stages: int = 2,
+    arch: Optional[str] = None,
+    use_async_copy: Optional[bool] = None,
 ) -> float:
     """
     Estimate Triton kernel LDS (shared memory) usage in bytes for AMD GPUs.
 
-    Triton's AMD backend uses swizzled_shared / amd_rotating_shared encodings
-    which rearrange bank addressing without adding padding bytes.  The LDS
-    footprint is therefore the raw tile bytes times the number of pipeline
-    buffers:
+    Without async copy (gfx942, other architectures, ``arch=None``, and gfx950
+    on a Triton that does not enable async copy, e.g. 3.6.0):
+    swizzled_shared / amd_rotating_shared encodings rearrange bank addressing
+    without adding padding bytes.
 
-      ns == 1:  max(A_bytes, B_bytes)   — no pipelining, sequential alloc
-      ns >= 2:  (ns - 1) * (A_bytes + B_bytes)  — software-pipelined
+      ns == 1:  max(A_bytes, B_bytes)   - no pipelining, sequential alloc
+      ns >= 2:  (ns - 1) * (A_bytes + B_bytes)   - software-pipelined
 
-    Validated against metadata.shared from compiled Triton kernels on gfx942
-    (Triton 3.6.0+rocm7.2.0): 35/35 configs matched exactly.
+      Validated against metadata.shared from compiled Triton kernels on gfx942
+      (Triton 3.6.0+rocm7.2.0): exact for bf16/fp16/fp32/fp8/int8, ns = 1..4.
+
+    gfx950 with async copy (the default on newer Triton):
+
+      ns == 1:  max(A_bytes, B_bytes)
+      ns >= 2:  one buffer set per stage, i.e. ns * tile elements per operand
+                (not ns - 1).  16-bit operands use a padded layout that adds
+                16 elements after every 512, so each operand occupies
+                ``n + ((n - 1) // 512) * 16`` elements for ``n = ns * tile``.
+                Other dtypes are unpadded.
+
+      This is exact when the padded layout is used, which needs the async-copy
+      path, 16x16 MFMA with kWidth 8 and a tile large enough to wrap the
+      padding.  Otherwise Triton falls back to the unpadded layout and uses
+      less, so the estimate is then a safe upper bound.
 
     Args:
         block_m, block_n, block_k: Tile dimensions (MT_M, MT_N, MT_K).
         bytes_a, bytes_b: Bytes per element for A and B (e.g. 2 for bf16/fp16).
         num_stages: Pipeline stages (1, 2, or 3); Triton matmul uses 2 by default.
+        arch: GPU architecture name such as "gfx950".
+        use_async_copy: Whether Triton compiles with async copies. None asks
+            the installed Triton (see ``triton_async_copy_enabled``). The
+            gfx950 model applies only when arch is gfx950 and this is true.
 
     Returns:
         Estimated total LDS usage in bytes.
@@ -40,6 +96,16 @@ def estimate_triton_lds_bytes(
     b_bytes = block_k * block_n * bytes_b
     if num_stages <= 1:
         return max(a_bytes, b_bytes)
+    if use_async_copy is None:
+        use_async_copy = triton_async_copy_enabled(arch)
+    if arch == "gfx950" and use_async_copy:
+        a_elems = num_stages * block_m * block_k
+        b_elems = num_stages * block_k * block_n
+        if bytes_a == 2:
+            a_elems = _gfx950_padded_elems(a_elems)
+        if bytes_b == 2:
+            b_elems = _gfx950_padded_elems(b_elems)
+        return a_elems * bytes_a + b_elems * bytes_b
     return (num_stages - 1) * (a_bytes + b_bytes)
 
 
@@ -51,10 +117,12 @@ def check_triton_lds_capacity(
     bytes_b: float,
     lds_capacity: int,
     num_stages: int = 2,
+    arch: Optional[str] = None,
+    use_async_copy: Optional[bool] = None,
 ) -> bool:
     """Return True if estimated Triton LDS usage fits within lds_capacity."""
     usage = estimate_triton_lds_bytes(
-        block_m, block_n, block_k, bytes_a, bytes_b, num_stages
+        block_m, block_n, block_k, bytes_a, bytes_b, num_stages, arch, use_async_copy
     )
     return usage <= lds_capacity
 
@@ -68,10 +136,12 @@ class OrigamiMatmulSelector:
         bytes_a: float,
         bytes_b: float,
         num_stages: int = 2,
+        arch: Optional[str] = None,
+        use_async_copy: Optional[bool] = None,
     ) -> float:
         """Class-level wrapper for estimate_triton_lds_bytes."""
         return estimate_triton_lds_bytes(
-            block_m, block_n, block_k, bytes_a, bytes_b, num_stages
+            block_m, block_n, block_k, bytes_a, bytes_b, num_stages, arch, use_async_copy
         )
 
     # https://docs.pytorch.org/docs/stable/tensors.html
@@ -208,7 +278,8 @@ class OrigamiMatmulSelector:
             c
             for c in self._configs
             if check_triton_lds_capacity(
-                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, self._num_stages
+                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, self._num_stages,
+                self._arch_name,
             )
         ]
         if not self._configs:
@@ -234,7 +305,7 @@ class OrigamiMatmulSelector:
         )
 
         # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages, self._arch_name) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256
