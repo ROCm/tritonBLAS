@@ -11,9 +11,11 @@ Usage:
     python tools/lds_model_validation.py --arch gfx950  # cross-compile for gfx950
 
 Model (see estimate_triton_lds_bytes for the full description):
-- gfx942 and others: ns == 1: max(A, B); ns >= 2: (ns - 1) * (A + B).
-- gfx950: ns >= 2: ns buffer sets, with 16 padding elements after every 512 on
-  16-bit operands (CDNA4 async-copy padded layout).
+- gfx942 and others, or gfx950 without async copy (Triton 3.6.0 default):
+  ns == 1: max(A, B); ns >= 2: (ns - 1) * (A + B).
+- gfx950 with async copy (newer Triton default, or TRITON_HIP_USE_ASYNC_COPY=1):
+  ns >= 2: ns buffer sets, with 16 padding elements after every 512 on 16-bit
+  operands (CDNA4 async-copy padded layout).
 
 Kernels are compiled with the options tritonBLAS uses (16x16 MFMA, 8 warps),
 since the gfx950 padding depends on the MFMA instruction shape.  The model is
@@ -30,7 +32,7 @@ import torch
 import triton
 import triton.language as tl
 
-from tritonblas.origami import estimate_triton_lds_bytes
+from tritonblas.origami import estimate_triton_lds_bytes, triton_async_copy_enabled
 from tritonblas.utils import get_arch
 
 
@@ -107,7 +109,7 @@ def model_lds(bm, bn, bk, bpe, ns):
 if __name__ == "__main__":
     props = torch.cuda.get_device_properties(0)
     print(f"GPU: {props.name} ({props.gcnArchName})")
-    print(f"Compiling for: {get_arch()}")
+    print(f"Compiling for: {get_arch()} (async copy: {triton_async_copy_enabled(get_arch())})")
     print(f"LDS/block: {getattr(props, 'shared_memory_per_block', 'n/a')} bytes")
     print(f"Triton: {triton.__version__}")
     print()

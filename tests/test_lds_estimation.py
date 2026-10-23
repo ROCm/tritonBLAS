@@ -8,8 +8,10 @@ The AMD LDS model (validated 35/35 against Triton 3.6.0+rocm7.2.0 on gfx942):
   ns == 1:  max(A_bytes, B_bytes)            — sequential inline alloc
   ns >= 2:  (ns - 1) * (A_bytes + B_bytes)   — software-pipelined buffers
 
-gfx950 differs: ns >= 2 allocates ns buffer sets (not ns - 1) and pads 16-bit
-operands by 16 elements per 512 (see the gfx950 tests).
+gfx950 with async copy differs: ns >= 2 allocates ns buffer sets (not ns - 1)
+and pads 16-bit operands by 16 elements per 512 (see the gfx950 tests).
+Whether Triton uses async copy depends on its version/knob (off by default in
+3.6.0, on for gfx950 in newer releases), so the estimate follows that knob.
 
 Tests cover:
 - estimate_triton_lds_bytes: AMD LDS model
@@ -20,12 +22,16 @@ Tests cover:
   actual Triton compiled kernels
 """
 
+import sys
+import types
+
 import pytest
 import torch
 
 from tritonblas.origami import (
     estimate_triton_lds_bytes,
     check_triton_lds_capacity,
+    triton_async_copy_enabled,
 )
 from tritonblas.utils import get_arch
 
@@ -134,36 +140,36 @@ class TestEstimateTritonLdsBytesGfx950:
     def test_num_stages_1_unchanged(self):
         """ns=1 matches the compiled kernel on gfx950 as on gfx942."""
         # A = 256*64*2 = 32768, B = 64*128*2 = 16384
-        assert estimate_triton_lds_bytes(256, 128, 64, 2, 2, 1, "gfx950") == 32768
+        assert estimate_triton_lds_bytes(256, 128, 64, 2, 2, 1, "gfx950", use_async_copy=True) == 32768
 
     def test_fp32_and_8bit_are_exact(self):
         """Unpadded dtypes: exactly ns * (A + B), measured against compiled kernels."""
-        assert estimate_triton_lds_bytes(64, 64, 32, 4, 4, 2, "gfx950") == 32768
-        assert estimate_triton_lds_bytes(128, 128, 64, 4, 4, 2, "gfx950") == 131072
-        assert estimate_triton_lds_bytes(128, 128, 64, 4, 4, 3, "gfx950") == 196608
-        assert estimate_triton_lds_bytes(128, 128, 64, 1, 1, 2, "gfx950") == 32768
-        assert estimate_triton_lds_bytes(256, 256, 64, 1, 1, 3, "gfx950") == 98304
+        assert estimate_triton_lds_bytes(64, 64, 32, 4, 4, 2, "gfx950", use_async_copy=True) == 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 4, 4, 2, "gfx950", use_async_copy=True) == 131072
+        assert estimate_triton_lds_bytes(128, 128, 64, 4, 4, 3, "gfx950", use_async_copy=True) == 196608
+        assert estimate_triton_lds_bytes(128, 128, 64, 1, 1, 2, "gfx950", use_async_copy=True) == 32768
+        assert estimate_triton_lds_bytes(256, 256, 64, 1, 1, 3, "gfx950", use_async_copy=True) == 98304
 
     def test_16bit_padded_layout(self):
         """16-bit operands add 16 elements after every 512 (per operand buffer)."""
         # Without padding these would be 65536 and 131072
-        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950") == 67520
-        assert estimate_triton_lds_bytes(256, 256, 64, 2, 2, 2, "gfx950") == 135104
-        assert estimate_triton_lds_bytes(64, 64, 256, 2, 2, 3, "gfx950") == 202688
-        assert estimate_triton_lds_bytes(32, 16, 256, 2, 2, 2, "gfx950") == 50624
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950", use_async_copy=True) == 67520
+        assert estimate_triton_lds_bytes(256, 256, 64, 2, 2, 2, "gfx950", use_async_copy=True) == 135104
+        assert estimate_triton_lds_bytes(64, 64, 256, 2, 2, 3, "gfx950", use_async_copy=True) == 202688
+        assert estimate_triton_lds_bytes(32, 16, 256, 2, 2, 2, "gfx950", use_async_copy=True) == 50624
 
     def test_padding_formula(self):
         """n + ((n - 1) // 512) * 16 elements, for n = ns * tile elements."""
         # A: 2 * 128*128 = 32768 -> +63*16; B: 2 * 128*256 = 65536 -> +127*16
-        assert estimate_triton_lds_bytes(128, 256, 128, 2, 2, 2, "gfx950") == (
+        assert estimate_triton_lds_bytes(128, 256, 128, 2, 2, 2, "gfx950", use_async_copy=True) == (
             (32768 + 63 * 16) * 2 + (65536 + 127 * 16) * 2
         )
 
     def test_mixed_dtypes_pad_only_16bit_operand(self):
         """Only the 2-byte operand is padded (derived from Triton's per-operand
         layout choice; not measured on a compiled mixed-dtype kernel)."""
-        both = estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950")
-        mixed = estimate_triton_lds_bytes(128, 128, 64, 1, 2, 2, "gfx950")
+        both = estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950", use_async_copy=True)
+        mixed = estimate_triton_lds_bytes(128, 128, 64, 1, 2, 2, "gfx950", use_async_copy=True)
         # A: 2 * 128*64 elems, 1 B, unpadded. B: 2 * 64*128 = 16384 elems + 31*16, 2 B
         assert mixed == 16384 + (16384 + 31 * 16) * 2
         assert mixed < both
@@ -176,16 +182,69 @@ class TestEstimateTritonLdsBytesGfx950:
         """
         gfx950_lds = 163840
         assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2) is True  # old, wrong
-        assert estimate_triton_lds_bytes(128, 256, 128, 2, 2, 2, "gfx950") == 202688
-        assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2, "gfx950") is False
-        assert check_triton_lds_capacity(256, 128, 128, 2, 2, gfx950_lds, 2, "gfx950") is False
+        assert estimate_triton_lds_bytes(128, 256, 128, 2, 2, 2, "gfx950", use_async_copy=True) == 202688
+        assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2, "gfx950", use_async_copy=True) is False
+        assert check_triton_lds_capacity(256, 128, 128, 2, 2, gfx950_lds, 2, "gfx950", use_async_copy=True) is False
 
     def test_tiles_that_fit_on_gfx950_still_pass(self):
         """The model must not reject tiles that really fit in 160KB."""
         gfx950_lds = 163840
         # Triton reported 135104 and 67520 B for these f16 tiles
-        assert check_triton_lds_capacity(256, 256, 64, 2, 2, gfx950_lds, 2, "gfx950") is True
-        assert check_triton_lds_capacity(128, 128, 64, 2, 2, gfx950_lds, 2, "gfx950") is True
+        assert check_triton_lds_capacity(256, 256, 64, 2, 2, gfx950_lds, 2, "gfx950", use_async_copy=True) is True
+        assert check_triton_lds_capacity(128, 128, 64, 2, 2, gfx950_lds, 2, "gfx950", use_async_copy=True) is True
+
+
+class TestAsyncCopyKnob:
+    """The gfx950 model applies only when Triton compiles with async copy."""
+
+    @staticmethod
+    def _fake_triton(monkeypatch, knob):
+        amd = types.SimpleNamespace(use_async_copy=knob)
+        fake = types.SimpleNamespace(knobs=types.SimpleNamespace(amd=amd))
+        monkeypatch.setitem(sys.modules, "triton", fake)
+
+    def test_knob_false_uses_gfx942_model_on_gfx950(self, monkeypatch):
+        """Triton 3.6.0: knob defaults to False, so gfx950 is unpadded (ns - 1)."""
+        self._fake_triton(monkeypatch, False)
+        assert triton_async_copy_enabled("gfx950") is False
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950") == 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 4, 4, 2, "gfx950") == 65536
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 3, "gfx950") == 65536
+
+    def test_knob_unset_defaults_to_async_on_gfx950_only(self, monkeypatch):
+        """Newer Triton: knob None enables async copy on gfx950, not gfx942."""
+        self._fake_triton(monkeypatch, None)
+        assert triton_async_copy_enabled("gfx950") is True
+        assert triton_async_copy_enabled("gfx942") is False
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950") == 67520
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx942") == 32768
+
+    def test_knob_true_enables_gfx950_model(self, monkeypatch):
+        self._fake_triton(monkeypatch, True)
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950") == 67520
+
+    def test_async_copy_does_not_change_other_archs(self, monkeypatch):
+        self._fake_triton(monkeypatch, True)
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx942") == 32768
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2) == 32768
+
+    def test_explicit_argument_overrides_knob(self, monkeypatch):
+        self._fake_triton(monkeypatch, False)
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950", use_async_copy=True) == 67520
+        self._fake_triton(monkeypatch, True)
+        assert estimate_triton_lds_bytes(128, 128, 64, 2, 2, 2, "gfx950", use_async_copy=False) == 32768
+
+    def test_capacity_check_follows_knob(self, monkeypatch):
+        """128x256x128 f16 ns=2 needs 202688 B with async copy, 98304 B without."""
+        gfx950_lds = 163840
+        self._fake_triton(monkeypatch, True)
+        assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2, "gfx950") is False
+        self._fake_triton(monkeypatch, False)
+        assert check_triton_lds_capacity(128, 256, 128, 2, 2, gfx950_lds, 2, "gfx950") is True
+
+    def test_missing_triton_knobs_means_no_async_copy(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "triton", types.SimpleNamespace())
+        assert triton_async_copy_enabled("gfx950") is False
 
 
 class TestCheckTritonLdsCapacity:
