@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# rjsim <arch> -- <cmd...>  Run <cmd> on a simulated AMD GPU via TheRock's packaged rocjitsu (mirage).
+# arch: gfx942 gfx950 gfx1250, or a config .json path. Functional only, no timing.
+# Env: RJ_THREADS = rocjitsu CPU threads per process (mirage --cpu-thread-budget, default 4).
+set -euo pipefail
+[[ $# -ge 1 ]] || { sed -n '2,4p' "$0" | sed 's/^# //'; exit 2; }
+arch=$1; shift
+[[ ${1:-} == -- ]] && shift
+rocm-sdk init >/dev/null 2>&1 || true
+root=$(rocm-sdk path --root)
+case $arch in
+  gfx942)  cfg=gfx942_cdna3_kmd.json ;;
+  gfx950)  cfg=gfx950_mi355x_kmd.json ;;
+  gfx1250) cfg=gfx1250_mi455x.json ;;
+  *.json)  cfg=$arch ;;
+  *) echo "rjsim: unknown arch '$arch'" >&2; exit 2 ;;
+esac
+[[ $cfg == /* || -f $cfg ]] || cfg=$root/share/rocjitsu/configs/$cfg
+export ROCM_PATH=$root LD_LIBRARY_PATH=$root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} \
+       TRITON_AMD_BITCODE_PATH=$root/lib/llvm/amdgcn/bitcode
+exec "$root/bin/mirage" run --in-process --config "$cfg" --cpu-thread-budget "${RJ_THREADS:-4}" -- "$@"
