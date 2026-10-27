@@ -1,17 +1,39 @@
 """
-Validate AMD LDS allocation model against Triton compiled kernel metadata.
+Validate the AMD LDS allocation model against Triton compiled kernel metadata.
 
-Hypothesis from TTGIR analysis:
-- Triton AMD uses swizzled_shared / amd_rotating_shared (NOT PaddedSharedEncoding)
-- These encodings rearrange bank mapping but add ZERO padding bytes
-- For ns >= 2: pipeline allocates (ns-1) buffer sets
-  LDS = (ns - 1) * (bm*bk + bk*bn) * bytes_per_elem
-- For ns = 1: no pipelining, peak LDS = max(A_bytes, B_bytes)
-  (A and B don't coexist — sequential inline alloc/dealloc)
+Compares ``tritonblas.origami.estimate_triton_lds_bytes`` with the
+``metadata.shared`` Triton reports for a plain tl.dot matmul loop.  Kernels are
+compiled with ``warmup`` and never launched, so configs larger than the
+hardware limit can still be checked.
+
+Usage:
+    python tools/lds_model_validation.py                # arch of the current GPU
+    python tools/lds_model_validation.py --arch gfx950  # cross-compile for gfx950
+
+Model (see estimate_triton_lds_bytes for the full description):
+- gfx942 and others, or gfx950 without async copy (Triton 3.6.0 default):
+  ns == 1: max(A, B); ns >= 2: (ns - 1) * (A + B).
+- gfx950 with async copy (newer Triton default, or TRITON_HIP_USE_ASYNC_COPY=1):
+  ns >= 2: ns buffer sets, with 16 padding elements after every 512 on 16-bit
+  operands (CDNA4 async-copy padded layout).
+
+Kernels are compiled with the options tritonBLAS uses (16x16 MFMA, 8 warps),
+since the gfx950 padding depends on the MFMA instruction shape.  The model is
+expected to match exactly.
 """
+import os
+import sys
+
+if "--arch" in sys.argv:
+    # Must be set before triton is imported.
+    os.environ["TRITON_OVERRIDE_ARCH"] = sys.argv[sys.argv.index("--arch") + 1]
+
 import torch
 import triton
 import triton.language as tl
+
+from tritonblas.origami import estimate_triton_lds_bytes, triton_async_copy_enabled
+from tritonblas.utils import get_arch
 
 
 @triton.jit
@@ -64,34 +86,31 @@ def matmul_f32(
 
 
 def get_lds(kernel, bm, bn, bk, ns, dtype):
+    """Compile (without launching) and return Triton's metadata.shared."""
     M, N, K = 4096, 4096, 4096
-    a = torch.randn(M, K, dtype=dtype, device='cuda')
-    b = torch.randn(K, N, dtype=dtype, device='cuda')
-    out_dtype = torch.bfloat16 if dtype == torch.bfloat16 else torch.float32
+    a = torch.randn(M, K, device='cuda').to(dtype)
+    b = torch.randn(K, N, device='cuda').to(dtype)
+    out_dtype = torch.float32 if dtype == torch.float32 else torch.bfloat16
     c = torch.empty(M, N, dtype=out_dtype, device='cuda')
-    pgm = kernel[(1,)](
+    compiled = kernel.warmup(
         a, b, c, M, N, K,
         a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1),
-        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, NUM_STAGES=ns,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, NUM_STAGES=ns, grid=(1,),
+        matrix_instr_nonkdim=16, num_warps=8,  # as in tritonblas.matmul
     )
-    torch.cuda.synchronize()
-    return pgm.metadata.shared
+    return compiled.metadata.shared
 
 
 def model_lds(bm, bn, bk, bpe, ns):
-    """AMD LDS model: no padding, (ns-1) pipeline buffers for ns>=2."""
-    a_bytes = bm * bk * bpe
-    b_bytes = bk * bn * bpe
-    if ns == 1:
-        return max(a_bytes, b_bytes)
-    else:
-        return (ns - 1) * (a_bytes + b_bytes)
+    """Estimate for the architecture Triton is compiling for."""
+    return estimate_triton_lds_bytes(bm, bn, bk, bpe, bpe, ns, get_arch())
 
 
 if __name__ == "__main__":
     props = torch.cuda.get_device_properties(0)
     print(f"GPU: {props.name} ({props.gcnArchName})")
-    print(f"LDS/block: {props.shared_memory_per_block} bytes")
+    print(f"Compiling for: {get_arch()} (async copy: {triton_async_copy_enabled(get_arch())})")
+    print(f"LDS/block: {getattr(props, 'shared_memory_per_block', 'n/a')} bytes")
     print(f"Triton: {triton.__version__}")
     print()
 
