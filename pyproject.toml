@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "pybind11","nanobind"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -15,6 +15,7 @@ description = "A Lightweight Triton-based BLAS Library"
 requires-python = ">=3.8"
 
 dependencies = [
+    "rocm-origami>=0.0.3",
     "pandas",
     "pytest",
     "ruff",
