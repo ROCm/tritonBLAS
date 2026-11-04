@@ -12,7 +12,7 @@ where = ["include"]
 name = "tritonblas"
 version = "0.1.0"
 description = "A Lightweight Triton-based BLAS Library"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 
 dependencies = [
     # Bump explicitly on new releases after validation, and keep in sync with

@@ -164,6 +164,5 @@ cython_debug/
 
 *.hatchet
 *.csv
-_origami
 *.amdgcn
 datasets/*.yaml

@@ -8,7 +8,8 @@ test shapes in one place.
 
 import pytest
 import torch
-import origami
+
+from tritonblas.utils import get_arch
 
 
 # Torch compile / dynamo settings required for compile-enabled tests.
@@ -26,12 +27,7 @@ torch._inductor.config.force_disable_caches = True
 torch._inductor.config.compile_threads = 1
 
 # Hardware capability detection
-# hardware_t.arch is not present in every origami release, so fall back to torch.
-_hw = origami.get_hardware_for_device(torch.cuda.current_device())
-if hasattr(_hw, "arch") and hasattr(_hw.arch, "name"):
-    GPU_ARCH = _hw.arch.name
-else:
-    GPU_ARCH = torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.split(":")[0]
+GPU_ARCH = get_arch()
 # Architectures that support FP4/FP6 datatypes
 _FP4_ARCHS = {"gfx950"}
 
