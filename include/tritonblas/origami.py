@@ -332,6 +332,10 @@ class OrigamiMatmulSelector:
             self._xcc_workgroup_mapping = _wg_result.wgmxcc
             self._workgroup_mapping = _wg_result.wgm
 
+        # Some Origami versions report "no XCD remapping" as wgmxcc == 0, but
+        # some kernels like matmul_fp4 use that as a divisor, so never return 0
+        self._xcc_workgroup_mapping = max(1, int(self._xcc_workgroup_mapping))
+
         self._select_ws_params()
 
     def _select_ws_params(self):
