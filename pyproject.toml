@@ -15,7 +15,8 @@ description = "A Lightweight Triton-based BLAS Library"
 requires-python = ">=3.8"
 
 dependencies = [
-    "rocm-origami>=0.0.3",
+    # Bump explicitly on new released after validation.
+    "rocm-origami==0.0.3",
     "pandas",
     "pytest",
     "ruff",
