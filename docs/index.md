@@ -20,6 +20,9 @@ pip3 install -e .
 export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
 ```
 
+See [Installation](getting-started/installation.md) for prerequisites,
+including what's needed to build the `rocm-origami` dependency.
+
 ```python
 import torch
 import tritonblas
