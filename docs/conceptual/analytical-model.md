@@ -24,6 +24,7 @@ Origami is AMD's analytical performance model for GEMM kernels. Instead of searc
 
 For detailed information about Origami:
 - **Source Code**: [ROCm/rocm-libraries/shared/origami](https://github.com/ROCm/rocm-libraries/tree/develop/shared/origami)
+- **Package**: [rocm-origami on PyPI](https://pypi.org/project/rocm-origami/); tritonBLAS pins the version it uses in `pyproject.toml`
 - **Implementation**: See `include/tritonblas/origami.py` in the tritonBLAS repository
 
 ## How Origami Works in tritonBLAS

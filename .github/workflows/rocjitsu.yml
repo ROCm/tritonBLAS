@@ -14,7 +14,6 @@ on:
     paths:
       - "include/**"
       - "tests/**"
-      - "setup.py"
       - "pyproject.toml"
       - "docker/rocjitsu/**"
       - ".github/workflows/rocjitsu.yml"

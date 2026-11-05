@@ -10,6 +10,8 @@ Before installing tritonBLAS, ensure you have:
 - **PyTorch 2.0+** (ROCm version)
 - **ROCm 6.3.1+** HIP runtime
 - **Triton** (compatible version)
+- **ROCm development files** (HIP headers and CMake package, e.g. a full ROCm install under `/opt/rocm`) and a **C++17 compiler**, to build the [rocm-origami](https://pypi.org/project/rocm-origami/) dependency, which is published as source only
+- **Network access to PyPI and GitHub** during installation (the rocm-origami build downloads nanobind from GitHub)
 
 ## Supported Hardware
 
@@ -38,6 +40,11 @@ cd tritonBLAS
 pip3 install -e .
 export PYTHONPATH=$(pwd)/include/:$PYTHONPATH
 ```
+
+> **Note**: `pip3 install -e .` also builds `rocm-origami` at the version pinned in `pyproject.toml`.
+> If its CMake step can't find HIP, point it at your ROCm install, e.g.
+> `CMAKE_PREFIX_PATH=/opt/rocm pip3 install -e .`. For ROCm installed as Python packages
+> (`rocm[devel]`), run `rocm-sdk init` once and use `CMAKE_PREFIX_PATH="$(rocm-sdk path --root)"`.
 
 ## Verifying Installation
 

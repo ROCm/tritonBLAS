@@ -65,10 +65,12 @@ Recorded as xfail so the tiers stay green and new failures stand out. `--rj-run-
 
 ## Arch coverage
 
-gfx942 and gfx950: the origami version `setup.py` pins only knows those two. The image's rocjitsu
-also has gfx1250, gfx1201 and gfx1100 configs for when origami supports them.
+gfx942 and gfx950. The image's rocjitsu also has gfx1250, gfx1201 and gfx1100 configs, but
+tritonBLAS's selector only has matrix-instruction settings for gfx90a, gfx942 and gfx950, and the
+pinned rocm-origami (0.0.3) doesn't recognize gfx1250.
 
 ## Notes
 
 - The image pins `triton==3.6.0`: PyPI triton 3.8.0 hangs loading `libtriton` under the emulator.
-- `docker/rocjitsu/Dockerfile` pins origami to the commit in `setup.py`; keep them in sync.
+- `docker/rocjitsu/Dockerfile` installs rocm-origami from PyPI at `ROCM_ORIGAMI_VERSION`; keep it in
+  sync with the pin in `pyproject.toml`.

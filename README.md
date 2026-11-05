@@ -24,7 +24,13 @@ Because there is now no need for autotuning or heuristcis, we now produce a libr
 
 ## Getting Started
 
-tritonBLAS currently requires a dependency on a few C++ files from hipBLASLt, which it will automatically fetch. Run the following to setup a docker container with `rocm/pytorch:latest-release` and a fresh `triton` install:
+tritonBLAS depends on [rocm-origami](https://pypi.org/project/rocm-origami/),
+AMD's analytical GEMM model, which `pip` installs automatically. rocm-origami
+is published as source only, so installing it compiles a small C++ extension
+against your ROCm install; see the [installation
+guide](docs/getting-started/installation.md) for the build requirements. Run
+the following to setup a docker container with `rocm/pytorch:latest-release`
+and a fresh `triton` install:
 
 ```bash
 docker compose up --build -d
