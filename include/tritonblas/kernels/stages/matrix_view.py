@@ -264,7 +264,7 @@ class OutputView:
     def store(self, data, tile: Tile, mask=None, scale: ScaleView = None, bias: BiasView = None, signal: SignalView = None,
               signal_num: tl.constexpr = 0, signal_map_type: tl.constexpr = 0,
               signal_block_m: tl.constexpr = 1, signal_block_n: tl.constexpr = 1,
-              signal_launch_wave_id=0):
+              signal_launch_wave_id=0, signal_map_ptr=None):
         """
         Store data to a tile with optional epilogue operations.
 
@@ -283,6 +283,7 @@ class OutputView:
             signal_block_n: Block group N (constexpr, for signal tracking)
             signal_launch_wave_id: Runtime launch-wave iteration index for
                 persistent-kernel signaling
+            signal_map_ptr: int32 tile-to-signal table for ``signal_map_type`` 5 ("table")
 
         Example::
 
@@ -320,7 +321,7 @@ class OutputView:
             tl.debug_barrier()  # Ensure store visible before signal increment
             signal.apply(tile, self.rows, self.cols, signal_launch_wave_id,
                          signal_num, signal_map_type,
-                         signal_block_m, signal_block_n)
+                         signal_block_m, signal_block_n, signal_map_ptr)
     
     @triton.jit
     def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = None):

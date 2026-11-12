@@ -10,8 +10,8 @@ COUNTER_STRIDE = 64
 MAX_SK_TILES = 512
 
 # Map type encoding shared by the epilogue (counter) and prologue (wait) sync.
-# 0=identity (one per tile), 1=row, 2=col, 3=block, 4=launch_wave
-MAP_TYPE_ENCODING = {"identity": 0, "row": 1, "col": 2, "block": 3, "launch_wave": 4}
+# 0=identity (one per tile), 1=row, 2=col, 3=block, 4=launch_wave, 5=table (epilogue only)
+MAP_TYPE_ENCODING = {"identity": 0, "row": 1, "col": 2, "block": 3, "launch_wave": 4, "table": 5}
 
 
 class MatmulConfig:
@@ -189,6 +189,8 @@ class _TileMapMixin:
             return num_tiles_m * num_tiles_n
         if self.map_type == "launch_wave":
             return (num_tiles_m * num_tiles_n + self.block_group_m - 1) // self.block_group_m
+        if self.map_type == "table":
+            return self._table_num_slots
         raise ValueError(f"Unknown map_type: {self.map_type}")
 
 
@@ -211,10 +213,19 @@ class EpilogueConfig(_TileMapMixin):
                         - ``"col"``: all tiles in the same N-column share a counter
                         - ``"block"``: tiles in spatial groups share a counter
                         - ``"launch_wave"``: counter id = persistent launch-wave iteration
+                        - ``"table"``: counter offset = ``tile_to_slot[tile]``, an arbitrary mapping
                         - ``"identity"``: one counter per tile
         block_group_m:  ``"block"``: tiles per group in M. ``"launch_wave"``: hardware
                         wave size (active CUs), used to size the launch-wave counters.
         block_group_n:  ``"block"``: tiles per group in N.
+        tile_to_slot:   ``"table"`` only: one non-negative entry per output tile, indexed by the
+                        row-major linear tile id ``pid_m * num_tiles_n + pid_n``, giving the
+                        element offset into ``counter_buffer`` that tile increments. A host
+                        sequence or tensor; it is copied to the buffer's device at construction
+                        (and then readable as an ``int32`` device tensor). Offsets are element
+                        offsets rather than dense ids, so strided or per-rank-based layouts are
+                        expressed in the table itself. ``tritonblas.schedule(...)``'s
+                        ``signal_of_tile`` is a valid table.
 
     Example:
         >>> counters = torch.zeros(num_tiles_m, device="cuda", dtype=torch.int32)
@@ -226,10 +237,28 @@ class EpilogueConfig(_TileMapMixin):
     map_type: str = "identity"
     block_group_m: int = 1
     block_group_n: int = 1
+    tile_to_slot: Optional[Any] = None
 
     def __post_init__(self):
         _validate_sync_buffer(self.counter_buffer, "counter_buffer")
         self._validate_mapping()
+        self._table_num_slots = 0
+        if self.map_type != "table":
+            if self.tile_to_slot is not None:
+                raise ValueError("tile_to_slot is only used with map_type 'table'")
+            return
+        if self.tile_to_slot is None:
+            raise ValueError("map_type 'table' requires tile_to_slot")
+        # Validated on the host once, so that launches never have to read the table back.
+        table = torch.as_tensor(self.tile_to_slot, device="cpu")
+        if table.ndim != 1 or table.numel() == 0:
+            raise ValueError(f"tile_to_slot must be a non-empty 1D sequence, got shape {tuple(table.shape)}")
+        if table.is_floating_point() or table.is_complex() or table.dtype == torch.bool:
+            raise TypeError(f"tile_to_slot must hold integers, got {table.dtype}")
+        if int(table.min()) < 0 or int(table.max()) > torch.iinfo(torch.int32).max - 1:
+            raise ValueError("tile_to_slot entries must be non-negative int32 offsets")
+        self._table_num_slots = int(table.max()) + 1
+        self.tile_to_slot = table.to(device=self.counter_buffer.device, dtype=torch.int32).contiguous()
 
     @property
     def num_counters(self) -> int:
@@ -242,11 +271,12 @@ class EpilogueConfig(_TileMapMixin):
         """
         Validate ``cfg`` against the problem size and return the kernel arguments.
 
-        ``cfg=None`` disables the counters: no pointer and empty constexprs, so the kernel
-        defaults apply. Returns ``((counter_ptr,), constexprs)``.
+        ``cfg=None`` disables the counters: no pointers and empty constexprs, so the kernel
+        defaults apply. Returns ``((counter_ptr, counter_map_ptr), constexprs)``;
+        ``counter_map_ptr`` is the table for ``"table"`` and ``None`` otherwise.
         """
         if cfg is None:
-            return (None,), {}
+            return (None, None), {}
 
         required = cfg.required_size(M, N, block_m, block_n)
         if cfg.num_counters < required:
@@ -255,7 +285,14 @@ class EpilogueConfig(_TileMapMixin):
                 f"but requires {required} for M={M}, N={N}, "
                 f"BLOCK_M={block_m}, BLOCK_N={block_n}, map_type='{cfg.map_type}'"
             )
-        return (cfg.counter_buffer,), dict(
+        if cfg.map_type == "table":
+            num_tiles = ((M + block_m - 1) // block_m) * ((N + block_n - 1) // block_n)
+            if cfg.tile_to_slot.numel() != num_tiles:
+                raise ValueError(
+                    f"tile_to_slot has {cfg.tile_to_slot.numel()} entries, but M={M}, N={N}, "
+                    f"BLOCK_M={block_m}, BLOCK_N={block_n} has {num_tiles} output tiles"
+                )
+        return (cfg.counter_buffer, cfg.tile_to_slot), dict(
             ENABLE_COUNTER=True,
             COUNTER_NUM=cfg.num_counters,
             COUNTER_MAP_TYPE=MAP_TYPE_ENCODING[cfg.map_type],
@@ -297,9 +334,9 @@ class PrologueConfig(_TileMapMixin):
                 f"got {self.wait_buffer.device} and {self.expected_buffer.device}"
             )
         self._validate_mapping()
-        # WaitView has no launch-wave slot mapping: it would fall back to one flag per tile.
-        if self.map_type == "launch_wave":
-            raise ValueError("map_type 'launch_wave' is not supported for PrologueConfig")
+        # WaitView has no launch-wave or table slot mapping: it would fall back to one flag per tile.
+        if self.map_type in ("launch_wave", "table"):
+            raise ValueError(f"map_type '{self.map_type}' is not supported for PrologueConfig")
         # expected_inc <= 0 makes the wait target already satisfied, defeating the synchronization.
         if self.expected_inc < 1:
             raise ValueError(f"expected_inc must be a positive integer, got {self.expected_inc!r}")

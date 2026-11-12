@@ -205,7 +205,7 @@ def persistent_matmul_lt(
     else:
         grids = total_tiles
 
-        (counter_ptr,), counter_kw = EpilogueConfig.resolve_launch_args(epilogue_config, M, N, BLK_M, BLK_N)
+        (counter_ptr, counter_map_ptr), counter_kw = EpilogueConfig.resolve_launch_args(epilogue_config, M, N, BLK_M, BLK_N)
         (wait_ptr, wait_expected_ptr), wait_kw = PrologueConfig.resolve_launch_args(prologue_config, M, N, BLK_M, BLK_N)
 
         kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
@@ -216,6 +216,7 @@ def persistent_matmul_lt(
             b_scale if quantized else None,
             bias if bias is not None else None,
             counter_ptr,
+            counter_map_ptr,
             wait_ptr,
             wait_expected_ptr,
             M,
