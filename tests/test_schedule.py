@@ -19,6 +19,8 @@ import triton
 import triton.language as tl
 
 import tritonblas
+from tritonblas.kernels.stages.gemm_context import GemmContext
+from tritonblas.kernels.stages.schedule import ScheduleContext
 from tritonblas.origami import OrigamiMatmulSelector
 from tritonblas.schedule import schedule, schedule_for_problem
 
@@ -57,9 +59,6 @@ def _probe_kernel(out_m, out_n, M, N, K,
                   BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr,
                   NUM_SMS: tl.constexpr, NUM_XCDS: tl.constexpr, CHUNK_SIZE: tl.constexpr):
     """Record the tile each program would compute, via the scheduler the GEMM kernels use."""
-    from tritonblas.kernels.stages.gemm_context import GemmContext
-    from tritonblas.kernels.stages.schedule import ScheduleContext
-
     ctx = GemmContext(BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
                       NUM_SMS, NUM_XCDS, GROUP_SIZE_M, CHUNK_SIZE)
     sched = ScheduleContext(M, N, K, ctx)
@@ -90,7 +89,7 @@ def test_matches_the_device_scheduler(m, n, k):
     torch.cuda.synchronize()
 
     from_device = [int(a) * s.tiles_n + int(b) for a, b in zip(out_m.tolist(), out_n.tolist())]
-    assert from_device == s.tile_of_wg
+    assert tuple(from_device) == s.tile_of_wg
 
 
 @pytest.mark.parametrize("m, n, k", SCHEDULE_DIMS)
