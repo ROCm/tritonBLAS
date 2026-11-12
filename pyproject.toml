@@ -24,6 +24,9 @@ dependencies = [
     "llnl-hatchet",
 ]
 
+[project.optional-dependencies]
+examples = ["matplotlib"]
+
 [tool.ruff]
 line-length = 120
 exclude = ["reference"]

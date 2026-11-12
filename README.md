@@ -46,7 +46,58 @@ cd examples
 python3 example_matmul.py
 ```
 
+Run a GEMM that asynchronously wakes a waiting Triton kernel when its first output tile is ready:
+
+```bash
+pip install -e ".[examples]"
+python3 examples/example_async_tile_trigger.py
+python3 examples/example_async_tile_trigger.py --block-m 128 --block-n 128 --block-k 64
+python3 examples/example_async_tile_trigger.py --num-observers 8
+python3 examples/example_async_tile_trigger.py --signal-tiles-m 3 --signal-tiles-n 5
+python3 examples/example_async_tile_trigger.py --signal-layout dispatch --signal-tiles-m 3 --signal-tiles-n 5
+python3 examples/example_async_tile_trigger.py --signal-layout random --signal-tiles-m 3 --signal-tiles-n 5 --signal-seed 17
+```
+
+The example checks the complete GEMM against a float32 reference, verifies every value
+read by the asynchronous consumer, logs the GPU timeline, writes one CSV row per tile,
+and saves `async_tile_trigger_heatmap.png`, comparing measured gate-trigger order with
+the order published by `tritonblas.schedule`. It prints Origami's selected tile, the
+tile actually used, and the resulting output-tile grid; any omitted block dimension
+keeps Origami's selection. The plot also separates producer-side gate-release order
+from consumer-observed order; `--num-observers` controls the bounded parallel poller
+pool without risking one waiting workgroup per tile. Signal layouts may be rectangular
+blocks (including ragged edge groups), row-major chunks, chunks of the published dispatch
+order, modulo-scattered groups, or seeded random groups. Non-block layouts use
+`--signal-tiles-m × --signal-tiles-n` as their target producer count. The signal-level CSV
+compares the predicted readiness order—each signal's final producer in the published
+schedule—with its measured opening order.
+
 ## API
+
+### Tile Schedule API
+
+`tritonblas.schedule(a, b)` returns the complete static producer plan needed by a
+triggered consumer:
+
+```python
+plan = tritonblas.schedule(a, b)
+plan = plan.with_signal_layout(signal_of_tile)
+
+plan.tile_of_wg          # dispatch position -> linear output tile
+plan.tile_order          # (tile_m, tile_n) coordinates in dispatch order
+plan.signal_plan.signal_of_tile # output tile -> signal read by the GEMM epilogue
+plan.signal_plan.arms    # grouped SignalArm(signal_id, tiles, producers) entries
+plan.grid_m              # output-tile grid height
+plan.grid_n              # output-tile grid width
+```
+
+The default is one signal per output tile, so the returned plan is immediately usable.
+`with_signal_layout()` accepts any dense tile-to-signal table and derives both thresholds
+and firing order. `arming_order` and `signal_arming_order` remain convenience aliases for
+`tile_order` and `signal_plan.arms`. This is the API boundary between tritonBLAS and a triggered
+consumer: the consumer should use the plan rather than reconstructing the GEMM's permutation.
+Dynamic work-stealing and Stream-K calls return `None` because they have no static tile ownership
+to publish.
 
 ### Peak Performance API
 

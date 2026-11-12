@@ -78,7 +78,42 @@ def persistent_matmul_lt(
     work_stealing: bool = False,
     epilogue_config: Optional[EpilogueConfig] = None,
     prologue_config: Optional[PrologueConfig] = None,
+    gates: Optional[torch.Tensor] = None,
+    signal_of_tile: Optional[torch.Tensor] = None,
+    signal_times: Optional[torch.Tensor] = None,
+    gate_stride: int = 1,
+    gate_base: int = 0,
 ):
+    """
+    ``gates`` / ``signal_of_tile`` turn on per-tile signalling (see ``persistent_matmul``).
+
+    ``gate_stride`` is the distance in *elements* between consecutive gates and ``gate_base`` this
+    rank's offset into the array, so the epilogue is not tied to one transport's gate layout: unit
+    stride for plain counters, 8 for a 64-byte struct whose first int64 is the ready word. A strided
+    tensor view cannot substitute -- Triton indexes the raw pointer and ignores torch strides.
+
+    The epilogue touches element ``gate_base + signal_of_tile[t] * gate_stride``, so ``gates`` must
+    hold at least ``gate_base + (max signal + 1) * gate_stride`` elements. That bound is not checked
+    on the call path because reading ``signal_of_tile`` would sync the device mid-measurement.
+
+    ``signal_of_tile`` is an int32 tensor indexed by linear tile id giving the gate each tile
+    reports to; ``gates`` is the counter array the epilogue atomically increments. Get the
+    former from a signal layout over ``tritonblas.schedule(a, b)``. Both must be supplied
+    together, and the output must be visible to whatever is waiting -- for an off-device
+    consumer that means a write-through store.
+    """
+    assert (gates is None) == (signal_of_tile is None), \
+        "gates and signal_of_tile must be supplied together"
+    assert signal_times is None or gates is not None, \
+        "signal_times requires tile signalling"
+    if gates is not None:
+        # Cheap checks only: the caller sizes `gates`, and reading signal_of_tile here to bound the
+        # index would sync the device inside the region whose overlap we are trying to measure.
+        assert gates.is_contiguous() and signal_of_tile.is_contiguous(), \
+            "gates and signal_of_tile must be contiguous: the epilogue indexes the raw pointer, " \
+            "so a strided view silently signals the wrong words"
+        assert gate_stride >= 1 and gate_base >= 0, \
+            f"gate_stride={gate_stride} must be >= 1 and gate_base={gate_base} >= 0"
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -116,6 +151,8 @@ def persistent_matmul_lt(
             "epilogue_config and prologue_config are only supported on the persistent_matmul path "
             "(work_stealing=False)"
         )
+    if work_stealing and gates is not None:
+        raise ValueError("tile signalling requires the static persistent kernel")
 
     if work_stealing and config is not None:
         grids = selector._hardware.N_CU
@@ -205,6 +242,13 @@ def persistent_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            gates=gates,
+            signal_of_tile=signal_of_tile,
+            signal_times=signal_times,
+            SIGNAL=gates is not None,
+            TRACE_SIGNAL=signal_times is not None,
+            GATE_STRIDE=gate_stride,
+            GATE_BASE=gate_base,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
@@ -387,8 +431,28 @@ def matmul_lt(
     enable_streamk=False, work_stealing=False,
     epilogue_config: Optional[EpilogueConfig] = None,
     prologue_config: Optional[PrologueConfig] = None,
+    gates: Optional[torch.Tensor] = None,
+    signal_of_tile: Optional[torch.Tensor] = None,
+    signal_times: Optional[torch.Tensor] = None,
+    gate_stride: int = 1,
+    gate_base: int = 0,
 ):
+    """
+    Run a configured matmul, optionally incrementing a gate after each output tile.
+
+    ``signal_of_tile[t]`` selects the gate incremented when linear tile ``t`` is
+    complete. Signalling is currently supported only by the static persistent
+    kernel, because Stream-K and work stealing have no static tile owner.
+    ``signal_times``, when supplied, records the device timestamp immediately
+    after each tile's gate release.
+
+    ``gate_stride`` and ``gate_base`` place the gate words for transports that do not lay their
+    gates out as a dense unit-stride array; see ``persistent_matmul_lt`` for the addressing rule.
+    """
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    if gates is not None or signal_of_tile is not None:
+        if enable_streamk or work_stealing:
+            raise ValueError("tile signalling requires the static persistent kernel")
 
     if enable_streamk:
         if epilogue_config is not None or prologue_config is not None:
@@ -401,6 +465,8 @@ def matmul_lt(
         return persistent_matmul_lt(
             a, b, c, selector, config, work_stealing=work_stealing,
             epilogue_config=epilogue_config, prologue_config=prologue_config,
+            gates=gates, signal_of_tile=signal_of_tile, signal_times=signal_times,
+            gate_stride=gate_stride, gate_base=gate_base,
         )
 
 def matmul_a8w8_lt(

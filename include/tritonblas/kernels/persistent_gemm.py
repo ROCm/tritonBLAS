@@ -11,6 +11,7 @@ information, enabling clean separation between pointer computation and GEMM logi
 import triton
 import triton.language as tl
 import torch
+from triton.language.extra.hip import memrealtime
 
 from tritonblas.kernels.stages import (
     ScheduleContext,
@@ -70,6 +71,26 @@ def persistent_matmul(
     WAIT_EXPECTED_INC: tl.constexpr = 1,
     QUANTIZED: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = True,
+    # ─── Tile signalling (optional) ──────────────────────────────────────────
+    # Advertise each output tile as it is finished, so a dependent consumer -- a
+    # triggered collective with pre-armed chains, typically -- can start moving
+    # it without waiting for the whole GEMM. Off by default and compiled out
+    # entirely when SIGNAL is False, so an ordinary matmul is unchanged.
+    gates=None,
+    signal_of_tile=None,
+    signal_times=None,
+    SIGNAL: tl.constexpr = False,
+    TRACE_SIGNAL: tl.constexpr = False,
+    # Gate array geometry, so the epilogue is not tied to one transport's layout. Supported layouts
+    # include plain int32 counters at unit stride and 64-byte gate structs whose ready word is the
+    # first int64, i.e. a stride of 8 int64 elements. A strided torch view cannot express this because
+    # Triton indexes the raw pointer and ignores torch strides, so the stride has to be a kernel
+    # parameter. GATE_BASE is this rank's offset into a gate array that holds every rank's signals end
+    # to end -- without it a multi-rank caller signals its neighbour's gates and its own never fill,
+    # which presents as a hang in the collective rather than a wrong answer.
+    GATE_STRIDE: tl.constexpr = 1,
+    GATE_BASE: tl.constexpr = 0,
+    SIGNAL_WRITE_THROUGH: tl.constexpr = True,
 ):
     """
     Persistent GEMM kernel using GemmContext aggregate.
@@ -162,3 +183,42 @@ def persistent_matmul(
                      signal_num=COUNTER_NUM, signal_map_type=COUNTER_MAP_TYPE,
                      signal_block_m=COUNTER_BLOCK_GROUP_M, signal_block_n=COUNTER_BLOCK_GROUP_N,
                      signal_launch_wave_id=launch_program_id)
+
+        # ════════════════════════════════════════════════════════════════════
+        # SIGNAL: advertise this tile to a waiting consumer
+        # ════════════════════════════════════════════════════════════════════
+        # Three lines, each load-bearing:
+        #
+        # * The store above must have reached a coherence point the consumer can
+        #   see. A copy engine sits on the IOD, past this XCD's L2, so a tile
+        #   left dirty in L2 is invisible to it and an open gate lets it copy
+        #   stale bytes -- a fast wrong answer rather than a hang. Callers that
+        #   signal to an off-device consumer must pass a write-through output
+        #   view; SIGNAL_WRITE_THROUGH records that requirement.
+        # * `tl.debug_barrier()` so every lane's stores have retired before any
+        #   lane advertises the tile.
+        # * `sem="release", scope="sys"`: device scope is not enough when the
+        #   consumer is not on the device.
+        #
+        # The gate id comes from a table indexed by linear tile id rather than
+        # from a closed-form map. A closed form needs a new kernel branch per
+        # grouping and the set of useful groupings is open; a table supports any
+        # of them with no kernel change, and the load is issued once per tile
+        # against an L2-resident array.
+        #
+        # `atomic_add` of 1, not a store: a tile may be one of several producers
+        # of a coarser gate, and the consumer's poll threshold is the join. The
+        # producers then need no barrier among themselves and may finish in any
+        # order, which is what lets the GEMM keep its own tile schedule.
+        if SIGNAL:
+            tl.debug_barrier()
+            num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+            linear_tile = out_tile.pid_m * num_pid_n + out_tile.pid_n
+            gate = tl.load(signal_of_tile + linear_tile)
+            tl.atomic_add(gates + GATE_BASE + gate * GATE_STRIDE, 1,
+                          sem="release", scope="sys")
+            if TRACE_SIGNAL:
+                tl.debug_barrier()
+                stamp = memrealtime()
+                tl.debug_barrier()
+                tl.store(signal_times + linear_tile, stamp)
