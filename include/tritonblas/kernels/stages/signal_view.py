@@ -28,8 +28,22 @@ Example
 import triton
 import triton.language as tl
 from triton.language.core import _aggregate
+from triton.language.target_info import is_hip_cdna3, is_hip_cdna4
 
 from .tile import Tile
+
+
+@triton.jit
+def wait_stores():
+    """
+    Wait until this wave's stores are done (``s_waitcnt vmcnt(0)``).
+
+    A CTA barrier only orders every wave's stores before a signal if each wave waits for its own
+    first. ``tl.debug_barrier()`` does that itself only on Triton builds with
+    triton-lang/triton#9025; elsewhere it is a bare ``s_barrier``.
+    """
+    if is_hip_cdna3() or is_hip_cdna4():
+        tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
 
 
 @_aggregate

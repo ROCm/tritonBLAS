@@ -37,7 +37,7 @@ import triton.language as tl
 from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
-from .signal_view import SignalView
+from .signal_view import SignalView, wait_stores
 
 
 @aggregate
@@ -317,7 +317,9 @@ class OutputView:
 
         # Update counter after store completes
         if signal is not None:
-            tl.debug_barrier()  # Ensure store visible before signal increment
+            # Every wave's stores must be done before any thread signals
+            wait_stores()
+            tl.debug_barrier()
             signal.apply(tile, self.rows, self.cols, signal_launch_wave_id,
                          signal_num, signal_map_type,
                          signal_block_m, signal_block_n)
