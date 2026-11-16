@@ -197,3 +197,91 @@ class TestInvalidConfigs:
             EpilogueConfig(torch.zeros(2, 2, device="cuda", dtype=torch.int32))
         with pytest.raises(ValueError, match="CUDA device"):
             PrologueConfig(_i32(4), torch.zeros(4, dtype=torch.int32, device="cpu"))
+
+
+# ---------------------------------------------------------------------------
+# map_type="table": an arbitrary tile -> counter-offset mapping
+# ---------------------------------------------------------------------------
+
+
+def _count_by_slot(table, size):
+    expected = [0] * size
+    for slot in table:
+        expected[slot] += 1
+    return expected
+
+
+@pytest.mark.parametrize(
+    "make_table",
+    [
+        lambda n: [(t * 7) % 5 for t in range(n)],  # scattered, many tiles share a counter
+        lambda n: [2 * (t % 3) + 1 for t in range(n)],  # strided layout: only odd offsets are touched
+        lambda n: [n - 1 - t for t in range(n)],  # reversed permutation
+    ],
+    ids=["scattered", "strided", "reversed"],
+)
+def test_epilogue_table_counter_values(problem, make_table):
+    a, b, ref, selector, tm, tn = problem
+    table = make_table(tm * tn)
+    size = max(table) + 1
+    cfg = EpilogueConfig(_i32(size), "table", tile_to_slot=table)
+    assert cfg.required_size(M, N, selector.block_m, selector.block_n) == size
+    c = torch.empty(M, N, device="cuda", dtype=DTYPE)
+
+    persistent_matmul_lt(a, b, c, selector, epilogue_config=cfg)
+    torch.cuda.synchronize()
+
+    assert cfg.counter_buffer.tolist() == _count_by_slot(table, size)
+    torch.testing.assert_close(c, ref, atol=1e-1, rtol=1e-2)
+
+
+def test_epilogue_table_matches_launch_wave(problem):
+    """The table built from the published schedule opens the same gates as the in-kernel launch-wave map."""
+    a, b, _, selector, tm, tn = problem
+    schedule = tritonblas.schedule_for_selector(M, N, selector)
+    num_cus = 2 * schedule.num_xcds  # a multiple of the XCD count, so waves are plain dispatch chunks
+    table = [wave - 1 for wave in schedule.ready_wave_of_tile(num_cus)]
+    size = max(table) + 1
+
+    by_table = EpilogueConfig(_i32(size), "table", tile_to_slot=table)
+    by_wave = EpilogueConfig(_i32(size), "launch_wave", block_group_m=num_cus)
+    assert by_wave.required_size(M, N, selector.block_m, selector.block_n) == size
+    c = torch.empty(M, N, device="cuda", dtype=DTYPE)
+
+    persistent_matmul_lt(a, b, c, selector, epilogue_config=by_table)
+    persistent_matmul_lt(a, b, c, selector, epilogue_config=by_wave)
+    torch.cuda.synchronize()
+
+    assert by_table.counter_buffer.tolist() == by_wave.counter_buffer.tolist()
+    assert by_table.counter_buffer.tolist() == _count_by_slot(table, size)
+
+
+def test_epilogue_table_validation():
+    counters = _i32(8)
+    with pytest.raises(ValueError, match="requires tile_to_slot"):
+        EpilogueConfig(counters, "table")
+    with pytest.raises(ValueError, match="only used with map_type 'table'"):
+        EpilogueConfig(counters, "row", tile_to_slot=[0, 1])
+    with pytest.raises(ValueError, match="non-negative"):
+        EpilogueConfig(counters, "table", tile_to_slot=[0, -1])
+    with pytest.raises(ValueError, match="1D"):
+        EpilogueConfig(counters, "table", tile_to_slot=[[0, 1], [2, 3]])
+    with pytest.raises(TypeError, match="integers"):
+        EpilogueConfig(counters, "table", tile_to_slot=[0.0, 1.0])
+    with pytest.raises(ValueError, match="not supported for PrologueConfig"):
+        PrologueConfig(_i32(4), _i32(4), map_type="table")
+
+
+def test_epilogue_table_sizes_checked_at_launch(problem):
+    a, b, _, selector, tm, tn = problem
+    c = torch.empty(M, N, device="cuda", dtype=DTYPE)
+
+    # The counter buffer must hold the largest offset.
+    small = EpilogueConfig(_i32(3), "table", tile_to_slot=list(range(tm * tn)))
+    with pytest.raises(ValueError, match="counter_buffer too small"):
+        persistent_matmul_lt(a, b, c, selector, epilogue_config=small)
+
+    # And the table must cover every output tile.
+    short = EpilogueConfig(_i32(tm * tn), "table", tile_to_slot=list(range(tm * tn - 1)))
+    with pytest.raises(ValueError, match="output tiles"):
+        persistent_matmul_lt(a, b, c, selector, epilogue_config=short)

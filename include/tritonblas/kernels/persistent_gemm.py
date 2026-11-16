@@ -34,6 +34,7 @@ def persistent_matmul(
     B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
     counter_ptr,  # Optional: int32[num_signals] for tile completion signaling
+    counter_map_ptr,  # Optional: int32[num_tiles] tile -> counter offset, for COUNTER_MAP_TYPE=5 ("table")
     wait_ptr,     # Optional: int32[num_waits] for producer-consumer readiness
     wait_expected_ptr,  # Optional: int32[num_waits] runtime target values
     M,
@@ -161,4 +162,5 @@ def persistent_matmul(
         tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view, signal=signal_view,
                      signal_num=COUNTER_NUM, signal_map_type=COUNTER_MAP_TYPE,
                      signal_block_m=COUNTER_BLOCK_GROUP_M, signal_block_n=COUNTER_BLOCK_GROUP_N,
-                     signal_launch_wave_id=launch_program_id)
+                     signal_launch_wave_id=launch_program_id,
+                     signal_map_ptr=counter_map_ptr)
