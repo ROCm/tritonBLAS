@@ -76,14 +76,17 @@ class Tile:
         return rm, rn
     
     @triton.jit
-    def layout(self, M, N):
+    def layout(self, M, N, wrap_m: tl.constexpr = True, wrap_n: tl.constexpr = True):
         """
         Compute memory layout with bounds checking.
-        
+
         Args:
             M: Total rows
             N: Total columns
-        
+            wrap_m, wrap_n: Wrap indices modulo M / N. Skip it for a dimension whose
+                indices are known in-bounds or always masked (e.g. the GEMM K dimension):
+                the modulo by a runtime size is a per-element integer division.
+
         Returns:
             rm, rn, mask: Row indices, column indices, bounds mask
         
@@ -107,8 +110,12 @@ class Tile:
         # ═══════════════════════════════════════════════════════════════════
         # The modulo + max_contiguous optimization helps with memory access
         # patterns, but must come AFTER mask computation.
-        rm = tl.max_contiguous(tl.multiple_of(rm % M, self.block_m), self.block_m)
-        rn = tl.max_contiguous(tl.multiple_of(rn % N, self.block_n), self.block_n)
+        if wrap_m:
+            rm = rm % M
+        if wrap_n:
+            rn = rn % N
+        rm = tl.max_contiguous(tl.multiple_of(rm, self.block_m), self.block_m)
+        rn = tl.max_contiguous(tl.multiple_of(rn, self.block_n), self.block_n)
         return rm, rn, mask
     
     @triton.jit
