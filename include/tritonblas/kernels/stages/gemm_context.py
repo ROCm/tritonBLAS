@@ -200,8 +200,11 @@ class GemmContext:
         # ═══════════════════════════════════════════════════════════════════
         # The InputView's tile_ptrs method uses its stored stride_row and
         # stride_col to compute correct pointers for any layout.
-        a_ptrs, a_mask = A.tile_ptrs(a_tile)
-        b_ptrs, b_mask = B.tile_ptrs(b_tile)
+        # K indices are never wrapped: they are in bounds in the main loop and
+        # masked in the boundary iteration. Wrapping them cost a per-element
+        # integer modulo by runtime K every iteration (~20% of K-loop instructions).
+        a_ptrs, a_mask = A.tile_ptrs(a_tile, wrap_cols=False)
+        b_ptrs, b_mask = B.tile_ptrs(b_tile, wrap_rows=False)
         
         # ═══════════════════════════════════════════════════════════════════
         # LOAD TILES

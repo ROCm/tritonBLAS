@@ -72,26 +72,27 @@ class InputView:
         self.stride_col = stride_col
     
     @triton.jit
-    def tile_ptrs(self, tile: Tile):
+    def tile_ptrs(self, tile: Tile, wrap_rows: tl.constexpr = True, wrap_cols: tl.constexpr = True):
         """
         Compute pointer array and bounds mask for a tile.
-        
+
         Uses the general formula: ptr[i,j] = base + i*stride_row + j*stride_col
         This works for any memory layout (row-major, col-major, or other).
-        
+
         Args:
             tile: Tile object with (pid_row, pid_col, block_row, block_col)
-            
+            wrap_rows, wrap_cols: Wrap row / column indices into bounds (see ``Tile.layout``)
+
         Returns:
             ptrs: 2D pointer array [BLOCK_ROW, BLOCK_COL]
             mask: 2D boolean mask for boundary handling
         """
         tl.assume(self.stride_row > 0)
         tl.assume(self.stride_col > 0)
-        r_row, r_col, mask = tile.layout(self.rows, self.cols)
+        r_row, r_col, mask = tile.layout(self.rows, self.cols, wrap_rows, wrap_cols)
         ptrs = self.ptr + r_row[:, None] * self.stride_row + r_col[None, :] * self.stride_col
         return ptrs, mask
-    
+
     @triton.jit
     def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = None):
         """
